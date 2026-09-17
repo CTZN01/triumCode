@@ -1,0 +1,29 @@
+{
+  "name": "triumph_code",
+  "version": "1.0.0",
+  "description": "A coding agent powered by Anthropic SDK with file tools",
+  "type": "module",
+  "main": "./dist/agent.js",
+  "bin": {
+    "triumph": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/cli.js",
+    "dev": "tsc && node dist/cli.js"
+  },
+  "keywords": [
+    "agent",
+    "coding-agent",
+    "anthropic",
+    "llm"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.52.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.3",
+    "typescript": "^5.8.3"
+  }
+}
