@@ -185,6 +185,7 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
         apiKey: config.apiKey,
         apiBase: config.apiBase,
         thinking: config.thinking,
+        planMode: flags.permissionMode === "plan",
     });
 
     // Wire up auto-save: after each chat(), persist the session.
@@ -278,8 +279,8 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
             }
 
             if (input === "/plan") {
-                // Future: toggle plan mode.
-                printInfo("/plan toggle not yet implemented — coming soon");
+                agent.togglePlanMode();
+                printInfo(`Plan mode: ${agent.planMode ? "ON" : "OFF"}`);
                 askQuestion();
                 return;
             }

@@ -136,6 +136,27 @@ When given a task, do exactly what was asked — no more, no less.
 - Do not create files unless necessary. Prefer editing existing files.
 - When fixing a bug, identify the root cause before changing code.
 
+# Planning
+
+Before making changes to more than one file, or when the task has multiple steps, outline your approach first:
+
+1. Read the relevant files to understand the current state.
+2. Present a concise plan: what files to change, what the changes are, and why.
+3. Wait for the user to approve, reject, or modify the plan.
+4. Execute only after approval.
+
+Skip the plan when the task is trivial — a single edit, a one-line fix, or a question you can answer from what you have already read.
+
+# Asking questions
+
+When you are unsure, ask. Do not guess and proceed.
+
+- If the task is ambiguous or admits multiple valid approaches, ask the user which one they prefer before starting.
+- If you discover something unexpected while reading code (e.g. the architecture differs from what you assumed), pause and confirm your understanding before continuing.
+- If a decision has lasting consequences (naming, API shape, which library to use), ask before committing to it.
+
+Frame questions concisely — a short sentence with 2-3 options is better than a paragraph of analysis. The user is a developer; they can ask for details if they want them.
+
 Anti-patterns to avoid:
 - Do NOT expand scope. Fixing a bug does not license refactoring surrounding code. Three similar lines of code are better than a premature abstraction.
 - Do NOT add defensive code for scenarios that cannot happen. If a function only receives validated input, do not wrap it in try-catch or add null checks "just in case."
@@ -178,6 +199,7 @@ Use the dedicated tools — they have structured I/O, fine-grained permissions, 
 
 - Lead with the answer. Explain only when the user asks or when the explanation prevents a mistake.
 - Keep responses short. The user is a developer — do not narrate what you are about to do; just do it.
+- Planning is not narration. When the task is non-trivial, present the plan and wait — that is the work, not preamble.
 - Reference code as file_path:line_number (e.g. \`src/agent.ts:42\`).
 - Do not apologize for things that are not your fault.
 - Use the user's language. If they write in Chinese, respond in Chinese.
@@ -189,11 +211,49 @@ Use the dedicated tools — they have structured I/O, fine-grained permissions, 
 - When multiple small changes are needed in the same file, batch them into one edit_file call rather than making several sequential edits.
 - When the task is simple (one file, one edit), respond with just the tool call and a one-line confirmation. No preamble.`;
 
+const PLAN_MODE = `
+
+# Plan mode (strict)
+
+You are in strict plan mode. ALWAYS present a plan before making any changes, even for trivial tasks.
+During planning you may read files and search code, but do NOT edit, write, or run commands that modify files.
+Execute only after the user explicitly approves the plan.`;
+
 // Static block: persona + tool usage guidance. Constant within a session,
 // cacheable across turns via prompt caching.
-export function buildStaticSystemPrompt(): string {
+export function buildStaticSystemPrompt(planMode = false): string {
     const toolBlock = buildToolPromptBlock();
-    return toolBlock ? `${PERSONA}\n\n${toolBlock}` : PERSONA;
+    const persona = planMode ? PERSONA + PLAN_MODE : PERSONA;
+    return toolBlock ? `${persona}\n\n${toolBlock}` : persona;
+}
+
+// Probe common development tools on Windows to give the model actionable
+// context about .cmd shims and available runtimes. Runs once per turn but
+// commands are fast (< 50ms) and results are deterministic.
+function probeWindowsTools(): string {
+    if (process.platform !== "win32") return "";
+
+    const probes: string[] = [];
+    const opts = { encoding: "utf-8" as const, timeout: 3000, stdio: ["ignore", "pipe", "ignore"] as ("ignore" | "pipe")[] };
+
+    try {
+        const nodeVersion = execSync("node -v", opts).trim();
+        probes.push(`node: ${nodeVersion}`);
+    } catch {
+        probes.push("node: not found");
+    }
+
+    try {
+        const npmPaths = execSync("where npm", opts).trim().split(/\r?\n/);
+        const npmCmd = npmPaths.find(l => l.trim().toLowerCase().endsWith(".cmd"));
+        if (npmCmd) probes.push(`npm: ${npmCmd.trim()} (run_command auto-resolves this .cmd shim)`);
+    } catch {
+        probes.push("npm: not found");
+    }
+
+    if (probes.length === 0) return "";
+
+    return `\nKnown tool paths:\n${probes.map(p => `- ${p}`).join("\n")}`;
 }
 
 // Dynamic block: environment, git, CLAUDE.md, deferred tools.
@@ -214,6 +274,7 @@ export function buildDynamicSystemContext(): string {
         `Working directory: ${process.cwd()}`,
         `Platform: ${platform}`,
         `Shell: ${shell}`,
+        probeWindowsTools(),
         getGitContext(),
         deferredLine,
         loadClaudeMd(),

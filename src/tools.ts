@@ -644,86 +644,162 @@ function noExecutable(command: string, args: string[]): string {
     return [`Error: no such executable: ${command}`, ...hints].join("\n");
 }
 
-function runCommandImpl(input: { command: string; args?: string[]; cwd?: string }): Promise<string> {
-    const args = Array.isArray(input.args) ? input.args.map((a) => String(a)) : [];
+// ─── Windows .cmd shim resolver ───────────────────────────────
+// On Windows, npm/npx/yarn/tsc are .cmd batch files that can't be executed
+// by spawn(shell:false). When a command fails with ENOENT/EINVAL on Windows,
+// this function finds the .cmd shim, parses it to extract the underlying
+// `node <script>.js` invocation, and returns the resolved command.
 
-    return new Promise<string>((resolve) => {
-        let child: ChildProcess;
-        try {
-            child = spawn(input.command, args, {
-                cwd: input.cwd || process.cwd(),
-                shell: false,
-                detached: process.platform !== "win32",
-                stdio: ["ignore", "pipe", "pipe"],
-            });
-        } catch (e: any) {
-            resolve(`Error running ${input.command}: ${e.message}`);
-            return;
+function resolveWindowsShim(command: string): { cmd: string; script: string } | null {
+    if (process.platform !== "win32") return null;
+
+    // Locate the .cmd shim via PATH.
+    let cmdPath: string;
+    try {
+        const output = execFileSync("where", [command], {
+            encoding: "utf-8",
+            timeout: 5000,
+            stdio: ["ignore", "pipe", "ignore"],
+        });
+        cmdPath = output.split(/\r?\n/).find(l => l.trim().toLowerCase().endsWith(".cmd"))?.trim() ?? "";
+    } catch {
+        return null;
+    }
+    if (!cmdPath) return null;
+
+    // Read the .cmd file and find the JS script it ultimately runs.
+    // Standard npm/npx .cmd shims set a *CLI_JS variable via
+    //   SET "NPM_CLI_JS=%~dp0\node_modules\npm\bin\npm-cli.js"
+    // then invoke it with  "%<VAR>" %*
+    // Resolve the variable to its %~dp0-relative path.
+    try {
+        const content = readFileSync(cmdPath, "utf-8");
+        const shimDir = dirname(cmdPath).replace(/\\/g, "/");
+
+        // Look for SET "*CLI_JS=%~dp0\<path>.js" (the script variable).
+        const varMatch = /SET\s+"(\w*CLI_JS)=(%\~dp0\\[^"]+\.js)"/im.exec(content);
+        if (varMatch) {
+            const jsFile = varMatch[2].replace(/^%\~dp0\\/i, shimDir + "/").replace(/\\/g, "/");
+            if (existsSync(jsFile)) return { cmd: "node", script: jsFile };
         }
 
-        const started = Date.now();
-        const outDecoder = new StringDecoder("utf-8");
-        const errDecoder = new StringDecoder("utf-8");
-        let out = "";
-        let err = "";
-        let outBytes = 0;
-        let errBytes = 0;
-        let clippedOut = false;
-        let clippedErr = false;
-        let timedOut = false;
-        let settled = false;
+        // Fallback: look for the direct final invocation line.
+        const directMatch = /(?:^|\n)\s*"(?:%\~dp0\\)?node\.exe"\s+"(%\~dp0\\[^"]+\.js)"\s+%\*/im.exec(content);
+        if (directMatch) {
+            const jsFile = directMatch[1].replace(/^%\~dp0\\/i, shimDir + "/").replace(/\\/g, "/");
+            if (existsSync(jsFile)) return { cmd: "node", script: jsFile };
+        }
+    } catch {
+        // Fall through to the normal error path.
+    }
+    return null;
+}
 
-        const timer = setTimeout(() => { timedOut = true; killTree(child); }, RUN_TIMEOUT_MS);
+// Spawn a process and capture its output. Used by runCommandImpl — called
+// once for the original command, and again if a Windows .cmd shim is resolved.
+function spawnAndCapture(
+    command: string,
+    args: string[],
+    cwd: string,
+    onFinish: (result: string) => void,
+): void {
+    let child: ChildProcess;
+    try {
+        child = spawn(command, args, {
+            cwd,
+            shell: false,
+            detached: process.platform !== "win32",
+            stdio: ["ignore", "pipe", "pipe"],
+        });
+    } catch (e: any) {
+        onFinish(`Error running ${command}: ${e.message}`);
+        return;
+    }
 
+    const started = Date.now();
+    const outDecoder = new StringDecoder("utf-8");
+    const errDecoder = new StringDecoder("utf-8");
+    let out = "";
+    let err = "";
+    let outBytes = 0;
+    let errBytes = 0;
+    let clippedOut = false;
+    let clippedErr = false;
+    let timedOut = false;
+    let settled = false;
+
+    const timer = setTimeout(() => { timedOut = true; killTree(child); }, RUN_TIMEOUT_MS);
+
+    const finish = (result: string): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        onFinish(result);
+    };
+
+    const capture = (chunk: Buffer, decoder: StringDecoder, stream: "out" | "err"): void => {
+        const text = decoder.write(chunk);
+        if (stream === "out") {
+            outBytes += chunk.length;
+            if (out.length < RUN_MAX_CHARS) out += text; else clippedOut = true;
+        } else {
+            errBytes += chunk.length;
+            if (err.length < RUN_MAX_CHARS) err += text; else clippedErr = true;
+        }
+    };
+
+    child.stdout?.on("data", (c: Buffer) => capture(c, outDecoder, "out"));
+    child.stderr?.on("data", (c: Buffer) => capture(c, errDecoder, "err"));
+
+    child.on("error", (e: any) => {
+        if (e.code === "ENOENT" || (process.platform === "win32" && e.code === "EINVAL")) {
+            finish(noExecutable(command, args));
+            return;
+        }
+        finish(`Error running ${command}: ${e.message}`);
+    });
+
+    child.on("close", (code, signal) => {
+        out = (out + outDecoder.end()).slice(0, RUN_MAX_CHARS);
+        err = (err + errDecoder.end()).slice(0, RUN_MAX_CHARS);
+
+        const status = timedOut
+            ? `timed out after ${RUN_TIMEOUT_MS / 1000}s — killed`
+            : signal !== null ? `killed by ${signal}` : `exit ${code}`;
+
+        const body: string[] = [];
+        if (out.trim() !== "") body.push(out.trimEnd());
+        if (err.trim() !== "") body.push(`stderr:\n${err.trimEnd()}`);
+        if (body.length === 0) body.push("(no output)");
+
+        const footer: string[] = [];
+        if (clippedOut) footer.push(`stdout truncated at ${RUN_MAX_CHARS} chars (${outBytes} bytes total)`);
+        if (clippedErr) footer.push(`stderr truncated at ${RUN_MAX_CHARS} chars (${errBytes} bytes total)`);
+
+        const text = `${status} · ${Date.now() - started}ms\n${body.join("\n\n")}`;
+        finish(footer.length === 0 ? text : `${text}\n\n${footer.map((l) => `(${l})`).join("\n")}`);
+    });
+}
+
+function runCommandImpl(input: { command: string; args?: string[]; cwd?: string }): Promise<string> {
+    const args = Array.isArray(input.args) ? input.args.map((a) => String(a)) : [];
+    const cwd = input.cwd || process.cwd();
+
+    return new Promise<string>((resolve) => {
+        // Wrap resolve to intercept ENOENT/EINVAL on Windows and auto-resolve
+        // .cmd shims (npm, npx, yarn, tsc, …) to their underlying node command.
         const finish = (result: string): void => {
-            if (settled) return;
-            settled = true;
-            clearTimeout(timer);
+            if (process.platform === "win32" && result.startsWith("Error: no such executable:")) {
+                const shim = resolveWindowsShim(input.command);
+                if (shim) {
+                    spawnAndCapture(shim.cmd, [shim.script, ...args], cwd, resolve);
+                    return;
+                }
+            }
             resolve(result);
         };
 
-        const capture = (chunk: Buffer, decoder: StringDecoder, stream: "out" | "err"): void => {
-            const text = decoder.write(chunk);
-            if (stream === "out") {
-                outBytes += chunk.length;
-                if (out.length < RUN_MAX_CHARS) out += text; else clippedOut = true;
-            } else {
-                errBytes += chunk.length;
-                if (err.length < RUN_MAX_CHARS) err += text; else clippedErr = true;
-            }
-        };
-
-        child.stdout?.on("data", (c: Buffer) => capture(c, outDecoder, "out"));
-        child.stderr?.on("data", (c: Buffer) => capture(c, errDecoder, "err"));
-
-        child.on("error", (e: any) => {
-            if (e.code === "ENOENT" || (process.platform === "win32" && e.code === "EINVAL")) {
-                finish(noExecutable(input.command, args));
-                return;
-            }
-            finish(`Error running ${input.command}: ${e.message}`);
-        });
-
-        child.on("close", (code, signal) => {
-            out = (out + outDecoder.end()).slice(0, RUN_MAX_CHARS);
-            err = (err + errDecoder.end()).slice(0, RUN_MAX_CHARS);
-
-            const status = timedOut
-                ? `timed out after ${RUN_TIMEOUT_MS / 1000}s — killed`
-                : signal !== null ? `killed by ${signal}` : `exit ${code}`;
-
-            const body: string[] = [];
-            if (out.trim() !== "") body.push(out.trimEnd());
-            if (err.trim() !== "") body.push(`stderr:\n${err.trimEnd()}`);
-            if (body.length === 0) body.push("(no output)");
-
-            const footer: string[] = [];
-            if (clippedOut) footer.push(`stdout truncated at ${RUN_MAX_CHARS} chars (${outBytes} bytes total)`);
-            if (clippedErr) footer.push(`stderr truncated at ${RUN_MAX_CHARS} chars (${errBytes} bytes total)`);
-
-            const text = `${status} · ${Date.now() - started}ms\n${body.join("\n\n")}`;
-            finish(footer.length === 0 ? text : `${text}\n\n${footer.map((l) => `(${l})`).join("\n")}`);
-        });
+        spawnAndCapture(input.command, args, cwd, finish);
     });
 }
 
@@ -751,7 +827,7 @@ const runCommandTool = register({
     prompt: () =>
         "run_command runs a program directly — there is NO shell, so pipes, redirects, " +
         "and && do not work. Put the program in \"command\" and each argument separately in \"args\". " +
-        "For Windows .cmd shims (npm, npx, yarn, tsc), use command \"node\" with the full path in args.",
+        "Windows .cmd shims (npm, npx, yarn) are automatically resolved to their underlying node command.",
 });
 
 // ─── tool_search ─────────────────────────────────────────────

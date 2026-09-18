@@ -12,11 +12,11 @@ const MAX_TOKENS = 4096;
 // tool guidance) carries cache_control so it is reused across turns without
 // being re-processed by the model. The second block (environment, git,
 // CLAUDE.md) is rebuilt each turn.
-function buildSystemBlocks(): Anthropic.TextBlockParam[] {
+function buildSystemBlocks(planMode: boolean): Anthropic.TextBlockParam[] {
     return [
         {
             type: "text",
-            text: buildStaticSystemPrompt(),
+            text: buildStaticSystemPrompt(planMode),
             cache_control: { type: "ephemeral" },
         },
         {
@@ -37,6 +37,7 @@ export interface AgentOptions {
     apiKey?: string;      // --api-key from CLI, falls back to ANTHROPIC_API_KEY env
     apiBase?: string;     // --api-base from CLI, falls back to ANTHROPIC_BASE_URL env
     thinking?: boolean;   // --thinking flag from CLI
+    planMode?: boolean;   // --plan flag from CLI
 }
 
 export class Agent {
@@ -46,6 +47,7 @@ export class Agent {
     private readFileState: ReadFileState = new Map();
     private injectedContextReminder = false;
     private thinkingEnabled: boolean;
+    public planMode: boolean;
 
     // ── Abort support ───────────────────────────────────────────
     private abortController: AbortController | null = null;
@@ -65,11 +67,17 @@ export class Agent {
             apiKey: options?.apiKey || process.env.ANTHROPIC_API_KEY,
         });
         this.thinkingEnabled = options?.thinking ?? false;
+        this.planMode = options?.planMode ?? false;
     }
 
     /** Register a callback invoked after each chat() completes. */
     setOnChatComplete(fn: () => void): void {
         this.onChatComplete = fn;
+    }
+
+    /** Toggle plan mode on/off. */
+    togglePlanMode(): void {
+        this.planMode = !this.planMode;
     }
 
     /** Abort the currently-running chat() call. */
@@ -148,7 +156,7 @@ export class Agent {
         // Agent loop: keep going as long as the model produces tool calls.
         while (true) {
             const tools = getActiveToolDefinitions();
-            const system = buildSystemBlocks();
+            const system = buildSystemBlocks(this.planMode);
 
             let stream: any;
             try {
