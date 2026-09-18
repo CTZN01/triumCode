@@ -403,7 +403,9 @@ Options:
   --api-key KEY    Anthropic API key (or set ANTHROPIC_API_KEY / .env)
   --api-base URL   API base URL (or set ANTHROPIC_BASE_URL / .env)
   --model, -m      Model to use (default: from MINI_MODEL env or .env)
-  --thinking       Enable thinking/reasoning mode
+  --thinking       Enable extended thinking. On by default for current Claude
+                   models; this forces it on for any other model too
+  --effort LEVEL   Thinking depth: low | medium | high | xhigh | max
   --resume [id]    Resume a saved session (latest, or by ID prefix)
   --sessions       List all sessions and exit
   --yolo, -y       Bypass all permission prompts

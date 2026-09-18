@@ -9,6 +9,7 @@ import {
     printInterrupted, printHelp, printCostReport, printBlock, endStatus,
 } from "./ui.js";
 import { ensureConfig, type ResolvedConfig } from "./config.js";
+import { parseEffort, EFFORT_LEVELS } from "./thinking.js";
 
 // ═══════════════════════════════════════════════════════════════
 // Argument parsing
@@ -21,6 +22,7 @@ interface CliFlags {
     apiKey: string;          // --api-key
     apiBase: string;         // --api-base
     thinking: boolean;       // --thinking
+    effort: string;          // --effort low|medium|high|xhigh|max
     permissionMode: string;  // --yolo / -y, --plan, --accept-edits, --dont-ask
     maxCost: number | undefined;
     maxTurns: number | undefined;
@@ -37,6 +39,7 @@ function parseArgs(argv: string[]): CliFlags {
         apiKey: "",     // resolved later by config.ts
         apiBase: "",    // resolved later by config.ts
         thinking: false,
+        effort: "",
         permissionMode: "default",
         maxCost: undefined,
         maxTurns: undefined,
@@ -66,6 +69,13 @@ function parseArgs(argv: string[]): CliFlags {
             flags.model = argv[++i] || flags.model;
         } else if (arg === "--thinking") {
             flags.thinking = true;
+        } else if (arg === "--effort") {
+            const v = argv[++i] || "";
+            if (parseEffort(v)) {
+                flags.effort = v;
+            } else {
+                printError(`--effort must be one of: ${EFFORT_LEVELS.join(", ")}`);
+            }
         } else if (arg === "--yolo" || arg === "-y") {
             flags.permissionMode = "bypassPermissions";
         } else if (arg === "--plan") {
@@ -193,6 +203,7 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
         apiKey: config.apiKey,
         apiBase: config.apiBase,
         thinking: config.thinking,
+        effort: config.effort,
         maxTokens: flags.maxTokens,
         maxTurns: flags.maxTurns,
         planMode: flags.permissionMode === "plan",

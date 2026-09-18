@@ -4,10 +4,13 @@ import { ToolExecutor } from "./tool-executor.js";
 import { buildStaticSystemPrompt, buildDynamicSystemContext, buildUserContextReminder } from "./prompt.js";
 import {
     printToolCall, printToolResult, writeStream, endStream, printCostReport,
-    beginStatus, updateStatus, endStatus, printThinkingDuration, pickStatusVerb, printTurnEnd,
+    beginStatus, updateStatus, endStatus, printThinkingDuration, pickStatusVerb, printInfo, printTurnEnd,
 } from "./ui.js";
 import { withRetry } from "./retry.js";
-import { resolveThinkingMode, applyThinkingParams, filterThinkingBlocks, type ThinkingMode } from "./thinking.js";
+import {
+    resolveThinkingMode, applyThinkingParams, applyEffortParams, parseEffort,
+    isUnsupportedParamError, filterThinkingBlocks, type EffortLevel,
+} from "./thinking.js";
 
 // Extended thinking counts towards max_tokens, and endpoints that think by
 // default (MiMo, for one) will happily spend the whole budget reasoning and
@@ -37,6 +40,27 @@ function buildSystemBlocks(planMode: boolean): Anthropic.TextBlockParam[] {
     ];
 }
 
+/**
+ * The SDK puts the whole HTTP response body into error.message, which is far
+ * too noisy for a one-line notice. Pull out the API's own message field when
+ * there is one, and fall back to a clipped first line otherwise.
+ */
+function briefApiError(error: any): string {
+    const raw = String(error?.message ?? "request rejected");
+    const json = /\{[\s\S]*\}/.exec(raw);
+    if (json) {
+        try {
+            const parsed = JSON.parse(json[0]);
+            const message = parsed?.error?.message ?? parsed?.message;
+            if (typeof message === "string" && message) return message;
+        } catch {
+            // Not JSON after all — fall through to the text form.
+        }
+    }
+    const first = raw.split("\n")[0];
+    return first.length > 100 ? first.slice(0, 97) + "..." : first;
+}
+
 export interface AgentUsage {
     input: number;
     output: number;
@@ -48,6 +72,7 @@ export interface AgentOptions {
     apiKey?: string;      // --api-key from CLI, falls back to ANTHROPIC_API_KEY env
     apiBase?: string;     // --api-base from CLI, falls back to ANTHROPIC_BASE_URL env
     thinking?: boolean;   // --thinking flag from CLI
+    effort?: string;      // --effort flag from CLI
     maxTokens?: number;   // --max-tokens flag from CLI
     maxTurns?: number;    // --max-turns flag from CLI
     planMode?: boolean;   // --plan flag from CLI
@@ -60,8 +85,12 @@ export class Agent {
     private readFileState: ReadFileState = new Map();
     private injectedContextReminder = false;
     private thinkingEnabled: boolean;
+    private effort: EffortLevel | null;
     private maxTokens: number;
     private maxTurns: number;
+    // Set once the endpoint has rejected the thinking/effort params, so later
+    // turns skip sending them instead of paying a 400 on every request.
+    private optionalParamsRejected = false;
     public planMode: boolean;
 
     // ── Abort support ───────────────────────────────────────────
@@ -82,6 +111,7 @@ export class Agent {
             apiKey: options?.apiKey || process.env.ANTHROPIC_API_KEY,
         });
         this.thinkingEnabled = options?.thinking ?? false;
+        this.effort = parseEffort(options?.effort);
         this.maxTokens = options?.maxTokens && options.maxTokens > 0
             ? options.maxTokens
             : DEFAULT_MAX_TOKENS;
@@ -170,15 +200,54 @@ export class Agent {
         }
     }
 
-    private async runAgentLoop(): Promise<void> {
-        // Resolve thinking mode once per conversation.
-        const thinkingMode = resolveThinkingMode(this.model, this.thinkingEnabled);
-        const thinkingParams: Record<string, any> = {};
-        if (thinkingMode !== "disabled") {
-            applyThinkingParams(thinkingParams, thinkingMode, this.maxTokens);
+    /**
+     * Open the message stream for one turn, with thinking/effort params when
+     * they apply.
+     *
+     * A 400 naming one of those fields means the endpoint doesn't implement it
+     * — an ordinary situation when ANTHROPIC_BASE_URL points at a
+     * partially-compatible server. Drop them for the rest of the session and
+     * retry once, rather than failing a turn that would otherwise work.
+     */
+    private async openStream(
+        system: Anthropic.TextBlockParam[],
+        tools: Anthropic.Tool[],
+    ): Promise<any> {
+        const base: Record<string, any> = {
+            model: this.model,
+            max_tokens: this.maxTokens,
+            system,
+            messages: this.messages,
+            tools,
+            stream: true,
+        };
+
+        const tuned = { ...base };
+        if (!this.optionalParamsRejected) {
+            applyThinkingParams(tuned, resolveThinkingMode(this.model, this.thinkingEnabled), this.maxTokens);
+            applyEffortParams(tuned, this.effort);
         }
 
+        try {
+            // withRetry wraps the API call: 429/503/529 and network
+            // errors are retried with exponential backoff + jitter.
+            return await withRetry(
+                (signal) => this.client.messages.create({ ...tuned, signal } as any),
+                this.abortController?.signal,
+            );
+        } catch (e: any) {
+            if (this.optionalParamsRejected || !isUnsupportedParamError(e)) throw e;
 
+            this.optionalParamsRejected = true;
+            printInfo(`endpoint does not support thinking/effort (${briefApiError(e)}) — continuing without them`);
+            return await withRetry(
+                (signal) => this.client.messages.create({ ...base, signal } as any),
+                this.abortController?.signal,
+            );
+        }
+    }
+
+    private async runAgentLoop(): Promise<void> {
         let turns = 0;
         // An empty response is usually a transient blip, so give it one retry.
         // Bounded at one: if the cause is a too-small max_tokens, retrying
@@ -204,20 +273,7 @@ export class Agent {
 
             let stream: any;
             try {
-                // withRetry wraps the API call: 429/503/529 and network
-                // errors are retried with exponential backoff + jitter.
-                stream = await withRetry(async (signal) => {
-                    return this.client.messages.create({
-                        model: this.model,
-                        max_tokens: this.maxTokens,
-                        system,
-                        messages: this.messages,
-                        tools,
-                        stream: true,
-                        signal,
-                        ...thinkingParams,
-                    } as any);
-                }, this.abortController?.signal);
+                stream = await this.openStream(system, tools);
             } catch (e: any) {
                 if (e.name === "AbortError" || this.abortController?.signal.aborted) {
                     // User interrupted — don't push a partial assistant turn.

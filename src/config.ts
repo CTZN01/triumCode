@@ -25,6 +25,7 @@ export interface UserConfig {
     apiBase?: string;
     model?: string;
     thinking?: boolean;
+    effort?: string;
 }
 
 function readConfig(): UserConfig {
@@ -50,6 +51,7 @@ export interface ResolvedConfig {
     apiBase: string;
     model: string;
     thinking: boolean;
+    effort: string;
 }
 
 /**
@@ -61,6 +63,7 @@ export function resolveConfig(flags: {
     apiBase?: string;
     model?: string;
     thinking?: boolean;
+    effort?: string;
 }): ResolvedConfig {
     const saved = readConfig();
 
@@ -69,6 +72,7 @@ export function resolveConfig(flags: {
         apiBase:  flags.apiBase  || process.env.ANTHROPIC_BASE_URL || saved.apiBase || "https://api.anthropic.com",
         model:    flags.model    || process.env.MINI_MODEL        || saved.model   || "claude-sonnet-4-20250514",
         thinking: flags.thinking ?? saved.thinking ?? false,
+        effort:   flags.effort   || process.env.TRIUMPH_EFFORT   || saved.effort   || "",
     };
 }
 
@@ -97,6 +101,7 @@ export async function ensureConfig(flags: {
     apiBase?: string;
     model?: string;
     thinking?: boolean;
+    effort?: string;
 }): Promise<ResolvedConfig | null> {
     const config = resolveConfig(flags);
 
@@ -125,5 +130,5 @@ export async function ensureConfig(flags: {
     console.log(`\n  ✓ Config saved to ${CONFIG_FILE}`);
     console.log("  You're all set! Run 'triumph' to start.\n");
 
-    return { apiKey, apiBase, model, thinking: false };
+    return { apiKey, apiBase, model, thinking: false, effort: "" };
 }
