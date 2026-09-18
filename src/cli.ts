@@ -1,7 +1,5 @@
 import { Agent } from "./agent.js";
 import * as readline from "node:readline";
-import { existsSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
 import {
     saveSession, loadSession, listSessions, deleteSession,
     latestSessionId, type SessionIndex,
@@ -10,28 +8,7 @@ import {
     printWelcome, printUserPrompt, printInfo, printError,
     printInterrupted, printHelp, printCostReport,
 } from "./ui.js";
-
-// ═══════════════════════════════════════════════════════════════
-// .env loader — zero-dependency, reads KEY=VALUE lines
-// ═══════════════════════════════════════════════════════════════
-
-function loadDotEnv(): void {
-    const envPath = resolve(".env");
-    if (!existsSync(envPath)) return;
-    try {
-        const lines = readFileSync(envPath, "utf-8").split("\n");
-        for (const line of lines) {
-            const trimmed = line.trim();
-            if (!trimmed || trimmed.startsWith("#")) continue;
-            const eq = trimmed.indexOf("=");
-            if (eq === -1) continue;
-            const key = trimmed.slice(0, eq).trim();
-            const val = trimmed.slice(eq + 1).trim();
-            // Don't overwrite existing env vars — real env takes precedence.
-            if (!process.env[key]) process.env[key] = val;
-        }
-    } catch { /* best effort */ }
-}
+import { ensureConfig, type ResolvedConfig } from "./config.js";
 
 // ═══════════════════════════════════════════════════════════════
 // Argument parsing
@@ -52,15 +29,12 @@ interface CliFlags {
 }
 
 function parseArgs(argv: string[]): CliFlags {
-    // Load .env before parsing — env vars become fallback defaults.
-    loadDotEnv();
-
     const flags: CliFlags = {
         resume: null,
         sessions: false,
-        model: process.env.MINI_MODEL || "deepseek-mini-1-20260912",
-        apiKey: process.env.ANTHROPIC_API_KEY || "",
-        apiBase: process.env.ANTHROPIC_BASE_URL || "",
+        model: "",      // resolved later by config.ts
+        apiKey: "",     // resolved later by config.ts
+        apiBase: "",    // resolved later by config.ts
         thinking: false,
         permissionMode: "default",
         maxCost: undefined,
@@ -201,25 +175,21 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
         return;
     }
 
-    // Validate API key — fail early with actionable message.
-    if (!flags.apiKey) {
-        printError("API key required. Set it via one of:");
-        printInfo("  1. Create .env file:     echo ANTHROPIC_API_KEY=sk-ant-xxx > .env");
-        printInfo("  2. Environment variable: export ANTHROPIC_API_KEY=sk-ant-xxx");
-        printInfo("  3. CLI flag:             --api-key sk-ant-xxx");
-        process.exit(1);
-    }
+    // Resolve config from all sources (CLI > .env > env > ~/.triumph/config.json).
+    // If no API key is found anywhere, enters interactive first-run setup.
+    const config = await ensureConfig(flags);
+    if (!config) process.exit(1);
 
     const agent = new Agent({
-        model: flags.model,
-        apiKey: flags.apiKey,
-        apiBase: flags.apiBase || undefined,
-        thinking: flags.thinking,
+        model: config.model,
+        apiKey: config.apiKey,
+        apiBase: config.apiBase,
+        thinking: config.thinking,
     });
 
     // Wire up auto-save: after each chat(), persist the session.
     agent.setOnChatComplete(() => {
-        saveSession(agent.history(), flags.model);
+        saveSession(agent.history(), config.model);
     });
 
     // --resume [id]: reload a saved conversation before doing anything else.
@@ -266,7 +236,7 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
         }
     });
 
-    printWelcome();
+    printWelcome(config.model);
 
     // ── REPL loop with rl.once (strict serial execution) ─────────
     const askQuestion = (): void => {
@@ -288,7 +258,7 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
             // ── Slash commands ─────────────────────────────────────
             if (input === "/clear") {
                 agent.clearHistory();
-                saveSession(agent.history(), flags.model);
+                saveSession(agent.history(), config.model);
                 printInfo("history cleared");
                 askQuestion();
                 return;

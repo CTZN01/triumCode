@@ -6,18 +6,10 @@ import chalk from "chalk";
 
 // ── Welcome banner ──────────────────────────────────────────
 
-export function printWelcome(): void {
-    const pkg = { name: "triumph", version: "0.1.0" };
-    try {
-        const { readFileSync } = require("node:fs");
-        const raw = readFileSync(require("node:path").resolve(__dirname, "../package.json"), "utf-8");
-        const p = JSON.parse(raw);
-        pkg.name = p.name ?? pkg.name;
-        pkg.version = p.version ?? pkg.version;
-    } catch { /* use defaults */ }
-
-    console.log(chalk.bold(`\n  ${pkg.name} v${pkg.version}`));
-    console.log(chalk.dim("  Type /help for commands, Ctrl+C to interrupt, exit to quit.\n"));
+export function printWelcome(model: string): void {
+    console.log(chalk.bold("\n  triumph code"));
+    console.log(chalk.dim(`  model: ${model}`));
+    console.log(chalk.dim("  /help for commands · Ctrl+C to interrupt · exit to quit\n"));
 }
 
 // ── User prompt ─────────────────────────────────────────────
