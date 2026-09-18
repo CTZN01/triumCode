@@ -1,8 +1,8 @@
 import {
     readFileSync, writeFileSync, existsSync, readdirSync,
-    unlinkSync, mkdirSync, statSync,
+    unlinkSync, mkdirSync, statSync, renameSync,
 } from "node:fs";
-import { join, resolve } from "node:path";
+import { join, resolve, dirname, basename } from "node:path";
 
 // ═══════════════════════════════════════════════════════════════
 // Session persistence — one JSON file per conversation
@@ -96,8 +96,8 @@ function extractTitle(messages: unknown[]): string {
 
 /** Atomic write: land bytes in a temp file, then rename. */
 function atomicWrite(filePath: string, data: string): void {
-    const dir = require("node:path").dirname(filePath);
-    const tmp = join(dir, `.${require("node:path").basename(filePath)}.${process.pid}.${Date.now()}.tmp`);
+    const dir = dirname(filePath);
+    const tmp = join(dir, `.${basename(filePath)}.${process.pid}.${Date.now()}.tmp`);
     try {
         writeFileSync(tmp, data, "utf-8");
         // On Windows, renameSync fails if target exists. Remove first.
@@ -107,11 +107,6 @@ function atomicWrite(filePath: string, data: string): void {
         try { unlinkSync(tmp); } catch { /* cleanup */ }
         throw new Error(`Failed to write ${filePath}`);
     }
-}
-
-function renameSync(src: string, dest: string): void {
-    // Node's fs.renameSync wrapped for clarity.
-    require("node:fs").renameSync(src, dest);
 }
 
 // ── Enforce MAX_SESSIONS ───────────────────────────────────────
