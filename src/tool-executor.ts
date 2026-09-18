@@ -103,12 +103,6 @@ export class ToolExecutor {
         };
         this.executing.set(item.id, entry);
 
-        // Log which tool is starting, with concurrency indicator.
-        const tag = item.isConcurrencySafe ? "⚡" : "🔒";
-        console.log(`  ${tag} ${item.name}(${JSON.stringify(item.input)})`);
-
-        const start = Date.now();
-
         const tool = getTool(item.name);
         const exec = tool
             ? tool.call(item.input, this.context)
@@ -116,8 +110,6 @@ export class ToolExecutor {
 
         exec
             .then((result) => {
-                const ms = Date.now() - start;
-                console.log(`  ✓ ${item.name} (${ms}ms)`);
                 item.resolve(result);
             })
             .catch((err: any) => {

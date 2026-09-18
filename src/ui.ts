@@ -33,31 +33,29 @@ export function printInterrupted(): void {
 }
 
 // ── Tool call display ───────────────────────────────────────
+// Human-readable verbs and result summaries — the model calls tools,
+// the UI translates into Claude Code–style action narration.
 
-function getToolIcon(name: string): string {
-    const icons: Record<string, string> = {
-        read_file: "📖",
-        write_file: "✏️",
-        edit_file: "✏️",
-        list_files: "📁",
-        grep_search: "🔍",
-        run_command: "💻",
-        tool_search: "🔧",
-    };
-    return icons[name] ?? "⚙️";
-}
+const TOOL_VERBS: Record<string, string> = {
+    read_file: "Read",
+    write_file: "Write",
+    edit_file: "Edit",
+    list_files: "List",
+    grep_search: "Search",
+    run_command: "Run",
+    tool_search: "Search tools",
+};
 
-function summarizeInput(name: string, input: Record<string, any>): string {
+function formatCallTarget(name: string, input: Record<string, any>): string {
     switch (name) {
         case "read_file":
-        case "list_files":
-            return input.file_path ?? input.directory_path ?? "";
         case "write_file":
-            return input.file_path ?? "";
         case "edit_file":
             return input.file_path ?? "";
+        case "list_files":
+            return input.directory_path ?? "";
         case "grep_search":
-            return `${input.pattern} in ${input.path}`;
+            return `"${input.pattern}" in ${input.path}`;
         case "run_command": {
             const args = Array.isArray(input.args) ? input.args.join(" ") : "";
             return `${input.command} ${args}`.trim();
@@ -68,24 +66,51 @@ function summarizeInput(name: string, input: Record<string, any>): string {
 }
 
 export function printToolCall(name: string, input: Record<string, any>): void {
-    const icon = getToolIcon(name);
-    const summary = summarizeInput(name, input);
-    console.log(chalk.yellow(`\n  ${icon} ${name}`) + (summary ? chalk.gray(` ${summary}`) : ""));
+    const verb = TOOL_VERBS[name] ?? name;
+    const target = formatCallTarget(name, input);
+    const detail = target ? chalk.gray(`(${target})`) : "";
+    console.log(chalk.yellow(`\n  ⏺ ${verb}`) + (detail ? ` ${detail}` : ""));
+}
+
+function summarizeResult(name: string, result: string): string {
+    if (result.startsWith("Error")) return chalk.red(result.split("\n")[0]);
+
+    switch (name) {
+        case "read_file": {
+            const lines = result.split("\n").length;
+            return `${lines} lines`;
+        }
+        case "write_file":
+        case "edit_file":
+            return chalk.dim(result.split("\n")[0]);
+        case "list_files": {
+            const entries = result.split("\n").filter(l => !l.startsWith("(")).length;
+            return `${entries} entries`;
+        }
+        case "grep_search": {
+            const matchCount = result.split("\n").filter(l => l.includes(":")).length;
+            if (result.includes("No matches")) return "no matches";
+            return `${matchCount} matches`;
+        }
+        case "run_command": {
+            // Show exit code + timing from the first line.
+            const firstLine = result.split("\n")[0];
+            return chalk.dim(firstLine);
+        }
+        default:
+            return chalk.dim(`${result.length} chars`);
+    }
 }
 
 export function printToolResult(name: string, result: string, elapsedMs: number): void {
-    // Show a truncated preview for long results.
-    const maxLen = 500;
-    const truncated = result.length > maxLen
-        ? result.slice(0, maxLen) + chalk.gray(`\n    ... (${result.length} chars total)`)
-        : result;
-
-    console.log(chalk.dim(truncated.split("\n").map((l) => "    " + l).join("\n")));
-    console.log(chalk.green(`  ✓ ${name}`) + chalk.dim(` (${elapsedMs}ms)`));
+    const verb = TOOL_VERBS[name] ?? name;
+    const summary = summarizeResult(name, result);
+    console.log(chalk.green(`  ⏺ ${verb}`) + ` ${summary}` + chalk.dim(` (${elapsedMs}ms)`));
 }
 
 export function printToolError(name: string, error: string): void {
-    console.log(chalk.red(`  ✗ ${name}: ${error}`));
+    const verb = TOOL_VERBS[name] ?? name;
+    console.log(chalk.red(`  ⏺ ${verb} failed: ${error}`));
 }
 
 // ── Streaming output ────────────────────────────────────────

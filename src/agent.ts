@@ -198,6 +198,7 @@ export class Agent {
             const context: ToolContext = { readFileState: this.readFileState };
             const executor = new ToolExecutor(context);
             const toolResults = new Map<string, Promise<string>>();
+            const toolStartTimes = new Map<string, number>();
 
             try {
                 for await (const event of stream) {
@@ -263,6 +264,7 @@ export class Agent {
                                 });
 
                                 printToolCall(state.name, input);
+                                toolStartTimes.set(state.id, Date.now());
                                 toolResults.set(state.id, executor.enqueue(state.id, state.name, input));
                             }
                             break;
@@ -313,6 +315,8 @@ export class Agent {
             for (const block of filtered) {
                 if (block.type !== "tool_use") continue;
                 const output = await toolResults.get(block.id)!;
+                const elapsed = Date.now() - (toolStartTimes.get(block.id) ?? Date.now());
+                printToolResult(block.name, output, elapsed);
                 resultBlocks.push({
                     type: "tool_result",
                     tool_use_id: block.id,
