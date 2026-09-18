@@ -69,7 +69,7 @@ export function printToolCall(name: string, input: Record<string, any>): void {
     const verb = TOOL_VERBS[name] ?? name;
     const target = formatCallTarget(name, input);
     const detail = target ? chalk.gray(`(${target})`) : "";
-    console.log(chalk.yellow(`\n  ⏺ ${verb}`) + (detail ? ` ${detail}` : ""));
+    console.log(chalk.yellow(`  ⏺ ${verb}`) + (detail ? ` ${detail}` : ""));
 }
 
 function summarizeResult(name: string, result: string): string {
@@ -82,7 +82,7 @@ function summarizeResult(name: string, result: string): string {
         }
         case "write_file":
         case "edit_file":
-            return chalk.dim(result.split("\n")[0]);
+            return result.split("\n")[0];
         case "list_files": {
             const entries = result.split("\n").filter(l => !l.startsWith("(")).length;
             return `${entries} entries`;
@@ -93,24 +93,20 @@ function summarizeResult(name: string, result: string): string {
             return `${matchCount} matches`;
         }
         case "run_command": {
-            // Show exit code + timing from the first line.
-            const firstLine = result.split("\n")[0];
-            return chalk.dim(firstLine);
+            return result.split("\n")[0];
         }
         default:
-            return chalk.dim(`${result.length} chars`);
+            return `${result.length} chars`;
     }
 }
 
 export function printToolResult(name: string, result: string, elapsedMs: number): void {
-    const verb = TOOL_VERBS[name] ?? name;
     const summary = summarizeResult(name, result);
-    console.log(chalk.green(`  ⏺ ${verb}`) + ` ${summary}` + chalk.dim(` (${elapsedMs}ms)`));
+    console.log(chalk.dim(`    ↳ ${summary} (${elapsedMs}ms)`));
 }
 
 export function printToolError(name: string, error: string): void {
-    const verb = TOOL_VERBS[name] ?? name;
-    console.log(chalk.red(`  ⏺ ${verb} failed: ${error}`));
+    console.log(chalk.red(`    ↳ Error: ${error}`));
 }
 
 // ── Streaming output ────────────────────────────────────────
