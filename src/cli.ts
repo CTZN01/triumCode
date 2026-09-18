@@ -6,7 +6,7 @@ import {
 } from "./session.js";
 import {
     printWelcome, printUserPrompt, printInfo, printError,
-    printInterrupted, printHelp, printCostReport,
+    printInterrupted, printHelp, printCostReport, printBlock, endStatus,
 } from "./ui.js";
 import { ensureConfig, type ResolvedConfig } from "./config.js";
 
@@ -117,7 +117,7 @@ function formatModel(model: string): string {
 
 function printSessionTable(sessions: SessionIndex[], currentId: string | null): void {
     if (sessions.length === 0) {
-        console.log("  (no saved sessions)");
+        printBlock("  (no saved sessions)");
         return;
     }
 
@@ -134,24 +134,27 @@ function printSessionTable(sessions: SessionIndex[], currentId: string | null): 
         "Title",
     ].join("  ");
 
-    console.log(hdr);
-    console.log("  " + "─".repeat(hdr.length - 2));
+    // Built as one block so it reaches the terminal in a single write — a
+    // multi-line table dribbled out line by line could get a spinner frame
+    // appended mid-table.
+    const lines = [hdr, "  " + "─".repeat(hdr.length - 2)];
 
     for (const s of sessions) {
         const marker = s.id === currentId ? " → " : "   ";
-        const row = [
+        lines.push([
             marker + s.id.slice(0, 8).padEnd(idW - marker.length + 1),
             formatDate(s.updated).padEnd(dateW),
             truncate(formatModel(s.model), modelW - 1).padEnd(modelW),
             String(s.messageCount).padStart(msgsW),
             truncate(s.title, 50),
-        ].join("  ");
-        console.log(row);
+        ].join("  "));
     }
 
     if (currentId && sessions.some((s) => s.id === currentId)) {
-        console.log(`\n  → = current session (${currentId})`);
+        lines.push("", `  → = current session (${currentId})`);
     }
+
+    printBlock(lines.join("\n"));
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -221,6 +224,11 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
     // ── SIGINT handling ──────────────────────────────────────────
     let sigintCount = 0;
     process.on("SIGINT", () => {
+        // This handler runs synchronously, before the agent loop unwinds, and
+        // askQuestion() below re-prompts immediately — so the status line has
+        // to go first, or a tick lands on top of the live prompt.
+        endStatus();
+
         if (agent.isProcessing) {
             agent.abort();
             printInterrupted();
@@ -229,10 +237,10 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
         } else {
             sigintCount++;
             if (sigintCount >= 2) {
-                console.log("\nBye!\n");
+                printBlock("\nBye!\n");
                 process.exit(0);
             }
-            console.log("\n  Press Ctrl+C again to exit.");
+            printBlock("\n  Press Ctrl+C again to exit.");
             askQuestion();
         }
     });
@@ -251,7 +259,7 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
 
             // Exit.
             if (input === "exit" || input === "quit") {
-                console.log("\nBye!\n");
+                printBlock("\nBye!\n");
                 rl.close();
                 return;
             }
@@ -288,7 +296,7 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
             if (input === "/sessions") {
                 const sessions = listSessions();
                 const current = latestSessionId();
-                console.log();
+                printBlock("");
                 printSessionTable(sessions, current);
                 askQuestion();
                 return;

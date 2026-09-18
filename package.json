@@ -9,6 +9,7 @@
   },
   "scripts": {
     "build": "tsc",
+    "test": "tsc && node --test dist/",
     "start": "node dist/cli.js",
     "dev": "tsc && node dist/cli.js"
   },

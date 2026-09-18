@@ -127,6 +127,21 @@ export class ToolExecutor {
         return this.pending.length === 0 && this.executing.size === 0;
     }
 
+    // Names of tools whose call() is in flight — what a status line should
+    // report as "running". Tools that have finished but whose results have not
+    // been collected yet are in neither list, so this can undercount; it never
+    // overcounts, which is the honest direction for a progress label.
+    get running(): string[] {
+        return [...this.executing.values()].map((e) => e.name);
+    }
+
+    // Names of tools enqueued but blocked behind a non-safe tool. Non-empty
+    // implies running is non-empty: dispatch() runs to a fixed point, so the
+    // only way a safe tool stays queued is an unsafe tool holding the slot.
+    get queued(): string[] {
+        return this.pending.map((p) => p.name);
+    }
+
     private notifyIfIdle(): void {
         if (!this.isIdle) return;
         for (const resolve of this.idleResolvers) resolve();

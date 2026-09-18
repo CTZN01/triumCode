@@ -2,7 +2,10 @@ import Anthropic from "@anthropic-ai/sdk";
 import { getActiveToolDefinitions, type ReadFileState, type ToolContext } from "./tools.js";
 import { ToolExecutor } from "./tool-executor.js";
 import { buildStaticSystemPrompt, buildDynamicSystemContext, buildUserContextReminder } from "./prompt.js";
-import { printToolCall, printToolResult, printToolError, writeStream, endStream, printCostReport } from "./ui.js";
+import {
+    printToolCall, printToolResult, printToolError, writeStream, endStream, printCostReport,
+    beginStatus, updateStatus, endStatus, printThinkingDuration, pickStatusVerb,
+} from "./ui.js";
 import { withRetry } from "./retry.js";
 import { resolveThinkingMode, applyThinkingParams, filterThinkingBlocks, type ThinkingMode } from "./thinking.js";
 
@@ -138,6 +141,10 @@ export class Agent {
         try {
             await this.runAgentLoop();
         } finally {
+            // Safety net: runAgentLoop can bail from several places (abort,
+            // no-tool termination, a thrown API error). None of them may leave
+            // a spinner frame on screen or its interval ticking.
+            endStatus();
             this.isProcessing = false;
             this.abortController = null;
             // Auto-save after each chat() completes.
@@ -155,6 +162,12 @@ export class Agent {
 
         // Agent loop: keep going as long as the model produces tool calls.
         while (true) {
+            // Each iteration is a fresh "model is working" phase, so the
+            // elapsed clock restarts. The defensive endStatus() guarantees
+            // that even if a phase left the status active.
+            endStatus();
+            beginStatus(pickStatusVerb());
+
             const tools = getActiveToolDefinitions();
             const system = buildSystemBlocks(this.planMode);
 
@@ -195,6 +208,12 @@ export class Agent {
             }
             const blocks = new Map<number, BlockState>();
 
+            // Thinking blocks are skipped entirely at content_block_start, so
+            // they never enter `blocks`. Track their indices separately or the
+            // content_block_stop handler's `if (!state) break` swallows them.
+            const thinkingIdx = new Set<number>();
+            let thinkingStartedAt = 0;
+
             const context: ToolContext = { readFileState: this.readFileState };
             const executor = new ToolExecutor(context);
             const toolResults = new Map<string, Promise<string>>();
@@ -203,7 +222,14 @@ export class Agent {
             try {
                 for await (const event of stream) {
                     // Check abort between events.
-                    if (this.abortController?.signal.aborted) break;
+                    if (this.abortController?.signal.aborted) {
+                        // Mirror the catch below. Breaking out instead would
+                        // fall through to drain() and push an assistant turn
+                        // plus a tool_result turn for tools the user just
+                        // cancelled — then issue one more doomed API call.
+                        endStream();
+                        return;
+                    }
 
                     switch (event.type) {
                         case "content_block_start": {
@@ -211,8 +237,14 @@ export class Agent {
                             const cb = event.content_block;
                             // Skip thinking blocks entirely — they are the
                             // model's private scratchpad and too expensive
-                            // to store in conversation history.
-                            if (cb.type === "thinking") break;
+                            // to store in conversation history. Time them so
+                            // the UI can report "Thought for Ns".
+                            if (cb.type === "thinking") {
+                                thinkingIdx.add(idx);
+                                thinkingStartedAt = Date.now();
+                                updateStatus("Thinking");
+                                break;
+                            }
                             if (cb.type === "tool_use") {
                                 blocks.set(idx, {
                                     type: "tool_use",
@@ -238,6 +270,13 @@ export class Agent {
                         }
                         case "content_block_stop": {
                             const idx = event.index;
+
+                            if (thinkingIdx.has(idx)) {
+                                const ms = Date.now() - thinkingStartedAt;
+                                if (ms >= 1000) printThinkingDuration(ms);
+                                break;
+                            }
+
                             const state = blocks.get(idx);
                             if (!state) break;
 
@@ -289,6 +328,7 @@ export class Agent {
             }
 
             endStream();
+            endStatus();
 
             // Wait for all in-flight tools to finish.
             //
@@ -298,7 +338,21 @@ export class Agent {
             // ToolExecutor.dispatch(), overlapping with the model generating
             // subsequent content. drain() only waits for stragglers — most
             // tools are already complete by the time the stream ends.
+            //
+            // A straggler is the one silent gap left in a turn, so cover it.
+            if (!executor.isIdle) {
+                beginStatus(() => {
+                    const running = executor.running;
+                    if (running.length === 1) return `Running ${running[0]}`;
+                    if (running.length > 1) return `Running ${running.length} tools`;
+                    return "Working";
+                });
+            }
             await executor.drain();
+            // Must end here, not after the results print: leaving it active
+            // would carry this phase's elapsed time into the next iteration,
+            // which then reports a fresh API call as already 6s old.
+            endStatus();
 
             // Filter thinking blocks before storing in history.
             const filtered = thinkingMode !== "disabled"
