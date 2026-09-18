@@ -3,8 +3,11 @@ import { getActiveToolDefinitions, type ReadFileState, type ToolContext } from "
 import { ToolExecutor } from "./tool-executor.js";
 import { buildStaticSystemPrompt, buildDynamicSystemContext, buildUserContextReminder } from "./prompt.js";
 import { printToolCall, printToolResult, printToolError, writeStream, endStream, printCostReport } from "./ui.js";
+import { withRetry } from "./retry.js";
+import { resolveThinkingMode, applyThinkingParams, filterThinkingBlocks, type ThinkingMode } from "./thinking.js";
 
 const MODEL = process.env.MINI_MODEL || "deepseek-mini-1-20260912";
+const MAX_TOKENS = 4096;
 
 // System prompt as an array of TextBlockParam. The first block (persona +
 // tool guidance) carries cache_control so it is reused across turns without
@@ -30,11 +33,16 @@ export interface AgentUsage {
     cost: number;
 }
 
+export interface AgentOptions {
+    thinking?: boolean;  // --thinking flag from CLI
+}
+
 export class Agent {
     private client: Anthropic;
     private messages: Anthropic.MessageParam[] = [];
     private readFileState: ReadFileState = new Map();
     private injectedContextReminder = false;
+    private thinkingEnabled: boolean;
 
     // ── Abort support ───────────────────────────────────────────
     private abortController: AbortController | null = null;
@@ -47,11 +55,12 @@ export class Agent {
     // ── Auto-save callback ──────────────────────────────────────
     private onChatComplete?: () => void;
 
-    constructor() {
+    constructor(options?: AgentOptions) {
         this.client = new Anthropic({
             baseURL: process.env.ANTHROPIC_BASE_URL,
             apiKey: process.env.ANTHROPIC_API_KEY,
         });
+        this.thinkingEnabled = options?.thinking ?? false;
     }
 
     /** Register a callback invoked after each chat() completes. */
@@ -125,6 +134,13 @@ export class Agent {
     }
 
     private async runAgentLoop(): Promise<void> {
+        // Resolve thinking mode once per conversation.
+        const thinkingMode = resolveThinkingMode(MODEL, this.thinkingEnabled);
+        const thinkingParams: Record<string, any> = {};
+        if (thinkingMode !== "disabled") {
+            applyThinkingParams(thinkingParams, thinkingMode, MAX_TOKENS);
+        }
+
         // Agent loop: keep going as long as the model produces tool calls.
         while (true) {
             const tools = getActiveToolDefinitions();
@@ -132,15 +148,20 @@ export class Agent {
 
             let stream: any;
             try {
-                stream = await this.client.messages.create({
-                    model: MODEL,
-                    max_tokens: 4096,
-                    system,
-                    messages: this.messages,
-                    tools,
-                    stream: true,
-                    signal: this.abortController?.signal,
-                } as any);
+                // withRetry wraps the API call: 429/503/529 and network
+                // errors are retried with exponential backoff + jitter.
+                stream = await withRetry(async (signal) => {
+                    return this.client.messages.create({
+                        model: MODEL,
+                        max_tokens: MAX_TOKENS,
+                        system,
+                        messages: this.messages,
+                        tools,
+                        stream: true,
+                        signal,
+                        ...thinkingParams,
+                    } as any);
+                }, this.abortController?.signal);
             } catch (e: any) {
                 if (e.name === "AbortError" || this.abortController?.signal.aborted) {
                     // User interrupted — don't push a partial assistant turn.
@@ -175,6 +196,10 @@ export class Agent {
                         case "content_block_start": {
                             const idx = event.index;
                             const cb = event.content_block;
+                            // Skip thinking blocks entirely — they are the
+                            // model's private scratchpad and too expensive
+                            // to store in conversation history.
+                            if (cb.type === "thinking") break;
                             if (cb.type === "tool_use") {
                                 blocks.set(idx, {
                                     type: "tool_use",
@@ -252,16 +277,28 @@ export class Agent {
             endStream();
 
             // Wait for all in-flight tools to finish.
+            //
+            // Parallel execution by design: tools were dispatched as their
+            // content_block_stop events arrived during streaming. Safe tools
+            // (read_file, list_files, grep_search) start immediately via
+            // ToolExecutor.dispatch(), overlapping with the model generating
+            // subsequent content. drain() only waits for stragglers — most
+            // tools are already complete by the time the stream ends.
             await executor.drain();
 
-            this.messages.push({ role: "assistant", content: assistantContent });
+            // Filter thinking blocks before storing in history.
+            const filtered = thinkingMode !== "disabled"
+                ? filterThinkingBlocks(assistantContent)
+                : assistantContent;
+
+            this.messages.push({ role: "assistant", content: filtered });
 
             // If no tools were called, the model is done.
             if (toolResults.size === 0) return;
 
             // Build tool results in the same order as tool_use blocks appeared.
             const resultBlocks: Anthropic.ToolResultBlockParam[] = [];
-            for (const block of assistantContent) {
+            for (const block of filtered) {
                 if (block.type !== "tool_use") continue;
                 const output = await toolResults.get(block.id)!;
                 resultBlocks.push({

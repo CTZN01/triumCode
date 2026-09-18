@@ -166,7 +166,7 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
         return;
     }
 
-    const agent = new Agent();
+    const agent = new Agent({ thinking: flags.thinking });
 
     // Wire up auto-save: after each chat(), persist the session.
     agent.setOnChatComplete(() => {
