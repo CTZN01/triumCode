@@ -132,6 +132,7 @@ Configuration (in order of priority):
   1. CLI flags (--api-key, --model, --api-base)
   2. .env file in project root
   3. Environment variables
+  4. ~/.triumph/config.json (saved by first-run setup)
 
 REPL Commands:
   /clear           Clear conversation history
