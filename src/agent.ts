@@ -38,6 +38,28 @@ export class Agent {
         });
     }
 
+    // ── Session persistence helpers ──────────────────────────────
+    // These exist so the CLI can snapshot and restore the conversation
+    // without exposing the private messages array.
+
+    /** Current conversation messages (read-only snapshot). */
+    history(): Anthropic.MessageParam[] {
+        return [...this.messages];
+    }
+
+    /** Replace the conversation with a previously saved history. */
+    loadHistory(messages: Anthropic.MessageParam[]): void {
+        this.messages = messages;
+        // Assume the context reminder was already part of the saved state.
+        this.injectedContextReminder = true;
+    }
+
+    /** Wipe the conversation. Called by /clear. */
+    clearHistory(): void {
+        this.messages = [];
+        this.injectedContextReminder = false;
+    }
+
     async chat(userText: string): Promise<void> {
         // On the first call, prepend the context reminder (CLAUDE.md, date)
         // to the user message. This keeps it out of the cached system blocks
