@@ -6,7 +6,6 @@ import { printToolCall, printToolResult, printToolError, writeStream, endStream,
 import { withRetry } from "./retry.js";
 import { resolveThinkingMode, applyThinkingParams, filterThinkingBlocks, type ThinkingMode } from "./thinking.js";
 
-const MODEL = process.env.MINI_MODEL || "deepseek-mini-1-20260912";
 const MAX_TOKENS = 4096;
 
 // System prompt as an array of TextBlockParam. The first block (persona +
@@ -34,11 +33,13 @@ export interface AgentUsage {
 }
 
 export interface AgentOptions {
-    thinking?: boolean;  // --thinking flag from CLI
+    model?: string;       // --model / -m from CLI, falls back to MINI_MODEL env
+    thinking?: boolean;   // --thinking flag from CLI
 }
 
 export class Agent {
     private client: Anthropic;
+    private model: string;
     private messages: Anthropic.MessageParam[] = [];
     private readFileState: ReadFileState = new Map();
     private injectedContextReminder = false;
@@ -56,6 +57,7 @@ export class Agent {
     private onChatComplete?: () => void;
 
     constructor(options?: AgentOptions) {
+        this.model = options?.model || process.env.MINI_MODEL || "deepseek-mini-1-20260912";
         this.client = new Anthropic({
             baseURL: process.env.ANTHROPIC_BASE_URL,
             apiKey: process.env.ANTHROPIC_API_KEY,
@@ -135,7 +137,7 @@ export class Agent {
 
     private async runAgentLoop(): Promise<void> {
         // Resolve thinking mode once per conversation.
-        const thinkingMode = resolveThinkingMode(MODEL, this.thinkingEnabled);
+        const thinkingMode = resolveThinkingMode(this.model, this.thinkingEnabled);
         const thinkingParams: Record<string, any> = {};
         if (thinkingMode !== "disabled") {
             applyThinkingParams(thinkingParams, thinkingMode, MAX_TOKENS);
@@ -152,7 +154,7 @@ export class Agent {
                 // errors are retried with exponential backoff + jitter.
                 stream = await withRetry(async (signal) => {
                     return this.client.messages.create({
-                        model: MODEL,
+                        model: this.model,
                         max_tokens: MAX_TOKENS,
                         system,
                         messages: this.messages,
