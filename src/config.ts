@@ -81,7 +81,9 @@ async function ask(prompt: string): Promise<string> {
     return new Promise((resolve) => {
         rl.question(prompt, (answer) => {
             rl.close();
-            resolve(answer.trim());
+            // Strip ANSI escape codes that terminals may inject.
+            const clean = answer.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "").trim();
+            resolve(clean);
         });
     });
 }
