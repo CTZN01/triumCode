@@ -4,8 +4,10 @@ import {
     saveSession, loadSession, listSessions, deleteSession,
     latestSessionId, type SessionIndex,
 } from "./session.js";
-
-const MODEL = process.env.MINI_MODEL || "deepseek-mini-1-20260912";
+import {
+    printWelcome, printUserPrompt, printInfo, printError,
+    printInterrupted, printHelp, printCostReport,
+} from "./ui.js";
 
 // ═══════════════════════════════════════════════════════════════
 // Argument parsing
@@ -14,17 +16,32 @@ const MODEL = process.env.MINI_MODEL || "deepseek-mini-1-20260912";
 interface CliFlags {
     resume: string | null;   // null = no --resume; "" = --resume (latest); "abc" = --resume abc
     sessions: boolean;       // --sessions: list and exit
+    model: string;           // --model / -m
+    thinking: boolean;       // --thinking
+    permissionMode: string;  // --yolo / -y, --plan, --accept-edits, --dont-ask
+    maxCost: number | undefined;
+    maxTurns: number | undefined;
+    help: boolean;           // --help / -h
     oneShot: string;         // remaining args joined (non-interactive)
 }
 
 function parseArgs(argv: string[]): CliFlags {
-    const flags: CliFlags = { resume: null, sessions: false, oneShot: "" };
+    const flags: CliFlags = {
+        resume: null,
+        sessions: false,
+        model: process.env.MINI_MODEL || "deepseek-mini-1-20260912",
+        thinking: false,
+        permissionMode: "default",
+        maxCost: undefined,
+        maxTurns: undefined,
+        help: false,
+        oneShot: "",
+    };
     const rest: string[] = [];
 
     for (let i = 0; i < argv.length; i++) {
         const arg = argv[i];
         if (arg === "--resume") {
-            // Next arg might be an ID prefix (not starting with --).
             const next = argv[i + 1];
             if (next && !next.startsWith("--")) {
                 flags.resume = next;
@@ -34,6 +51,26 @@ function parseArgs(argv: string[]): CliFlags {
             }
         } else if (arg === "--sessions") {
             flags.sessions = true;
+        } else if (arg === "--model" || arg === "-m") {
+            flags.model = argv[++i] || flags.model;
+        } else if (arg === "--thinking") {
+            flags.thinking = true;
+        } else if (arg === "--yolo" || arg === "-y") {
+            flags.permissionMode = "bypassPermissions";
+        } else if (arg === "--plan") {
+            flags.permissionMode = "plan";
+        } else if (arg === "--accept-edits") {
+            flags.permissionMode = "acceptEdits";
+        } else if (arg === "--dont-ask") {
+            flags.permissionMode = "dontAsk";
+        } else if (arg === "--max-cost") {
+            const v = parseFloat(argv[++i]);
+            if (!isNaN(v)) flags.maxCost = v;
+        } else if (arg === "--max-turns") {
+            const v = parseInt(argv[++i], 10);
+            if (!isNaN(v)) flags.maxTurns = v;
+        } else if (arg === "--help" || arg === "-h") {
+            flags.help = true;
         } else {
             rest.push(arg);
         }
@@ -66,7 +103,6 @@ function formatDate(iso: string): string {
 }
 
 function formatModel(model: string): string {
-    // Strip date suffix: "deepseek-mini-1-20260912" → "deepseek-mini-1"
     return model.replace(/-\d{8}$/, "");
 }
 
@@ -116,6 +152,12 @@ function printSessionTable(sessions: SessionIndex[], currentId: string | null): 
 export async function runCli(argv: string[] = process.argv.slice(2)): Promise<void> {
     const flags = parseArgs(argv);
 
+    // --help: print usage and exit.
+    if (flags.help) {
+        printHelp();
+        return;
+    }
+
     // --sessions: print table and exit immediately.
     if (flags.sessions) {
         const sessions = listSessions();
@@ -126,6 +168,11 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
 
     const agent = new Agent();
 
+    // Wire up auto-save: after each chat(), persist the session.
+    agent.setOnChatComplete(() => {
+        saveSession(agent.history(), flags.model);
+    });
+
     // --resume [id]: reload a saved conversation before doing anything else.
     if (flags.resume !== null) {
         const identifier = flags.resume === "" ? undefined : flags.resume;
@@ -133,16 +180,15 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
         if (saved) {
             agent.loadHistory(saved.messages as any);
             const preview = saved.title.length > 50 ? saved.title.slice(0, 50) + "…" : saved.title;
-            console.log(`(resumed session ${saved.id.slice(0, 8)} — ${saved.messages.length} messages — "${preview}")`);
+            printInfo(`resumed session ${saved.id.slice(0, 8)} — ${saved.messages.length} messages — "${preview}"`);
         } else {
-            console.log(`(no session found${identifier ? ` matching "${identifier}"` : ""})`);
+            printInfo(`no session found${identifier ? ` matching "${identifier}"` : ""}`);
         }
     }
 
     // ── One-shot mode ────────────────────────────────────────────
     if (flags.oneShot) {
         await agent.chat(flags.oneShot);
-        saveSession(agent.history(), MODEL);
         return;
     }
 
@@ -152,20 +198,70 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
         output: process.stdout,
     });
 
-    const prompt = (): void => {
-        rl.question("\nYou: ", async (line) => {
-            const input = line.trim();
+    // ── SIGINT handling ──────────────────────────────────────────
+    let sigintCount = 0;
+    process.on("SIGINT", () => {
+        if (agent.isProcessing) {
+            agent.abort();
+            printInterrupted();
+            sigintCount = 0;
+            askQuestion();
+        } else {
+            sigintCount++;
+            if (sigintCount >= 2) {
+                console.log("\nBye!\n");
+                process.exit(0);
+            }
+            console.log("\n  Press Ctrl+C again to exit.");
+            askQuestion();
+        }
+    });
 
-            if (input === "" || input === "exit" || input === "quit") {
+    printWelcome();
+
+    // ── REPL loop with rl.once (strict serial execution) ─────────
+    const askQuestion = (): void => {
+        printUserPrompt();
+        rl.once("line", async (line) => {
+            const input = line.trim();
+            sigintCount = 0;
+
+            // Empty line: re-prompt.
+            if (!input) { askQuestion(); return; }
+
+            // Exit.
+            if (input === "exit" || input === "quit") {
+                console.log("\nBye!\n");
                 rl.close();
                 return;
             }
 
+            // ── Slash commands ─────────────────────────────────────
             if (input === "/clear") {
                 agent.clearHistory();
-                saveSession(agent.history(), MODEL);
-                console.log("(history cleared)");
-                prompt();
+                saveSession(agent.history(), flags.model);
+                printInfo("history cleared");
+                askQuestion();
+                return;
+            }
+
+            if (input === "/cost") {
+                printCostReport(agent.getUsage());
+                askQuestion();
+                return;
+            }
+
+            if (input === "/compact") {
+                // Future: summarize and compress history.
+                printInfo("/compact not yet implemented — coming soon");
+                askQuestion();
+                return;
+            }
+
+            if (input === "/plan") {
+                // Future: toggle plan mode.
+                printInfo("/plan toggle not yet implemented — coming soon");
+                askQuestion();
                 return;
             }
 
@@ -174,28 +270,41 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
                 const current = latestSessionId();
                 console.log();
                 printSessionTable(sessions, current);
-                prompt();
+                askQuestion();
                 return;
             }
 
             if (input.startsWith("/delete")) {
                 const id = input.slice(7).trim();
                 if (!id) {
-                    console.log("Usage: /delete <session-id>");
+                    printError("Usage: /delete <session-id>");
                 } else if (deleteSession(id)) {
-                    console.log(`(session ${id} deleted)`);
+                    printInfo(`session ${id} deleted`);
                 } else {
-                    console.log(`(session ${id} not found)`);
+                    printError(`session ${id} not found`);
                 }
-                prompt();
+                askQuestion();
                 return;
             }
 
-            await agent.chat(input);
-            saveSession(agent.history(), MODEL);
-            prompt();
+            if (input === "/help") {
+                printHelp();
+                askQuestion();
+                return;
+            }
+
+            // ── Chat ──────────────────────────────────────────────
+            try {
+                await agent.chat(input);
+            } catch (e: any) {
+                if (e.name !== "AbortError" && !e.message?.includes("aborted")) {
+                    printError(e.message);
+                }
+            }
+
+            askQuestion();
         });
     };
 
-    prompt();
+    askQuestion();
 }

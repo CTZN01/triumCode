@@ -2,6 +2,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { getActiveToolDefinitions, type ReadFileState, type ToolContext } from "./tools.js";
 import { ToolExecutor } from "./tool-executor.js";
 import { buildStaticSystemPrompt, buildDynamicSystemContext, buildUserContextReminder } from "./prompt.js";
+import { printToolCall, printToolResult, printToolError, writeStream, endStream, printCostReport } from "./ui.js";
 
 const MODEL = process.env.MINI_MODEL || "deepseek-mini-1-20260912";
 
@@ -23,19 +24,55 @@ function buildSystemBlocks(): Anthropic.TextBlockParam[] {
     ];
 }
 
+export interface AgentUsage {
+    input: number;
+    output: number;
+    cost: number;
+}
+
 export class Agent {
     private client: Anthropic;
     private messages: Anthropic.MessageParam[] = [];
     private readFileState: ReadFileState = new Map();
-    // Track whether we have already injected the user-context reminder
-    // (CLAUDE.md + date) into the conversation.
     private injectedContextReminder = false;
+
+    // ── Abort support ───────────────────────────────────────────
+    private abortController: AbortController | null = null;
+    public isProcessing = false;
+
+    // ── Token usage tracking ────────────────────────────────────
+    private totalInputTokens = 0;
+    private totalOutputTokens = 0;
+
+    // ── Auto-save callback ──────────────────────────────────────
+    private onChatComplete?: () => void;
 
     constructor() {
         this.client = new Anthropic({
             baseURL: process.env.ANTHROPIC_BASE_URL,
             apiKey: process.env.ANTHROPIC_API_KEY,
         });
+    }
+
+    /** Register a callback invoked after each chat() completes. */
+    setOnChatComplete(fn: () => void): void {
+        this.onChatComplete = fn;
+    }
+
+    /** Abort the currently-running chat() call. */
+    abort(): void {
+        this.abortController?.abort();
+    }
+
+    /** Token usage for the current session. */
+    getUsage(): AgentUsage {
+        // Rough cost estimate: $3/M input, $15/M output (Claude Sonnet-tier).
+        const cost = (this.totalInputTokens * 3 + this.totalOutputTokens * 15) / 1_000_000;
+        return { input: this.totalInputTokens, output: this.totalOutputTokens, cost };
+    }
+
+    showCost(): void {
+        printCostReport(this.getUsage());
     }
 
     // ── Session persistence helpers ──────────────────────────────
@@ -73,19 +110,44 @@ export class Agent {
 
         this.messages.push({ role: "user", content: userContent });
 
+        // Set up abort controller for this turn.
+        this.abortController = new AbortController();
+        this.isProcessing = true;
+
+        try {
+            await this.runAgentLoop();
+        } finally {
+            this.isProcessing = false;
+            this.abortController = null;
+            // Auto-save after each chat() completes.
+            this.onChatComplete?.();
+        }
+    }
+
+    private async runAgentLoop(): Promise<void> {
         // Agent loop: keep going as long as the model produces tool calls.
         while (true) {
             const tools = getActiveToolDefinitions();
             const system = buildSystemBlocks();
 
-            const stream = await this.client.messages.create({
-                model: MODEL,
-                max_tokens: 4096,
-                system,
-                messages: this.messages,
-                tools,
-                stream: true,
-            });
+            let stream: any;
+            try {
+                stream = await this.client.messages.create({
+                    model: MODEL,
+                    max_tokens: 4096,
+                    system,
+                    messages: this.messages,
+                    tools,
+                    stream: true,
+                    signal: this.abortController?.signal,
+                } as any);
+            } catch (e: any) {
+                if (e.name === "AbortError" || this.abortController?.signal.aborted) {
+                    // User interrupted — don't push a partial assistant turn.
+                    return;
+                }
+                throw e;
+            }
 
             // ── Streaming accumulation state ────────────────────────
             const assistantContent: Anthropic.ContentBlockParam[] = [];
@@ -104,69 +166,90 @@ export class Agent {
             const executor = new ToolExecutor(context);
             const toolResults = new Map<string, Promise<string>>();
 
-            for await (const event of stream) {
-                switch (event.type) {
-                    case "content_block_start": {
-                        const idx = event.index;
-                        const cb = event.content_block;
-                        if (cb.type === "tool_use") {
-                            blocks.set(idx, {
-                                type: "tool_use",
-                                id: cb.id,
-                                name: cb.name,
-                                jsonChunks: [],
-                            });
-                        } else if (cb.type === "text") {
-                            blocks.set(idx, { type: "text", jsonChunks: [] });
-                        }
-                        break;
-                    }
-                    case "content_block_delta": {
-                        const idx = event.index;
-                        const delta = event.delta;
-                        if (delta.type === "text_delta") {
-                            process.stdout.write(delta.text);
-                            currentText += delta.text;
-                        } else if (delta.type === "input_json_delta") {
-                            blocks.get(idx)?.jsonChunks.push(delta.partial_json);
-                        }
-                        break;
-                    }
-                    case "content_block_stop": {
-                        const idx = event.index;
-                        const state = blocks.get(idx);
-                        if (!state) break;
+            try {
+                for await (const event of stream) {
+                    // Check abort between events.
+                    if (this.abortController?.signal.aborted) break;
 
-                        if (state.type === "text") {
-                            if (currentText.length > 0) {
-                                assistantContent.push({ type: "text", text: currentText });
-                                currentText = "";
+                    switch (event.type) {
+                        case "content_block_start": {
+                            const idx = event.index;
+                            const cb = event.content_block;
+                            if (cb.type === "tool_use") {
+                                blocks.set(idx, {
+                                    type: "tool_use",
+                                    id: cb.id,
+                                    name: cb.name,
+                                    jsonChunks: [],
+                                });
+                            } else if (cb.type === "text") {
+                                blocks.set(idx, { type: "text", jsonChunks: [] });
                             }
-                        } else if (state.type === "tool_use" && state.id && state.name) {
-                            const raw = state.jsonChunks.join("");
-                            let input: Record<string, any>;
-                            try {
-                                input = raw === "" ? {} : JSON.parse(raw);
-                            } catch {
-                                input = {};
-                                console.error(`  ⚠ failed to parse input for ${state.name}, using {}`);
-                            }
-
-                            assistantContent.push({
-                                type: "tool_use",
-                                id: state.id,
-                                name: state.name,
-                                input,
-                            });
-
-                            toolResults.set(state.id, executor.enqueue(state.id, state.name, input));
+                            break;
                         }
-                        break;
+                        case "content_block_delta": {
+                            const idx = event.index;
+                            const delta = event.delta;
+                            if (delta.type === "text_delta") {
+                                writeStream(delta.text);
+                                currentText += delta.text;
+                            } else if (delta.type === "input_json_delta") {
+                                blocks.get(idx)?.jsonChunks.push(delta.partial_json);
+                            }
+                            break;
+                        }
+                        case "content_block_stop": {
+                            const idx = event.index;
+                            const state = blocks.get(idx);
+                            if (!state) break;
+
+                            if (state.type === "text") {
+                                if (currentText.length > 0) {
+                                    assistantContent.push({ type: "text", text: currentText });
+                                    currentText = "";
+                                }
+                            } else if (state.type === "tool_use" && state.id && state.name) {
+                                const raw = state.jsonChunks.join("");
+                                let input: Record<string, any>;
+                                try {
+                                    input = raw === "" ? {} : JSON.parse(raw);
+                                } catch {
+                                    input = {};
+                                    printToolError(state.name, "failed to parse input, using {}");
+                                }
+
+                                assistantContent.push({
+                                    type: "tool_use",
+                                    id: state.id,
+                                    name: state.name,
+                                    input,
+                                });
+
+                                printToolCall(state.name, input);
+                                toolResults.set(state.id, executor.enqueue(state.id, state.name, input));
+                            }
+                            break;
+                        }
+                        case "message_delta": {
+                            // Track token usage from the stream.
+                            const usage = (event as any).usage;
+                            if (usage) {
+                                this.totalInputTokens += usage.input_tokens ?? 0;
+                                this.totalOutputTokens += usage.output_tokens ?? 0;
+                            }
+                            break;
+                        }
                     }
                 }
+            } catch (e: any) {
+                if (e.name === "AbortError" || this.abortController?.signal.aborted) {
+                    endStream();
+                    return;
+                }
+                throw e;
             }
 
-            process.stdout.write("\n");
+            endStream();
 
             // Wait for all in-flight tools to finish.
             await executor.drain();
