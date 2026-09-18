@@ -24,6 +24,7 @@ interface CliFlags {
     permissionMode: string;  // --yolo / -y, --plan, --accept-edits, --dont-ask
     maxCost: number | undefined;
     maxTurns: number | undefined;
+    maxTokens: number | undefined;
     help: boolean;           // --help / -h
     oneShot: string;         // remaining args joined (non-interactive)
 }
@@ -39,6 +40,7 @@ function parseArgs(argv: string[]): CliFlags {
         permissionMode: "default",
         maxCost: undefined,
         maxTurns: undefined,
+        maxTokens: undefined,
         help: false,
         oneShot: "",
     };
@@ -78,6 +80,9 @@ function parseArgs(argv: string[]): CliFlags {
         } else if (arg === "--max-turns") {
             const v = parseInt(argv[++i], 10);
             if (!isNaN(v)) flags.maxTurns = v;
+        } else if (arg === "--max-tokens") {
+            const v = parseInt(argv[++i], 10);
+            if (!isNaN(v)) flags.maxTokens = v;
         } else if (arg === "--help" || arg === "-h") {
             flags.help = true;
         } else {
@@ -188,6 +193,8 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
         apiKey: config.apiKey,
         apiBase: config.apiBase,
         thinking: config.thinking,
+        maxTokens: flags.maxTokens,
+        maxTurns: flags.maxTurns,
         planMode: flags.permissionMode === "plan",
     });
 

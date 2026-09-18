@@ -65,8 +65,27 @@ export class ToolExecutor {
         name: string,
         input: Record<string, any>,
     ): Promise<string> {
-        // Look up the tool and use its input-aware safety classification.
         const tool = getTool(name);
+
+        // Generic required-argument guard, checked before anything else so a
+        // malformed call never reaches the safety classifier or the tool body.
+        // Without it, write_file({}) dies inside a path call with a Node
+        // internals message ("paths[0] must be of type string") that tells the
+        // model nothing about what to fix.
+        // The SDK types inputSchema loosely, so narrow it at runtime rather
+        // than trusting the declared shape.
+        const declared = (tool?.inputSchema as { required?: unknown } | undefined)?.required;
+        const missing = (Array.isArray(declared) ? declared : [])
+            .filter((key): key is string => typeof key === "string")
+            .filter((key) => input[key] === undefined);
+        if (missing.length > 0) {
+            return Promise.resolve(
+                `Error: missing required argument${missing.length > 1 ? "s" : ""} for ${name}: `
+                + `${missing.join(", ")}. Re-issue the call with every required argument.`,
+            );
+        }
+
+        // Look up the tool and use its input-aware safety classification.
         const isConcurrencySafe_ = tool?.isConcurrencySafe(input) ?? false;
 
         return new Promise<string>((resolve) => {

@@ -3,13 +3,21 @@ import { getActiveToolDefinitions, type ReadFileState, type ToolContext } from "
 import { ToolExecutor } from "./tool-executor.js";
 import { buildStaticSystemPrompt, buildDynamicSystemContext, buildUserContextReminder } from "./prompt.js";
 import {
-    printToolCall, printToolResult, printToolError, writeStream, endStream, printCostReport,
-    beginStatus, updateStatus, endStatus, printThinkingDuration, pickStatusVerb,
+    printToolCall, printToolResult, writeStream, endStream, printCostReport,
+    beginStatus, updateStatus, endStatus, printThinkingDuration, pickStatusVerb, printTurnEnd,
 } from "./ui.js";
 import { withRetry } from "./retry.js";
 import { resolveThinkingMode, applyThinkingParams, filterThinkingBlocks, type ThinkingMode } from "./thinking.js";
 
-const MAX_TOKENS = 4096;
+// Extended thinking counts towards max_tokens, and endpoints that think by
+// default (MiMo, for one) will happily spend the whole budget reasoning and
+// then get cut off mid-sentence — or mid-tool-call. 4096 was small enough to
+// trigger that constantly.
+const DEFAULT_MAX_TOKENS = 32_000;
+
+// Hard ceiling on agent-loop iterations. Without it, a tool that keeps
+// returning the same error loops until the API budget runs out.
+const DEFAULT_MAX_TURNS = 25;
 
 // System prompt as an array of TextBlockParam. The first block (persona +
 // tool guidance) carries cache_control so it is reused across turns without
@@ -40,6 +48,8 @@ export interface AgentOptions {
     apiKey?: string;      // --api-key from CLI, falls back to ANTHROPIC_API_KEY env
     apiBase?: string;     // --api-base from CLI, falls back to ANTHROPIC_BASE_URL env
     thinking?: boolean;   // --thinking flag from CLI
+    maxTokens?: number;   // --max-tokens flag from CLI
+    maxTurns?: number;    // --max-turns flag from CLI
     planMode?: boolean;   // --plan flag from CLI
 }
 
@@ -50,6 +60,8 @@ export class Agent {
     private readFileState: ReadFileState = new Map();
     private injectedContextReminder = false;
     private thinkingEnabled: boolean;
+    private maxTokens: number;
+    private maxTurns: number;
     public planMode: boolean;
 
     // ── Abort support ───────────────────────────────────────────
@@ -70,6 +82,12 @@ export class Agent {
             apiKey: options?.apiKey || process.env.ANTHROPIC_API_KEY,
         });
         this.thinkingEnabled = options?.thinking ?? false;
+        this.maxTokens = options?.maxTokens && options.maxTokens > 0
+            ? options.maxTokens
+            : DEFAULT_MAX_TOKENS;
+        this.maxTurns = options?.maxTurns && options.maxTurns > 0
+            ? options.maxTurns
+            : DEFAULT_MAX_TURNS;
         this.planMode = options?.planMode ?? false;
     }
 
@@ -157,11 +175,24 @@ export class Agent {
         const thinkingMode = resolveThinkingMode(this.model, this.thinkingEnabled);
         const thinkingParams: Record<string, any> = {};
         if (thinkingMode !== "disabled") {
-            applyThinkingParams(thinkingParams, thinkingMode, MAX_TOKENS);
+            applyThinkingParams(thinkingParams, thinkingMode, this.maxTokens);
         }
+
+
+        let turns = 0;
+        // An empty response is usually a transient blip, so give it one retry.
+        // Bounded at one: if the cause is a too-small max_tokens, retrying
+        // just spends another call to be truncated the same way.
+        let emptyTurnRetried = false;
 
         // Agent loop: keep going as long as the model produces tool calls.
         while (true) {
+            if (turns >= this.maxTurns) {
+                printTurnEnd(`stopped after ${this.maxTurns} turns — the task may be unfinished`);
+                return;
+            }
+            turns++;
+
             // Each iteration is a fresh "model is working" phase, so the
             // elapsed clock restarts. The defensive endStatus() guarantees
             // that even if a phase left the status active.
@@ -178,7 +209,7 @@ export class Agent {
                 stream = await withRetry(async (signal) => {
                     return this.client.messages.create({
                         model: this.model,
-                        max_tokens: MAX_TOKENS,
+                        max_tokens: this.maxTokens,
                         system,
                         messages: this.messages,
                         tools,
@@ -198,6 +229,9 @@ export class Agent {
             // ── Streaming accumulation state ────────────────────────
             const assistantContent: Anthropic.ContentBlockParam[] = [];
             let currentText = "";
+            // "end_turn" / "tool_use" / "max_tokens" / "refusal" / ...
+            // max_tokens is the one that matters: it means the turn was cut off.
+            let stopReason: string | null = null;
 
             // Per-block parser state, keyed by content_block index.
             interface BlockState {
@@ -287,14 +321,25 @@ export class Agent {
                                 }
                             } else if (state.type === "tool_use" && state.id && state.name) {
                                 const raw = state.jsonChunks.join("");
-                                let input: Record<string, any>;
-                                try {
-                                    input = raw === "" ? {} : JSON.parse(raw);
-                                } catch {
-                                    input = {};
-                                    printToolError(state.name, "failed to parse input, using {}");
+                                let input: Record<string, any> = {};
+                                let inputError: string | null = null;
+
+                                if (raw.trim() === "") {
+                                    // No arguments arrived at all — the call was
+                                    // cut off mid-stream. Running it with {} gives
+                                    // a baffling downstream error (write_file({})
+                                    // dies deep inside a path call), so don't.
+                                    inputError = `the ${state.name} call arrived with no arguments — it was cut off`;
+                                } else {
+                                    try {
+                                        input = JSON.parse(raw);
+                                    } catch {
+                                        inputError = `the ${state.name} arguments were not valid JSON — the call was cut off`;
+                                    }
                                 }
 
+                                // Still recorded so the tool_result below has a
+                                // matching tool_use to pair with.
                                 assistantContent.push({
                                     type: "tool_use",
                                     id: state.id,
@@ -304,7 +349,16 @@ export class Agent {
 
                                 printToolCall(state.name, input);
                                 toolStartTimes.set(state.id, Date.now());
-                                toolResults.set(state.id, executor.enqueue(state.id, state.name, input));
+
+                                if (inputError) {
+                                    // Answer with an error instead of executing, so
+                                    // the model can re-issue the call correctly.
+                                    toolResults.set(state.id, Promise.resolve(
+                                        `Error: ${inputError}. Re-issue the call with the full arguments.`,
+                                    ));
+                                } else {
+                                    toolResults.set(state.id, executor.enqueue(state.id, state.name, input));
+                                }
                             }
                             break;
                         }
@@ -315,6 +369,10 @@ export class Agent {
                                 this.totalInputTokens += usage.input_tokens ?? 0;
                                 this.totalOutputTokens += usage.output_tokens ?? 0;
                             }
+                            // Discarding this was why a truncated turn looked
+                            // identical to a finished one.
+                            const reason = (event as any).delta?.stop_reason;
+                            if (reason) stopReason = reason;
                             break;
                         }
                     }
@@ -354,12 +412,45 @@ export class Agent {
             // which then reports a fresh API call as already 6s old.
             endStatus();
 
-            // Filter thinking blocks before storing in history.
-            const filtered = thinkingMode !== "disabled"
-                ? filterThinkingBlocks(assistantContent)
-                : assistantContent;
+            // Drop thinking blocks before storing in history: they are the
+            // model's scratchpad and can be thousands of tokens long.
+            // Unconditional because the stream loop skips thinking blocks at
+            // content_block_start and never adds them — this is belt-and-braces
+            // for a case the loop can't currently produce.
+            const filtered = filterThinkingBlocks(assistantContent);
+
+            // A turn with no text and no tool use is not a finished turn. It
+            // used to be treated as one — silently — and the empty assistant
+            // message was pushed into history, which can also wedge the next
+            // request. Endpoints that spend max_tokens on thinking hit this
+            // constantly: the model thinks, gets cut off, and says nothing.
+            if (filtered.length === 0) {
+                // Truncated: retrying just buys another call to be cut off the
+                // same way. The budget is the problem, and only the user can
+                // raise it.
+                if (stopReason === "max_tokens") {
+                    printTurnEnd(
+                        "the model produced no output — it is spending the whole token budget on thinking. Raise --max-tokens",
+                    );
+                    return;
+                }
+                // Not truncated: a genuinely empty response, usually transient.
+                if (!emptyTurnRetried) {
+                    printTurnEnd("the model returned an empty turn — retrying once");
+                    emptyTurnRetried = true;
+                    continue;
+                }
+                printTurnEnd("the model returned an empty turn again — nothing to continue with");
+                return;
+            }
 
             this.messages.push({ role: "assistant", content: filtered });
+
+            // A truncated turn is reported even when it continues below: the
+            // model may have been cut off mid-sentence or mid-tool-call.
+            if (stopReason === "max_tokens") {
+                printTurnEnd("response hit the max token limit — this turn may be incomplete");
+            }
 
             // If no tools were called, the model is done.
             if (toolResults.size === 0) return;

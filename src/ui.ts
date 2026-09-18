@@ -355,6 +355,16 @@ export function printToolError(name: string, error: string): void {
     logLine(chalk.red(`    ↳ ✗ Error: ${error}`));
 }
 
+// ── Turn outcome ────────────────────────────────────────────
+// Printed only when a turn stops for a reason the model's own output doesn't
+// explain. Silence means the model finished normally — which is exactly the
+// distinction that used to be invisible: a truncated turn, an empty turn, and
+// a completed turn all just returned to the prompt.
+
+export function printTurnEnd(reason: string): void {
+    logLine(chalk.yellow(`  ! ${reason}`));
+}
+
 // ── Streaming output ────────────────────────────────────────
 
 export function writeStream(text: string): void {
@@ -399,7 +409,9 @@ Options:
   --yolo, -y       Bypass all permission prompts
   --plan           Plan mode: read-only, no edits
   --max-cost N     Stop after $N spent
-  --max-turns N    Stop after N conversation turns
+  --max-tokens N   Max output tokens per request (default: 32000). Thinking
+                   counts towards this, so raise it if reasoning eats the reply
+  --max-turns N    Stop after N agent-loop turns (default: 25)
   --help, -h       Show this help
 
 Configuration (in order of priority):
