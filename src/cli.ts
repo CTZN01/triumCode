@@ -1,5 +1,7 @@
 import { Agent } from "./agent.js";
 import * as readline from "node:readline";
+import { existsSync, readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import {
     saveSession, loadSession, listSessions, deleteSession,
     latestSessionId, type SessionIndex,
@@ -10,6 +12,28 @@ import {
 } from "./ui.js";
 
 // ═══════════════════════════════════════════════════════════════
+// .env loader — zero-dependency, reads KEY=VALUE lines
+// ═══════════════════════════════════════════════════════════════
+
+function loadDotEnv(): void {
+    const envPath = resolve(".env");
+    if (!existsSync(envPath)) return;
+    try {
+        const lines = readFileSync(envPath, "utf-8").split("\n");
+        for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed || trimmed.startsWith("#")) continue;
+            const eq = trimmed.indexOf("=");
+            if (eq === -1) continue;
+            const key = trimmed.slice(0, eq).trim();
+            const val = trimmed.slice(eq + 1).trim();
+            // Don't overwrite existing env vars — real env takes precedence.
+            if (!process.env[key]) process.env[key] = val;
+        }
+    } catch { /* best effort */ }
+}
+
+// ═══════════════════════════════════════════════════════════════
 // Argument parsing
 // ═══════════════════════════════════════════════════════════════
 
@@ -17,6 +41,8 @@ interface CliFlags {
     resume: string | null;   // null = no --resume; "" = --resume (latest); "abc" = --resume abc
     sessions: boolean;       // --sessions: list and exit
     model: string;           // --model / -m
+    apiKey: string;          // --api-key
+    apiBase: string;         // --api-base
     thinking: boolean;       // --thinking
     permissionMode: string;  // --yolo / -y, --plan, --accept-edits, --dont-ask
     maxCost: number | undefined;
@@ -26,10 +52,15 @@ interface CliFlags {
 }
 
 function parseArgs(argv: string[]): CliFlags {
+    // Load .env before parsing — env vars become fallback defaults.
+    loadDotEnv();
+
     const flags: CliFlags = {
         resume: null,
         sessions: false,
         model: process.env.MINI_MODEL || "deepseek-mini-1-20260912",
+        apiKey: process.env.ANTHROPIC_API_KEY || "",
+        apiBase: process.env.ANTHROPIC_BASE_URL || "",
         thinking: false,
         permissionMode: "default",
         maxCost: undefined,
@@ -41,7 +72,11 @@ function parseArgs(argv: string[]): CliFlags {
 
     for (let i = 0; i < argv.length; i++) {
         const arg = argv[i];
-        if (arg === "--resume") {
+        if (arg === "--api-key") {
+            flags.apiKey = argv[++i] || flags.apiKey;
+        } else if (arg === "--api-base") {
+            flags.apiBase = argv[++i] || flags.apiBase;
+        } else if (arg === "--resume") {
             const next = argv[i + 1];
             if (next && !next.startsWith("--")) {
                 flags.resume = next;
@@ -166,7 +201,21 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
         return;
     }
 
-    const agent = new Agent({ model: flags.model, thinking: flags.thinking });
+    // Validate API key — fail early with actionable message.
+    if (!flags.apiKey) {
+        printError("API key required. Set it via one of:");
+        printInfo("  1. Create .env file:     echo ANTHROPIC_API_KEY=sk-ant-xxx > .env");
+        printInfo("  2. Environment variable: export ANTHROPIC_API_KEY=sk-ant-xxx");
+        printInfo("  3. CLI flag:             --api-key sk-ant-xxx");
+        process.exit(1);
+    }
+
+    const agent = new Agent({
+        model: flags.model,
+        apiKey: flags.apiKey,
+        apiBase: flags.apiBase || undefined,
+        thinking: flags.thinking,
+    });
 
     // Wire up auto-save: after each chat(), persist the session.
     agent.setOnChatComplete(() => {

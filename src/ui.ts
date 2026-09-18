@@ -124,15 +124,22 @@ export function printHelp(): void {
 Usage: triumph [options] [prompt]
 
 Options:
+  --api-key KEY    Anthropic API key (or set ANTHROPIC_API_KEY / .env)
+  --api-base URL   API base URL (or set ANTHROPIC_BASE_URL / .env)
+  --model, -m      Model to use (default: from MINI_MODEL env or .env)
+  --thinking       Enable thinking/reasoning mode
   --resume [id]    Resume a saved session (latest, or by ID prefix)
   --sessions       List all sessions and exit
-  --model, -m      Model to use (default: from MINI_MODEL env)
-  --thinking       Enable thinking/reasoning mode
   --yolo, -y       Bypass all permission prompts
   --plan           Plan mode: read-only, no edits
   --max-cost N     Stop after $N spent
   --max-turns N    Stop after N conversation turns
   --help, -h       Show this help
+
+Configuration (in order of priority):
+  1. CLI flags (--api-key, --model, --api-base)
+  2. .env file in project root
+  3. Environment variables
 
 REPL Commands:
   /clear           Clear conversation history

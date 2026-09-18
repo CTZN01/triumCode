@@ -34,6 +34,8 @@ export interface AgentUsage {
 
 export interface AgentOptions {
     model?: string;       // --model / -m from CLI, falls back to MINI_MODEL env
+    apiKey?: string;      // --api-key from CLI, falls back to ANTHROPIC_API_KEY env
+    apiBase?: string;     // --api-base from CLI, falls back to ANTHROPIC_BASE_URL env
     thinking?: boolean;   // --thinking flag from CLI
 }
 
@@ -59,8 +61,8 @@ export class Agent {
     constructor(options?: AgentOptions) {
         this.model = options?.model || process.env.MINI_MODEL || "deepseek-mini-1-20260912";
         this.client = new Anthropic({
-            baseURL: process.env.ANTHROPIC_BASE_URL,
-            apiKey: process.env.ANTHROPIC_API_KEY,
+            baseURL: options?.apiBase || process.env.ANTHROPIC_BASE_URL,
+            apiKey: options?.apiKey || process.env.ANTHROPIC_API_KEY,
         });
         this.thinkingEnabled = options?.thinking ?? false;
     }
