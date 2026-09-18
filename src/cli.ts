@@ -327,3 +327,9 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
 
     askQuestion();
 }
+
+// Entry point — run when executed directly.
+runCli().catch((e) => {
+    printError(e.message);
+    process.exit(1);
+});
