@@ -484,6 +484,7 @@ Options:
   --max-cost N     Stop after $N spent
   --max-tokens N   Max output tokens per request (default: 32000). Thinking
                    counts towards this, so raise it if reasoning eats the reply
+    --context-window N  Context window size in tokens
   --max-turns N    Stop after N agent-loop turns (default: 25)
   --help, -h       Show this help
 

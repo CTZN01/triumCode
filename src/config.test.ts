@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 // query below: a cached module would keep reporting the first test's config.
 let caseId = 0;
 
-const ENV_KEYS = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "MINI_MODEL", "TRIUMCODE_EFFORT"] as const;
+const ENV_KEYS = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "MINI_MODEL", "TRIUMCODE_EFFORT", "MINI_CONTEXT_WINDOW"] as const;
 
 async function loadConfig(
     saved: Record<string, unknown> | null,
@@ -111,6 +111,20 @@ test("with nothing configured, the environment is used and the rest falls back t
     assert.equal(sources.apiBase, "default");
     assert.equal(sources.model, "default");
     assert.equal(sources.thinking, "default");
+    assert.equal(config.contextWindow, 200_000);
+    assert.equal(sources.contextWindow, "default");
+});
+
+test("context window follows CLI, config, then environment precedence", async (t) => {
+    const { mod, restore } = await loadConfig(
+        { contextWindow: 900_000 },
+        { MINI_CONTEXT_WINDOW: "1000000" },
+    );
+    t.after(restore);
+
+    assert.equal(mod.resolveConfigDetailed({}).config.contextWindow, 900_000);
+    assert.equal(mod.resolveConfigDetailed({ contextWindow: 1_000_000 }).config.contextWindow, 1_000_000);
+    assert.equal(mod.resolveConfigDetailed({}).sources.contextWindow, "config");
 });
 
 // ── Conflict reporting ──────────────────────────────────────

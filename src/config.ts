@@ -2,6 +2,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import * as os from "node:os";
 import * as readline from "node:readline";
+import { DEFAULT_CONTEXT_WINDOW } from "./context-compression.js";
 
 // ═══════════════════════════════════════════════════════════════
 // Global user config — ~/.triumcode/config.json
@@ -36,6 +37,7 @@ export interface UserConfig {
     model?: string;
     thinking?: boolean;
     effort?: string;
+    contextWindow?: number;
 }
 
 function readConfig(): UserConfig {
@@ -62,6 +64,7 @@ export interface ResolvedConfig {
     model: string;
     thinking: boolean;
     effort: string;
+    contextWindow: number;
 }
 
 /** Where a single resolved field came from. */
@@ -118,6 +121,7 @@ export function resolveConfigDetailed(flags: {
     model?: string;
     thinking?: boolean;
     effort?: string;
+    contextWindow?: number;
 }): ResolvedConfigBundle {
     const saved = readConfig();
 
@@ -133,6 +137,11 @@ export function resolveConfigDetailed(flags: {
     const effort = firstOf<string>([
         ["flag", flags.effort], ["config", saved.effort], ["env", process.env.TRIUMCODE_EFFORT],
     ], "");
+    const contextWindow = firstOf<number>([
+        ["flag", flags.contextWindow],
+        ["config", saved.contextWindow],
+        ["env", parseContextWindow(process.env.MINI_CONTEXT_WINDOW)],
+    ], DEFAULT_CONTEXT_WINDOW);
 
     const thinking: Sourced<boolean> =
         flags.thinking !== undefined ? { value: flags.thinking, source: "flag" }
@@ -142,6 +151,7 @@ export function resolveConfigDetailed(flags: {
     const sources = {
         apiKey: apiKey.source, apiBase: apiBase.source, model: model.source,
         thinking: thinking.source, effort: effort.source,
+        contextWindow: contextWindow.source,
     };
 
     // Only flag a conflict when the shadowed source would actually have
@@ -165,10 +175,17 @@ export function resolveConfigDetailed(flags: {
         config: {
             apiKey: apiKey.value, apiBase: apiBase.value, model: model.value,
             thinking: thinking.value, effort: effort.value,
+            contextWindow: contextWindow.value,
         },
         sources,
         conflicts,
     };
+}
+
+function parseContextWindow(value: string | undefined): number | undefined {
+    if (!value) return undefined;
+    const parsed = Number(value);
+    return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : undefined;
 }
 
 export function resolveConfig(flags: {
@@ -177,6 +194,7 @@ export function resolveConfig(flags: {
     model?: string;
     thinking?: boolean;
     effort?: string;
+    contextWindow?: number;
 }): ResolvedConfig {
     return resolveConfigDetailed(flags).config;
 }
@@ -237,6 +255,7 @@ export async function ensureConfig(flags: {
     model?: string;
     thinking?: boolean;
     effort?: string;
+    contextWindow?: number;
 }): Promise<ResolvedConfigBundle | null> {
     const bundle = resolveConfigDetailed(flags);
 
@@ -267,11 +286,15 @@ export async function ensureConfig(flags: {
     // Everything just came from the file we wrote — say so explicitly, so
     // the user knows which endpoint is now in effect without having to ask.
     return {
-        config: { apiKey, apiBase, model, thinking: flags.thinking ?? false, effort: flags.effort || "" },
+        config: {
+            apiKey, apiBase, model, thinking: flags.thinking ?? false,
+            effort: flags.effort || "", contextWindow: flags.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
+        },
         sources: {
             apiKey: "config", apiBase: "config", model: "config",
             thinking: flags.thinking !== undefined ? "flag" : "default",
             effort: flags.effort ? "flag" : "default",
+            contextWindow: flags.contextWindow ? "flag" : "default",
         },
         // Setup just overwrote the file, so nothing is shadowing it.
         conflicts: [],

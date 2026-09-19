@@ -13,7 +13,7 @@ import {
 } from "./thinking.js";
 import {
     compactHistory, compressHistory, prepareToolResult, shouldAutoCompact,
-    withCacheBreakpoints,
+    withCacheBreakpoints, DEFAULT_CONTEXT_WINDOW,
 } from "./context-compression.js";
 
 // Extended thinking counts towards max_tokens, and endpoints that think by
@@ -82,6 +82,7 @@ export interface AgentOptions {
     effort?: string;      // --effort flag from CLI
     maxTokens?: number;   // --max-tokens flag from CLI
     maxTurns?: number;    // --max-turns flag from CLI
+    contextWindow?: number; // --context-window, in tokens
     planMode?: boolean;   // --plan flag from CLI
 }
 
@@ -95,6 +96,7 @@ export class Agent {
     private effort: EffortLevel | null;
     private maxTokens: number;
     private maxTurns: number;
+    private contextWindow: number;
     // Set once the endpoint has rejected the thinking/effort params, so later
     // turns skip sending them instead of paying a 400 on every request.
     private optionalParamsRejected = false;
@@ -129,6 +131,9 @@ export class Agent {
         this.maxTurns = options?.maxTurns && options.maxTurns > 0
             ? options.maxTurns
             : DEFAULT_MAX_TURNS;
+        this.contextWindow = options?.contextWindow && options.contextWindow > 0
+            ? Math.floor(options.contextWindow)
+            : DEFAULT_CONTEXT_WINDOW;
         this.planMode = options?.planMode ?? false;
     }
 
@@ -202,7 +207,7 @@ export class Agent {
         }
 
         this.messages.push({ role: "user", content: userContent });
-        if (shouldAutoCompact(this.messages)) this.compact();
+        if (shouldAutoCompact(this.messages, this.contextWindow)) this.compact();
 
         // Set up abort controller for this turn.
         this.abortController = new AbortController();
@@ -293,6 +298,7 @@ export class Agent {
 
             const tools = getActiveToolDefinitions();
             const compressed = compressHistory(this.messages, {
+                contextWindow: this.contextWindow,
                 cacheHot: this.lastRequestAt > 0 && Date.now() - this.lastRequestAt < 5 * 60_000,
                 idleMs: this.lastRequestAt > 0 ? Date.now() - this.lastRequestAt : 0,
             });

@@ -72,6 +72,7 @@ node dist/cli.js --sessions
 | `ANTHROPIC_API_KEY` | API Key | _（无 — 必填）_ |
 | `ANTHROPIC_BASE_URL` | API 端点 | `https://api.anthropic.com` |
 | `MINI_MODEL` | 默认模型 | `claude-sonnet-4-20250514` |
+| `MINI_CONTEXT_WINDOW` | 上下文窗口大小（token） | `200000` |
 
 ## REPL 命令
 

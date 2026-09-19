@@ -29,6 +29,7 @@ interface CliFlags {
     maxCost: number | undefined;
     maxTurns: number | undefined;
     maxTokens: number | undefined;
+    contextWindow: number | undefined;
     help: boolean;           // --help / -h
     oneShot: string;         // remaining args joined (non-interactive)
 }
@@ -46,6 +47,7 @@ function parseArgs(argv: string[]): CliFlags {
         maxCost: undefined,
         maxTurns: undefined,
         maxTokens: undefined,
+        contextWindow: undefined,
         help: false,
         oneShot: "",
     };
@@ -95,6 +97,9 @@ function parseArgs(argv: string[]): CliFlags {
         } else if (arg === "--max-tokens") {
             const v = parseInt(argv[++i], 10);
             if (!isNaN(v)) flags.maxTokens = v;
+        } else if (arg === "--context-window") {
+            const v = parseInt(argv[++i], 10);
+            if (!isNaN(v) && v > 0) flags.contextWindow = v;
         } else if (arg === "--help" || arg === "-h") {
             flags.help = true;
         } else {
@@ -214,6 +219,7 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
         effort: config.effort,
         maxTokens: flags.maxTokens,
         maxTurns: flags.maxTurns,
+        contextWindow: config.contextWindow,
         planMode: flags.permissionMode === "plan",
     });
 

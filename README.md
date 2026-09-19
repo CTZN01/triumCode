@@ -66,6 +66,7 @@ a single run, or in CI.
 --plan            Plan mode: read-only, no edits
 --max-cost N      Stop after $N spent
 --max-turns N     Stop after N conversation turns
+--context-window N  Context window size in tokens (use 1000000 for 1M models)
 --help, -h        Show help
 ```
 
@@ -76,6 +77,7 @@ a single run, or in CI.
 | `ANTHROPIC_API_KEY` | API key | _(none — required)_ |
 | `ANTHROPIC_BASE_URL` | API endpoint | `https://api.anthropic.com` |
 | `MINI_MODEL` | Default model | `claude-sonnet-4-20250514` |
+| `MINI_CONTEXT_WINDOW` | Context window size in tokens | `200000` |
 
 ## REPL Commands
 
