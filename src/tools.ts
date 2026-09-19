@@ -833,6 +833,65 @@ const runCommandTool = register({
         "Windows .cmd shims (npm, npx, yarn) are automatically resolved to their underlying node command.",
 });
 
+// ─── git_diff ────────────────────────────────────────────────
+
+const GIT_DIFF_MAX_CHARS = 100_000;
+
+function gitDiffImpl(input: { cwd?: string; staged?: boolean; path?: string }): string {
+    const args = ["diff"];
+    if (input.staged === true) args.push("--cached");
+    if (input.path) args.push("--", input.path);
+
+    try {
+        const output = execFileSync("git", args, {
+            cwd: input.cwd || process.cwd(),
+            encoding: "utf-8",
+            maxBuffer: GIT_DIFF_MAX_CHARS * 8,
+            timeout: 10_000,
+            stdio: ["ignore", "pipe", "pipe"],
+        });
+        const diff = output.trimEnd();
+        if (diff === "") return "No changes.";
+        if (diff.length > GIT_DIFF_MAX_CHARS) {
+            return `${diff.slice(0, GIT_DIFF_MAX_CHARS)}\n\n(diff truncated at ${GIT_DIFF_MAX_CHARS} characters)`;
+        }
+        return diff;
+    } catch (e: any) {
+        if (e.code === "ENOENT") {
+            return input.cwd
+                ? `Error running git diff: working directory does not exist: ${input.cwd}`
+                : "Error: git executable not found.";
+        }
+        if (e.code === "ETIMEDOUT") return "Error: git diff timed out after 10s.";
+        const detail = String(e.stderr ?? e.message ?? "git diff failed").trim();
+        return `Error running git diff: ${detail}`;
+    }
+}
+
+const gitDiffTool = register({
+    name: "git_diff",
+    description: "Show the Git diff for the working tree or staged changes. Read-only; optionally limit the diff to one path.",
+    inputSchema: {
+        type: "object",
+        properties: {
+            cwd: { type: "string", description: "Git working directory. Defaults to the current directory." },
+            staged: { type: "boolean", description: "Show staged changes instead of working-tree changes." },
+            path: { type: "string", description: "Optional file or directory path to limit the diff." },
+        },
+        required: [],
+    },
+    isConcurrencySafe: () => true,
+    isReadOnly: () => true,
+    isDestructive: () => false,
+    maxResultSizeChars: GIT_DIFF_MAX_CHARS,
+
+    async call(input) {
+        return gitDiffImpl(input as { cwd?: string; staged?: boolean; path?: string });
+    },
+
+    prompt: () => "Use git_diff to inspect changes before editing or reporting implementation status.",
+});
+
 // ─── ask_user ─────────────────────────────────────────────
 
 const askUserTool = register({
