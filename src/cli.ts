@@ -12,6 +12,7 @@ import {
 } from "./ui.js";
 import { ensureConfig, describeSource } from "./config.js";
 import { parseEffort, EFFORT_LEVELS } from "./thinking.js";
+import { getSkill, resolveSkillPrompt } from "./skills.js";
 
 // ═══════════════════════════════════════════════════════════════
 // Argument parsing
@@ -392,6 +393,33 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
                 printHelp();
                 askQuestion();
                 return;
+            }
+
+            // User-invocable skills share the slash-command surface. Skills
+            // marked user-invocable=false remain available only through the
+            // model's skill tool.
+            if (input.startsWith("/")) {
+                const [rawName, ...argumentParts] = input.slice(1).split(/\s+/);
+                const skill = getSkill(rawName);
+                if (skill) {
+                    if (!skill.userInvocable) {
+                        printError(`skill /${rawName} is model-invocable only`);
+                        askQuestion();
+                        return;
+                    }
+                    const prompt = resolveSkillPrompt(rawName, argumentParts.join(" "));
+                    if (prompt) {
+                        try {
+                            await agent.chat(prompt);
+                        } catch (e: any) {
+                            if (e.name !== "AbortError" && !e.message?.includes("aborted")) {
+                                printError(e.message);
+                            }
+                        }
+                        askQuestion();
+                        return;
+                    }
+                }
             }
 
             // ── Chat ──────────────────────────────────────────────

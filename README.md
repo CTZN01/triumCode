@@ -79,6 +79,35 @@ a single run, or in CI.
 | `MINI_MODEL` | Default model | `claude-sonnet-4-20250514` |
 | `MINI_CONTEXT_WINDOW` | Context window size in tokens | `200000` |
 
+### Skills
+
+Skills are reusable Markdown prompts stored in `.claude/skills/`.
+
+```markdown
+---
+name: commit
+description: Review and create a conventional commit
+when_to_use: The user asks to commit changes
+allowed-tools: git_diff, run_command
+user-invocable: true
+mode: inline
+---
+
+Review the current changes, then create a commit for $ARGUMENTS.
+The skill directory is ${CLAUDE_SKILL_DIR}.
+```
+
+User skills are loaded from `~/.claude/skills/`; project skills are loaded from
+`.claude/skills/` and override a user skill with the same name. Use `/commit
+message` for a user-invocable skill, or let the model load one with the
+`skill` tool. `user-invocable: false` hides a skill from slash commands.
+
+`allowed-tools` accepts either a comma-separated list or a JSON array. The
+supported template variables are `$ARGUMENTS`, `${ARGUMENTS}`, and
+`${CLAUDE_SKILL_DIR}`. `mode: fork` marks the prompt as isolated sub-agent
+work; the current runtime returns that isolation contract to the agent while
+keeping tool execution in the same process.
+
 ## REPL Commands
 
 Once inside the interactive REPL:

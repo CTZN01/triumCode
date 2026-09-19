@@ -3,6 +3,7 @@ import { join, resolve, dirname } from "node:path";
 import { execSync } from "node:child_process";
 import * as os from "node:os";
 import { buildToolPromptBlock, getDeferredToolNames } from "./tools.js";
+import { buildSkillPromptBlock } from "./skills.js";
 
 // ═══════════════════════════════════════════════════════════════
 // CLAUDE.md loader — walk up from cwd collecting project instructions
@@ -224,8 +225,9 @@ Execute only after the user explicitly approves the plan.`;
 // cacheable across turns via prompt caching.
 export function buildStaticSystemPrompt(planMode = false): string {
     const toolBlock = buildToolPromptBlock();
+    const skillBlock = buildSkillPromptBlock();
     const persona = planMode ? PERSONA + PLAN_MODE : PERSONA;
-    return toolBlock ? `${persona}\n\n${toolBlock}` : persona;
+    return [persona, toolBlock, skillBlock].filter(Boolean).join("\n\n");
 }
 
 // Probe common development tools on Windows to give the model actionable

@@ -3,6 +3,7 @@ import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { StringDecoder } from "node:string_decoder";
 import { dirname, join, basename, resolve } from "node:path";
 import type Anthropic from "@anthropic-ai/sdk";
+import { getSkill, resolveSkillPrompt } from "./skills.js";
 
 // ═══════════════════════════════════════════════════════════════
 // Tool Interface — each tool's complete behavior contract
@@ -928,6 +929,41 @@ const askUserTool = register({
         "Use ask_user when you need to ask the user a question mid-task. " +
         "Provide 2-3 options when the choice is constrained, or omit options for open-ended questions. " +
         "The user may skip without answering — respect that and continue with your best judgment.",
+});
+
+// ─── skill ───────────────────────────────────────────────────
+
+register({
+    name: "skill",
+    description: "Load a reusable project or user skill by name. The returned prompt is the complete instructions for that skill.",
+    inputSchema: {
+        type: "object",
+        properties: {
+            name: { type: "string", description: "Skill name" },
+            arguments: { type: "string", description: "Arguments passed to the skill" },
+        },
+        required: ["name"],
+    },
+    isConcurrencySafe: () => true,
+    isReadOnly: () => true,
+    isDestructive: () => false,
+    maxResultSizeChars: 50_000,
+
+    async call(input) {
+        const name = String(input.name ?? "").trim();
+        if (!name) return "Error: skill name must not be empty.";
+        const skill = getSkill(name);
+        if (!skill) return `Error: skill \"${name}\" was not found.`;
+        const prompt = resolveSkillPrompt(name, String(input.arguments ?? ""));
+        if (!prompt) return `Error: skill \"${name}\" could not be loaded.`;
+        const allowed = skill.allowedTools.length > 0 ? skill.allowedTools.join(", ") : "all available tools";
+        return `${prompt}\nAllowed tools for this skill: ${allowed}`;
+    },
+
+    prompt: () =>
+        "Use skill when a listed reusable skill matches the user's request. " +
+        "Load the skill before acting and follow its prompt and allowed-tools. " +
+        "Skills with mode=fork should be treated as isolated sub-agent work.",
 });
 
 // ─── tool_search ─────────────────────────────────────────────
