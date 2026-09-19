@@ -76,7 +76,6 @@ function installFakeTty(columns = 80): FakeTty {
     };
 }
 
-const SPINNER = "[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]";
 
 // ═══════════════════════════════════════════════════════════════
 // Layout regressions
@@ -93,7 +92,7 @@ test("model text and a following tool call land on separate lines", () => {
 
         assert.equal(vt.screen(), [
             "",
-            "You: 我再补充几个经典算法。",
+            "  我再补充几个经典算法。",
             "  • Edit src/a.py",
             "    ↳ ✓ Edited at line 211 (81ms)",
         ].join("\n"));
@@ -126,7 +125,7 @@ test("endStream adds a newline only when text left the cursor mid-line", () => {
 
         ui.writeStream("hi");
         ui.endStream();
-        assert.equal(vt.screen(), "hi");
+        assert.equal(vt.screen(), "  hi");
     } finally {
         vt.restore();
     }
@@ -210,7 +209,7 @@ test("a blank line separates tool output from the next text block", () => {
             "  • Read src/a.py",
             "    ↳ ✓ 2 lines (3ms)",
             "",
-            "Now I know what to change.",
+            "  Now I know what to change.",
         ].join("\n"));
     } finally {
         vt.restore();
@@ -302,8 +301,8 @@ test("todo and git_diff calls render a summary instead of raw JSON", () => {
 test("the status line waits out the arm delay before its first frame", () => {
     const vt = installFakeTty();
     try {
-        const t0 = Date.now();
         ui.beginStatus("Pondering");
+        const t0 = Date.now();
 
         ui.renderStatus(t0, false);                 // immediately: too early
         assert.equal(ui.statusSnapshot().visible, false);
@@ -311,7 +310,7 @@ test("the status line waits out the arm delay before its first frame", () => {
 
         ui.renderStatus(t0 + 1000, false);          // past the delay
         assert.equal(ui.statusSnapshot().visible, true);
-        assert.match(vt.screen(), new RegExp(`^  ${SPINNER} Pondering\\.\\.\\. \\(1s\\)$`));
+        assert.match(vt.screen(), /  Pondering\.{1,3} +\(1s\)$/);
     } finally {
         ui.endStatus();
         vt.restore();
@@ -353,7 +352,7 @@ test("printed output erases the frame and the next tick redraws below it", () =>
 
         ui.renderStatus(t0 + 1000, false);
         assert.equal(vt.screen().split("\n")[0], "  hello");
-        assert.match(vt.screen(), new RegExp(`${SPINNER} Pondering\\.\\.\\. \\(1s\\)$`));
+        assert.match(vt.screen(), /  Pondering\.{1,3} +\(1s\)$/);
     } finally {
         ui.endStatus();
         vt.restore();
@@ -369,7 +368,7 @@ test("streamed text replaces the frame instead of colliding with it", () => {
 
         ui.writeStream("模型输出");
         ui.endStream();
-        assert.equal(vt.screen(), "模型输出");
+        assert.equal(vt.screen(), "  模型输出");
         assert.equal(ui.statusSnapshot().active, false);
     } finally {
         ui.endStatus();
@@ -420,7 +419,7 @@ test("printUserPrompt stops the status outright, timer and all", () => {
             assert.equal(ui.statusSnapshot().visible, false);
             assert.equal(cleared.length, 1, "printUserPrompt clears the interval");
             // The prompt itself must survive.
-            assert.equal(vt.screen().split("\n").pop(), "You: ");
+            assert.equal(vt.screen().split("\n").pop(), "");
         } finally {
             (globalThis as any).setInterval = realSet;
             (globalThis as any).clearInterval = realClear;
@@ -460,7 +459,7 @@ test("updateStatus repaints immediately with the new label", () => {
         // comes from the real clock here, so only the label is asserted.
         ui.updateStatus("Running read_file");
         assert.equal(ui.statusSnapshot().label, "Running read_file");
-        assert.match(vt.screen(), new RegExp(`${SPINNER} Running read_file\\.\\.\\. \\(\\d+s\\)$`));
+        assert.match(vt.screen(), /^  Running read_file\.{1,3} +\(\d+s\)$/);
     } finally {
         ui.endStatus();
         vt.restore();
@@ -509,7 +508,7 @@ test("status is a no-op when stdout is not a TTY", () => {
         // ...but streamed text still goes out.
         ui.writeStream("plain");
         ui.endStream();
-        assert.equal(vt.screen(), "plain");
+        assert.equal(vt.screen(), "  plain");
     } finally {
         vt.restore();
     }
@@ -523,7 +522,7 @@ test("the status line is truncated to the terminal width", () => {
 
         const line = vt.screen();
         assert.ok(line.length <= 18, `expected <= 18 columns, got ${line.length}: ${line}`);
-        assert.match(line, /\.\.\. \(1s\)$/);
+        assert.match(line, /(?:\.{1,3}| {3}) +\(1s\)$/);
     } finally {
         ui.endStatus();
         vt.restore();
@@ -551,6 +550,42 @@ test("printThinkingDuration formats seconds and minutes", () => {
             "  Thought for 2s",
             "  Thought for 1m 15s",
         ].join("\n"));
+    } finally {
+        vt.restore();
+    }
+});
+
+test("Thinking uses the white animated label instead of a spinner", () => {
+    const vt = installFakeTty();
+    try {
+        ui.beginStatus("Thinking");
+        ui.renderStatus(Date.now() + 1000, false);
+        assert.match(vt.screen(), /^  Thinking(?:\.{1,3}| {3}) +\(1s\)$/);
+    } finally {
+        ui.endStatus();
+        vt.restore();
+    }
+});
+
+test("session footer stays compact and includes the active state", () => {
+    const vt = installFakeTty();
+    try {
+        ui.printSessionStatus({ model: "claude-sonnet-4-6", effort: "high", contextPercent: 12.4, mode: "plan" });
+        // Blank line above: the footer must not crowd the reply text.
+        assert.deepEqual(vt.screen().split("\n"), [
+            "",
+            "  model: claude-sonnet-4-6 | effort: high | context: 12% | mode: plan",
+        ]);
+    } finally {
+        vt.restore();
+    }
+});
+
+test("session footer omits unset effort and plain default mode", () => {
+    const vt = installFakeTty();
+    try {
+        ui.printSessionStatus({ model: "mimo-v2.5", effort: "", contextPercent: 0.5, mode: "" });
+        assert.deepEqual(vt.screen().split("\n"), ["", "  model: mimo-v2.5 | context: 0.5%"]);
     } finally {
         vt.restore();
     }

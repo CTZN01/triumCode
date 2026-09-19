@@ -80,8 +80,8 @@ function toolResultCount(messages: Message[]): number {
             ? (message.content as Block[]).filter((block) => block.type === "tool_result").length : 0), 0);
 }
 
-function estimateTokens(messages: Message[]): number {
-    return Math.ceil(JSON.stringify(messages).length / 4);
+export function estimateTokens(value: unknown): number {
+    return Math.ceil(JSON.stringify(value).length / 4);
 }
 
 function snippet(message: Message, label: string, text: string): string {

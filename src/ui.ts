@@ -96,6 +96,7 @@ const SPINNER_VERBS = [
 ];
 
 const STATUS_COLOR = ACCENT;
+const THINKING_COLOR = chalk.white;
 
 /** A label, or a function re-evaluated every frame (for live counts). */
 export type StatusLabel = string | (() => string);
@@ -126,6 +127,45 @@ function resolveLabel(): string {
     }
 }
 
+// Sweep: a bold head with a short bright trail crosses the label
+// left-to-right, then a short still pause before the next pass — a comet,
+// not a strobe. Adjacent same-style chars share one SGR run so the frame
+// is a handful of escape sequences, not one per character.
+const SWEEP_TRAIL = 2;
+const SWEEP_PAUSE = 6;
+
+function renderAnimatedLabel(label: string): string {
+    const text = label || "Working";
+    const chars = [...text];
+    const head = statusFrame % (chars.length + SWEEP_PAUSE);
+    const style = (i: number): "head" | "trail" | "dim" => {
+        const d = head - i;
+        if (d === 0) return "head";
+        if (d > 0 && d <= SWEEP_TRAIL) return "trail";
+        return "dim";
+    };
+    const paint = {
+        head: (s: string) => THINKING_COLOR.bold(s),
+        trail: (s: string) => THINKING_COLOR(s),
+        dim: (s: string) => THINKING_COLOR.dim(s),
+    };
+
+    let out = "";
+    let run = "";
+    let runStyle = style(0);
+    for (let i = 0; i < chars.length; i++) {
+        const s = style(i);
+        if (s !== runStyle) {
+            out += paint[runStyle](run);
+            run = "";
+            runStyle = s;
+        }
+        run += chars[i];
+    }
+    if (run) out += paint[runStyle](run);
+    return out;
+}
+
 /**
  * Draw a frame. Called by the tick; exported so tests can drive frames
  * against a frozen clock instead of racing a real timer. `force` repaints a
@@ -142,8 +182,8 @@ export function renderStatus(now: number, force = false): void {
     if (statusVisible) process.stdout.write("\x1b[2K\r");
 
     const cols = process.stdout.columns || 80;
-    const frame = SPINNER_FRAMES[statusFrame++ % SPINNER_FRAMES.length];
-    const prefix = `  ${frame} `;
+    statusFrame++;
+    const prefix = "  ";
     const suffix = `... (${formatElapsed(now - statusStartedAt)})`;
 
     // Truncate the plain text, then colour it — slicing a coloured string can
@@ -151,7 +191,9 @@ export function renderStatus(now: number, force = false): void {
     const budget = cols - 2 - prefix.length - suffix.length;
     if (budget < 4) return;   // too narrow to say anything useful
 
-    process.stdout.write("\x1b[2K\r" + STATUS_COLOR(prefix + resolveLabel().slice(0, budget) + suffix));
+    const label = resolveLabel();
+    const renderedLabel = renderAnimatedLabel(label.slice(0, budget));
+    process.stdout.write("\x1b[2K\r" + THINKING_COLOR(prefix) + renderedLabel + THINKING_COLOR(suffix));
     statusVisible = true;
 }
 
@@ -204,6 +246,35 @@ export function endStatus(): void {
     }
 }
 
+export interface SessionStatus {
+    model: string;
+    effort: string;
+    contextPercent: number;
+    mode: string;
+}
+
+/** Print the compact session footer above the readline prompt. */
+export function printSessionStatus(status: SessionStatus): void {
+    const percent = Math.max(0, status.contextPercent);
+    const context = `${percent < 10 ? percent.toFixed(1) : Math.round(percent)}%`;
+    // Empty effort/mode segments are dropped — an "effort: default" line
+    // tells the user nothing.
+    const parts = [
+        `model: ${status.model}`,
+        status.effort && `effort: ${status.effort}`,
+        `context: ${context}`,
+        status.mode && `mode: ${status.mode}`,
+    ].filter((p): p is string => Boolean(p));
+    const text = "  " + parts.join(" | ");
+    const cols = process.stdout.columns || 80;
+    const budget = isTty() ? Math.max(20, cols - 1) : text.length;
+    const shown = text.length > budget ? text.slice(0, Math.max(0, budget - 3)) + "..." : text;
+    // Every turn, with a blank line above so it doesn't crowd the reply.
+    ensureLineBreak();
+    console.log();
+    logLine(chalk.dim(shown));
+}
+
 /** Current status state. Exported for tests. */
 export function statusSnapshot(): { active: boolean; visible: boolean; label: string } {
     return { active: statusActive, visible: statusVisible, label: resolveLabel() };
@@ -231,10 +302,16 @@ export function printUserPrompt(): void {
     // so this is the only place that can guarantee the teardown.
     endStatus();
     ensureLineBreak();
-    process.stdout.write(ACCENT("\nYou: "));
-    // The line is ended by the user's own echo + Enter, not by us.
+    process.stdout.write("\n");
+    // The input prompt is owned by readline, not by the status renderer.
     lineOpen = false;
     afterToolOutput = false;
+}
+
+/** Add breathing room between the submitted input and model output. */
+export function printTurnStart(): void {
+    ensureLineBreak();
+    process.stdout.write("\n");
 }
 
 // ── Info / error / interrupt ────────────────────────────────
@@ -460,6 +537,15 @@ export function printQuestion(question: string, options?: string[]): void {
     console.log(chalk.dim("    Press Enter to skip without answering."));
 }
 
+// One line of a Codex-style strip picker: `low  [high]  xhigh`. The selection
+// is bracketed and accent-colored; ASCII only, so a zh-CN terminal keeps
+// every column aligned. Redrawn in place with \r\x1b[K by the caller.
+export function renderPickStrip(options: readonly string[], selected: number): string {
+    return options
+        .map((option, i) => (i === selected ? ACCENT(`[${option}]`) : MUTED(` ${option} `)))
+        .join(" ");
+}
+
 // ── Turn outcome ────────────────────────────────────────────
 // Printed only when a turn stops for a reason the model's own output doesn't
 // explain. Silence means the model finished normally — which is exactly the
@@ -481,6 +567,7 @@ export function writeStream(text: string): void {
         process.stdout.write("\n");
         afterToolOutput = false;
     }
+    if (!lineOpen) process.stdout.write("  ");
     process.stdout.write(text);
     lineOpen = !text.endsWith("\n");
 }
@@ -592,8 +679,11 @@ Options:
   --api-base URL   API base URL (or saved in ~/.triumcode/config.json)
   --model, -m      Model to use
   --thinking       Enable extended thinking. On by default for current Claude
-                   models; this forces it on for any other model too
+                   models, and on by default for everything else too; this
+                   forces it on for any other model as well
+  --no-thinking    Disable extended thinking for this session
   --effort LEVEL   Thinking depth: low | medium | high | xhigh | max
+                   (default: high; also adjustable mid-session via /effort)
   --resume [id]    Resume a saved session (latest, or by ID prefix)
   --sessions       List all sessions and exit
     --yolo, -y       Bypass ordinary prompts (configured deny rules still apply)
@@ -601,7 +691,8 @@ Options:
   --max-cost N     Stop after $N spent
   --max-tokens N   Max output tokens per request (default: 32000). Thinking
                    counts towards this, so raise it if reasoning eats the reply
-    --context-window N  Context window size in tokens
+    --context-window N  Context window size in tokens; k/M suffixes work
+                        (e.g. 200k, 1M)
   --max-turns N    Stop after N agent-loop turns (default: 25)
   --help, -h       Show this help
 
@@ -618,6 +709,10 @@ REPL Commands:
   /cost            Show token usage and estimated cost
   /compact         Compress conversation history (future)
   /plan            Toggle plan mode
+  /effort [level]  Show or change reasoning effort (low..max); a bare /effort
+                   opens a strip picker (left/right arrows, Enter confirms).
+                   Thinking turns on with it
+  /thinking [on|off]  Show or toggle extended thinking
   /memory          List saved long-term memories
   /sessions        List all saved sessions
   /delete <id>     Delete a saved session
