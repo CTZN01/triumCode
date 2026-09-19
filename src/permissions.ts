@@ -21,7 +21,7 @@ export interface PermissionDecision {
     key?: string;
 }
 
-const READ_TOOLS = new Set(["read_file", "list_files", "grep_search", "tool_search", "ask_user"]);
+const READ_TOOLS = new Set(["read_file", "list_files", "grep_search", "tool_search", "ask_user", "todo"]);
 const EDIT_TOOLS = new Set(["write_file", "edit_file"]);
 
 const DANGEROUS_PATTERNS = [

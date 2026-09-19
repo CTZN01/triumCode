@@ -411,6 +411,7 @@ export class Agent {
                 },
                 enterPlanMode: () => this.enterPlanModeFromTool(),
                 exitPlanMode: () => this.exitPlanModeFromTool(),
+                todos: [],
             };
             const executor = new ToolExecutor(context);
             const toolResults = new Map<string, Promise<string>>();

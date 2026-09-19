@@ -148,6 +148,8 @@ Before making changes to more than one file, or when the task has multiple steps
 
 Skip the plan when the task is trivial — a single edit, a one-line fix, or a question you can answer from what you have already read.
 
+Use the todo tool to create a task list at the start of multi-step work. Update todo status as you progress (pending → in_progress → completed). This helps track progress and keeps you focused.
+
 # Asking questions
 
 When you are unsure, ask. Do not guess and proceed.

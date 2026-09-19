@@ -9,6 +9,18 @@ import { getSkill, resolveSkillPrompt } from "./skills.js";
 // Tool Interface — each tool's complete behavior contract
 // ═══════════════════════════════════════════════════════════════
 
+// ═══════════════════════════════════════════════════════════════
+// Todo types
+// ═══════════════════════════════════════════════════════════════
+
+export type TodoStatus = "pending" | "in_progress" | "completed";
+
+export interface TodoItem {
+    id: number;
+    content: string;
+    status: TodoStatus;
+}
+
 // Context threaded into every tool call. Add fields as new cross-cutting
 // concerns appear (permissions, telemetry, abort signal …).
 export interface ToolContext {
@@ -18,6 +30,7 @@ export interface ToolContext {
     confirmPermission?: (message: string) => Promise<boolean>;
     enterPlanMode?: () => Promise<string>;
     exitPlanMode?: () => Promise<string>;
+    todos?: TodoItem[];
 }
 
 export interface Tool {
@@ -1013,6 +1026,85 @@ register({
 
     prompt: () => "",
     deferred: true,
+});
+
+// ─── todo ───────────────────────────────────────────────────
+
+const TODO_STATUS_ICONS: Record<TodoStatus, string> = {
+    pending: "⬜",
+    in_progress: "🔄",
+    completed: "✅",
+};
+
+function formatTodoList(todos: TodoItem[]): string {
+    if (todos.length === 0) return "No todos.";
+    const done = todos.filter((t) => t.status === "completed").length;
+    const lines = todos.map((t) => `${TODO_STATUS_ICONS[t.status]} [${t.id}] ${t.content}`);
+    lines.push(`\nTotal: ${todos.length} | Completed: ${done}/${todos.length}`);
+    return lines.join("\n");
+}
+
+register({
+    name: "todo",
+    description: "Manage a task todo list. Use 'write' to create or update the entire list (pass all todos). Use 'read' to view the current list. Each todo has an id (integer), content (string), and status: pending, in_progress, or completed. Update status as you work through tasks.",
+    inputSchema: {
+        type: "object",
+        properties: {
+            operation: {
+                type: "string",
+                enum: ["write", "read"],
+                description: "Operation: 'write' replaces the entire todo list, 'read' returns the current list."
+            },
+            todos: {
+                type: "array",
+                description: "Array of todo items. Required for 'write'.",
+                items: {
+                    type: "object",
+                    properties: {
+                        id: { type: "integer", description: "Unique integer id for the todo" },
+                        content: { type: "string", description: "Description of the task" },
+                        status: { type: "string", enum: ["pending", "in_progress", "completed"], description: "Current status" },
+                    },
+                    required: ["id", "content", "status"],
+                },
+            },
+        },
+        required: ["operation"],
+    },
+    isConcurrencySafe: () => false,
+    isReadOnly: () => true,
+    isDestructive: () => false,
+    maxResultSizeChars: 5_000,
+
+    async call(input, context) {
+        const operation = String(input.operation ?? "");
+
+        if (operation === "read") {
+            const todos = context.todos ?? [];
+            return formatTodoList(todos);
+        }
+
+        if (operation === "write") {
+            if (!Array.isArray(input.todos)) {
+                return "Error: 'todos' array is required for write operation.";
+            }
+            const todos: TodoItem[] = input.todos.map((t: any) => ({
+                id: Number(t.id),
+                content: String(t.content ?? ""),
+                status: (["pending", "in_progress", "completed"].includes(t.status) ? t.status : "pending") as TodoStatus,
+            }));
+            context.todos = todos;
+            return formatTodoList(todos);
+        }
+
+        return `Error: unknown operation "${operation}". Use "write" or "read".`;
+    },
+
+    prompt: () =>
+        "Use the todo tool to manage a structured task list when working on multi-step tasks. " +
+        "Call write to create or update the full todo list at the start of a task or when the plan changes. " +
+        "Mark items as in_progress before working on them, and completed when done. " +
+        "Call read to check current progress. Keep todos concise and actionable.",
 });
 
 // ─── tool_search ─────────────────────────────────────────────
