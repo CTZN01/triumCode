@@ -53,17 +53,6 @@ outranks environment variables — an endpoint you typed in during setup should
 not be silently redirected by a stray export. Use the CLI flags to override for
 a single run, or in CI.
 
-### Upgrading from Triumph Code
-
-The tool was previously called Triumph Code and stored its data under
-`.triumph`. On first run, TriumCode adopts the old directory — `~/.triumph` for
-the saved API key, and `.triumph/` for project session history — by renaming it
-to `.triumcode`. Nothing to do by hand, and no need to re-enter your key.
-
-Adoption only happens when the new directory does not already exist, so it
-never overwrites data written since. If it fails (a locked or read-only
-directory), the CLI starts anyway and first-run setup runs again.
-
 ### CLI Flags
 
 ```

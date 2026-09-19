@@ -2,7 +2,6 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import * as os from "node:os";
 import * as readline from "node:readline";
-import { migrateDir } from "./migrate.js";
 
 // ═══════════════════════════════════════════════════════════════
 // Global user config — ~/.triumcode/config.json
@@ -25,11 +24,6 @@ import { migrateDir } from "./migrate.js";
 
 const CONFIG_DIR = join(os.homedir(), ".triumcode");
 const CONFIG_FILE = join(CONFIG_DIR, "config.json");
-
-// Installs from before the rename kept the key in ~/.triumph.  This runs at
-// import time, so the path constants below already point at the adopted
-// directory by the time the first read happens.
-migrateDir(join(os.homedir(), ".triumph"), CONFIG_DIR);
 
 /** Same path as CONFIG_FILE, shortened the way the docs write it. */
 const CONFIG_FILE_DISPLAY = CONFIG_FILE

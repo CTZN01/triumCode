@@ -2,6 +2,3 @@ node_modules/
 dist/
 .env
 .triumcode/
-# Pre-rename name for the same directory — still ignored for the window
-# between upgrading and the first run that adopts it.
-.triumph/

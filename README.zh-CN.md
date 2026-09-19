@@ -49,12 +49,6 @@ node dist/cli.js --sessions
 
 解析是逐字段进行的：配置文件中只存了 API Key 时，仍会从环境变量取 `ANTHROPIC_BASE_URL`。保存的配置优先级高于环境变量是有意为之 —— 首次引导里亲手填的 endpoint，不该被一个残留的 export 静默改道。单次运行或 CI 场景请用 CLI 参数覆盖。
 
-### 从 Triumph Code 升级
-
-本工具此前的名字是 Triumph Code，数据存放在 `.triumph` 下。首次运行时，TriumCode 会把旧目录改名接管过来 —— `~/.triumph`（保存的 API Key）和 `.triumph/`（项目内的会话历史）都会迁到 `.triumcode`。无需手动操作，也不用重新输入 Key。
-
-只有在目标目录尚不存在时才会接管，因此不会覆盖迁移之后写入的数据。如果接管失败（目录被占用或只读），CLI 仍会正常启动，走一遍首次配置即可。
-
 ### CLI 参数
 
 ```
