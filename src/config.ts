@@ -37,7 +37,8 @@ export interface UserConfig {
     model?: string;
     thinking?: boolean;
     effort?: string;
-    contextWindow?: number;
+    // Accepts a plain token count or a k/M suffix string ("200k", "1M").
+    contextWindow?: number | string;
 }
 
 function readConfig(): UserConfig {
@@ -136,17 +137,19 @@ export function resolveConfigDetailed(flags: {
     ], DEFAULT_MODEL);
     const effort = firstOf<string>([
         ["flag", flags.effort], ["config", saved.effort], ["env", process.env.TRIUMCODE_EFFORT],
-    ], "");
+    ], "high");
     const contextWindow = firstOf<number>([
         ["flag", flags.contextWindow],
-        ["config", saved.contextWindow],
-        ["env", parseContextWindow(process.env.MINI_CONTEXT_WINDOW)],
+        ["config", parseSizeTokens(saved.contextWindow)],
+        ["env", parseSizeTokens(process.env.MINI_CONTEXT_WINDOW)],
     ], DEFAULT_CONTEXT_WINDOW);
 
     const thinking: Sourced<boolean> =
         flags.thinking !== undefined ? { value: flags.thinking, source: "flag" }
         : saved.thinking !== undefined ? { value: saved.thinking, source: "config" }
-        : { value: false, source: "default" };
+        // Thinking on by default: current Claude models think natively, and
+        // the effort default below is meaningless without it.
+        : { value: true, source: "default" };
 
     const sources = {
         apiKey: apiKey.source, apiBase: apiBase.source, model: model.source,
@@ -182,10 +185,22 @@ export function resolveConfigDetailed(flags: {
     };
 }
 
-function parseContextWindow(value: string | undefined): number | undefined {
-    if (!value) return undefined;
-    const parsed = Number(value);
-    return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : undefined;
+/**
+ * Token counts accept size suffixes: "1000000", "200k", "1M", "1.5m".
+ * Suffixes are decimal (k = 1e3, M = 1e6) — model context windows are
+ * quoted that way. Returns undefined for anything unparsable or <= 0.
+ */
+export function parseSizeTokens(value: string | number | undefined): number | undefined {
+    if (value === undefined || value === null) return undefined;
+    const text = String(value).trim();
+    if (!text) return undefined;
+    const match = /^(\d+(?:\.\d+)?)\s*([kKmM]?)$/.exec(text);
+    if (!match) return undefined;
+    const mult = match[2].toLowerCase() === "k" ? 1e3
+        : match[2].toLowerCase() === "m" ? 1e6
+        : 1;
+    const tokens = Math.floor(parseFloat(match[1]) * mult);
+    return tokens > 0 ? tokens : undefined;
 }
 
 export function resolveConfig(flags: {
@@ -287,8 +302,10 @@ export async function ensureConfig(flags: {
     // the user knows which endpoint is now in effect without having to ask.
     return {
         config: {
-            apiKey, apiBase, model, thinking: flags.thinking ?? false,
-            effort: flags.effort || "", contextWindow: flags.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
+            apiKey, apiBase, model,
+            thinking: flags.thinking ?? true,
+            effort: flags.effort || "high",
+            contextWindow: flags.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
         },
         sources: {
             apiKey: "config", apiBase: "config", model: "config",

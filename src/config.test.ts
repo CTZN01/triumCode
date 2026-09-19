@@ -186,3 +186,26 @@ test("describeSource names the file it means", async () => {
     assert.equal(mod.describeSource("default"), "built-in default");
     assert.match(mod.describeSource("config"), /\.triumcode\/config\.json$/);
 });
+
+// ── Size suffixes + reasoning defaults ──────────────────────
+
+test("context window accepts k/M suffixes; thinking and effort default on", async (t) => {
+    const { mod, restore } = await loadConfig({ contextWindow: "1M" });
+    t.after(restore);
+
+    // The config file may declare the window as a suffixed string.
+    assert.equal(mod.resolveConfigDetailed({}).config.contextWindow, 1_000_000);
+    assert.equal(mod.resolveConfigDetailed({ contextWindow: 200_000 }).config.contextWindow, 200_000);
+    // Thinking defaults on, effort defaults to high (meaningless without thinking).
+    assert.equal(mod.resolveConfigDetailed({}).config.thinking, true);
+    assert.equal(mod.resolveConfigDetailed({}).config.effort, "high");
+
+    assert.equal(mod.parseSizeTokens("200k"), 200_000);
+    assert.equal(mod.parseSizeTokens("1M"), 1_000_000);
+    assert.equal(mod.parseSizeTokens("1.5m"), 1_500_000);
+    assert.equal(mod.parseSizeTokens("1000000"), 1_000_000);
+    assert.equal(mod.parseSizeTokens("bogus"), undefined);
+    assert.equal(mod.parseSizeTokens("0"), undefined);
+    assert.equal(mod.parseSizeTokens("-5"), undefined);
+    assert.equal(mod.parseSizeTokens(undefined), undefined);
+});
