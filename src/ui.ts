@@ -10,14 +10,13 @@ import {
 // ═══════════════════════════════════════════════════════════════
 
 // ── Palette ─────────────────────────────────────────────────
-// GitHub Primer dark-theme colors — the "Copilot in the terminal" look.
-// Structure stays quiet gray; color appears only where it carries state
-// (running / ok / warn / error), so a wall of tool calls is scannable.
-const ACCENT = chalk.hex("#2F81F7");   // live status: the spinner
-const MUTED  = chalk.hex("#8B949E");   // bullets, call targets, metadata
-const OK     = chalk.hex("#3FB950");   // success
-const WARN   = chalk.hex("#D29922");   // warning
-const ERR    = chalk.hex("#F85149");   // failure
+// Codex-style terminal palette: cool cyan for interaction, quiet slate for
+// structure, and restrained colors reserved for tool state.
+const ACCENT = chalk.hex("#67D4E8");   // prompt, live status, choices
+const MUTED  = chalk.hex("#7D8796");   // bullets, targets, metadata
+const OK     = chalk.hex("#7BCFA3");   // success
+const WARN   = chalk.hex("#E3B86B");   // warning
+const ERR    = chalk.hex("#F08088");   // failure
 
 // ── Welcome banner ──────────────────────────────────────────
 
@@ -232,7 +231,7 @@ export function printUserPrompt(): void {
     // so this is the only place that can guarantee the teardown.
     endStatus();
     ensureLineBreak();
-    process.stdout.write(chalk.cyan("\nYou: "));
+    process.stdout.write(ACCENT("\nYou: "));
     // The line is ended by the user's own echo + Enter, not by us.
     lineOpen = false;
     afterToolOutput = false;
@@ -452,10 +451,10 @@ export function printQuestion(question: string, options?: string[]): void {
     ensureLineBreak();
     // Inquirer-style "?" — an emoji here renders double-width in zh-CN
     // terminals and visually dwarfs the text around it.
-    console.log(`\n  ${OK("?")} ${chalk.bold.cyan(question)}`);
+    console.log(`\n  ${OK("?")} ${chalk.bold(ACCENT(question))}`);
     if (options && options.length > 0) {
         for (let i = 0; i < options.length; i++) {
-            console.log(chalk.cyan(`    ${i + 1}. ${options[i]}`));
+            console.log(ACCENT(`    ${i + 1}. ${options[i]}`));
         }
     }
     console.log(chalk.dim("    Press Enter to skip without answering."));
@@ -513,7 +512,7 @@ export function printCostReport(usage: { input: number; output: number; cost: nu
 
 export function printPlanForApproval(planContent: string): void {
     ensureLineBreak();
-    console.log(chalk.cyan("\n  ━━━ Plan for Approval ━━━"));
+    console.log(ACCENT("\n  ━━━ Plan for Approval ━━━"));
     const lines = planContent.split("\n");
     const maxLines = 60;
     const display = lines.slice(0, maxLines);
@@ -523,11 +522,11 @@ export function printPlanForApproval(planContent: string): void {
     if (lines.length > maxLines) {
         console.log(chalk.gray(`  ... (${lines.length - maxLines} more lines)`));
     }
-    console.log(chalk.cyan("  ━━━━━━━━━━━━━━━━━━━━━━\n"));
+    console.log(ACCENT("  ━━━━━━━━━━━━━━━━━━━━━━\n"));
 }
 
 export function printPlanApprovalOptions(): void {
-    console.log(chalk.yellow("  Choose an option:"));
+    console.log(WARN("  Choose an option:"));
     console.log("    1) Clear context and execute — fresh start with auto-accept edits");
     console.log("    2) Execute — keep context, auto-accept edits");
     console.log("    3) Manual — keep context, confirm each edit");
