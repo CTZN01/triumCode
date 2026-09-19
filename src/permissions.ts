@@ -23,6 +23,9 @@ export interface PermissionDecision {
 
 const READ_TOOLS = new Set(["read_file", "list_files", "grep_search", "tool_search", "ask_user", "todo"]);
 const EDIT_TOOLS = new Set(["write_file", "edit_file"]);
+// The memory tool writes only into its own memory directories, never the
+// workspace — allowed like a read tool, plan mode included.
+const MEMORY_TOOLS = new Set(["memory"]);
 
 const DANGEROUS_PATTERNS = [
     /\brm\s+(?:-[^\s]*f[^\s]*\s+)?(?:-[^\s]*\s+)*\//i,
@@ -143,8 +146,9 @@ export class PermissionPolicy {
         }
 
         if (this.currentMode === "plan") {
-            // Allow read tools
-            if (READ_TOOLS.has(toolName)) {
+            // Allow read tools and the memory tool (its writes stay in the
+            // memory directories, outside the workspace)
+            if (READ_TOOLS.has(toolName) || MEMORY_TOOLS.has(toolName)) {
                 return { action: "allow" };
             }
             // Allow writing/editing the plan file itself
@@ -159,7 +163,7 @@ export class PermissionPolicy {
         }
 
         if (this.currentMode === "bypassPermissions") return { action: "allow" };
-        if (ruleResult === "allow" || READ_TOOLS.has(toolName)) return { action: "allow" };
+        if (ruleResult === "allow" || READ_TOOLS.has(toolName) || MEMORY_TOOLS.has(toolName)) return { action: "allow" };
 
         if (this.currentMode === "acceptEdits" && EDIT_TOOLS.has(toolName)) return { action: "allow" };
 

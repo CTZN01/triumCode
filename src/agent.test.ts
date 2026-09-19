@@ -1,6 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
+import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Agent } from "./agent.js";
 
 // ═══════════════════════════════════════════════════════════════
@@ -266,4 +269,44 @@ test("a clean finish prints no turn-end notice", async () => {
         (w) => { w(start(0, { type: "text", text: "" })); w(textDelta(0, "all done")); w(stop(0)); w(finish("end_turn")); },
     ]);
     assert.doesNotMatch(output, /^ {2}! /m, `unexpected notice in:\n${output}`);
+});
+
+// ── Memory recall ────────────────────────────────────────────
+
+test("a settled memory prefetch is injected before the first model call", async () => {
+    // Memory dirs resolve from cwd, so run this scenario inside a temp
+    // project and restore cwd before returning (tests in a file are serial).
+    const originalCwd = process.cwd();
+    const dir = mkdtempSync(join(tmpdir(), "triumcode-agent-mem-"));
+    mkdirSync(join(dir, ".triumcode", "memory"), { recursive: true });
+    writeFileSync(
+        join(dir, ".triumcode", "memory", "project_deploy.md"),
+        "---\nname: deploy\ndescription: staging deploy target\ntype: project\n---\nDeploy to https://staging.example.com.",
+    );
+    process.chdir(dir);
+
+    const api = await fakeApi([
+        (w) => { w(start(0, { type: "text", text: "" })); w(textDelta(0, "done")); w(stop(0)); w(finish("end_turn")); },
+    ]);
+    const agent = new Agent({
+        model: "test-model", apiKey: "k", apiBase: api.url,
+        sideQuery: async () => '{"selected_memories": ["project_deploy.md"]}',
+    });
+
+    try {
+        await agent.chat("where should I deploy to test?");
+    } finally {
+        process.chdir(originalCwd);
+        api.close();
+    }
+
+    // First request: the user's message plus the injected reminder turn.
+    const userTexts = api.bodies[0].messages
+        .filter((m: any) => m.role === "user")
+        .map((m: any) => (typeof m.content === "string" ? m.content : JSON.stringify(m.content)));
+    assert.equal(userTexts.length, 2);
+    assert.match(userTexts[0], /where should I deploy/);
+    // The second user turn is the recalled-memory reminder.
+    assert.match(userTexts[1], /^<system-reminder>\nMemory \(saved/);
+    assert.match(userTexts[1], /Deploy to https:\/\/staging\.example\.com\./);
 });

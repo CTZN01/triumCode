@@ -618,6 +618,7 @@ REPL Commands:
   /cost            Show token usage and estimated cost
   /compact         Compress conversation history (future)
   /plan            Toggle plan mode
+  /memory          List saved long-term memories
   /sessions        List all saved sessions
   /delete <id>     Delete a saved session
   /help            Show this help

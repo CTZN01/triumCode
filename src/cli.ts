@@ -13,6 +13,7 @@ import {
 import { ensureConfig, describeSource } from "./config.js";
 import { parseEffort, EFFORT_LEVELS } from "./thinking.js";
 import { getSkill, resolveSkillPrompt } from "./skills.js";
+import { listMemories } from "./memory.js";
 
 // ═══════════════════════════════════════════════════════════════
 // Argument parsing
@@ -363,6 +364,20 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
             if (input === "/plan") {
                 agent.togglePlanMode();
                 printInfo(`Plan mode: ${agent.planMode ? "ON" : "OFF"}`);
+                askQuestion();
+                return;
+            }
+
+            if (input === "/memory") {
+                const memories = listMemories();
+                if (memories.length === 0) {
+                    printInfo("no memories saved yet");
+                } else {
+                    printInfo(`${memories.length} memories:`);
+                    for (const m of memories) {
+                        printInfo(`  [${m.source}] [${m.type}] ${m.name} - ${m.description}`);
+                    }
+                }
                 askQuestion();
                 return;
             }

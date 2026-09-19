@@ -20,6 +20,10 @@ import {
     withCacheBreakpoints, DEFAULT_CONTEXT_WINDOW,
 } from "./context-compression.js";
 import { PermissionPolicy, type PermissionMode } from "./permissions.js";
+import {
+    startMemoryPrefetch, formatMemoriesForInjection,
+    type MemoryPrefetch, type RelevantMemory, type SideQueryFn,
+} from "./memory.js";
 
 // Extended thinking counts towards max_tokens, and endpoints that think by
 // default (MiMo, for one) will happily spend the whole budget reasoning and
@@ -86,6 +90,7 @@ export interface AgentOptions {
     contextWindow?: number; // --context-window, in tokens
     planMode?: boolean;   // --plan flag from CLI
     permissionMode?: PermissionMode;
+    sideQuery?: SideQueryFn; // override for the memory-recall side model (tests)
 }
 
 export class Agent {
@@ -123,6 +128,15 @@ export class Agent {
     // ── Plan mode state ─────────────────────────────────────────
     private planFilePath: string | null = null;
 
+    // ── Memory recall state ─────────────────────────────────────
+    // Prefetch races the first model call of each turn; surfaced memories and
+    // the byte budget live for the whole session so recall stays fresh and
+    // bounded.
+    private sideQueryFn: SideQueryFn | null;
+    private memoryPrefetch: MemoryPrefetch | null = null;
+    private alreadySurfacedMemories = new Set<string>();
+    private sessionMemoryBytes = 0;
+
     constructor(options?: AgentOptions) {
         this.model = options?.model || process.env.MINI_MODEL || "claude-sonnet-4-20250514";
         this.client = new Anthropic({
@@ -143,6 +157,7 @@ export class Agent {
         this.planMode = options?.planMode ?? options?.permissionMode === "plan";
         const permissionMode = options?.permissionMode ?? (this.planMode ? "plan" : "default");
         this.permissionPolicy = new PermissionPolicy(permissionMode);
+        this.sideQueryFn = options?.sideQuery ?? null;
     }
 
     /** Register a callback invoked after each chat() completes. */
@@ -198,11 +213,84 @@ export class Agent {
     clearHistory(): void {
         this.messages = [];
         this.injectedContextReminder = false;
+        // Memories already injected belonged to the cleared conversation.
+        this.alreadySurfacedMemories.clear();
+        this.sessionMemoryBytes = 0;
+        this.memoryPrefetch = null;
     }
 
     /** Replace old turns with a local summary at a safe turn boundary. */
     compact(): void {
         this.messages = compactHistory(this.messages);
+    }
+
+    /**
+     * Side model for memory recall: a tiny non-streaming call, cheap enough
+     * to spend one per turn. Prefers MINI_MODEL (the low-tier model) and
+     * falls back to the main model. Overridable via AgentOptions.sideQuery
+     * for tests.
+     */
+    private buildSideQuery(): SideQueryFn | null {
+        if (this.sideQueryFn) return this.sideQueryFn;
+        const model = process.env.MINI_MODEL || this.model;
+        return async (system, user, signal) => {
+            const response = await withRetry(
+                (retrySignal) => this.client.messages.create({
+                    model,
+                    max_tokens: 512,
+                    system,
+                    messages: [{ role: "user", content: user }],
+                    signal: retrySignal,
+                } as any),
+                signal ?? this.abortController?.signal,
+            );
+            const blocks: any[] = (response as any).content ?? [];
+            return blocks.filter((b) => b.type === "text").map((b) => b.text).join("");
+        };
+    }
+
+    // Fire the memory prefetch at the moment the user's message arrives, so
+    // recall overlaps the first model call instead of adding latency. Any
+    // unconsumed prefetch from the previous turn is discarded — it described
+    // a question that has already been answered.
+    private startTurnMemoryPrefetch(userText: string): void {
+        const sideQuery = this.buildSideQuery();
+        if (!sideQuery) return;
+        this.memoryPrefetch = startMemoryPrefetch(
+            userText, sideQuery,
+            this.alreadySurfacedMemories, this.sessionMemoryBytes,
+            {}, this.abortController?.signal,
+        );
+    }
+
+    // Non-blocking poll, run before each API call: if the prefetch has
+    // settled, inject what it found. The first iteration waits a short
+    // bounded window — the side query is tiny and usually lands well inside
+    // it, which lets the model use the memories in its very first response.
+    // A text-only turn (no tool calls) never reaches a second iteration, so
+    // without this window single-turn answers would never see memories at
+    // all. Later iterations poll without waiting; the user never blocks on
+    // recall — worst case it lands one turn late.
+    private async consumeMemoryPrefetch(waitMs = 0): Promise<void> {
+        const prefetch = this.memoryPrefetch;
+        if (!prefetch || prefetch.consumed) return;
+        if (!prefetch.settled && waitMs > 0) {
+            const timer = new Promise<void>((r) => setTimeout(r, waitMs).unref?.());
+            await Promise.race([prefetch.promise.then(() => {}, () => {}), timer]);
+        }
+        if (!prefetch.settled || this.abortController?.signal.aborted) return;
+        prefetch.consumed = true;
+        this.memoryPrefetch = null;
+
+        let memories: RelevantMemory[] = [];
+        try { memories = await prefetch.promise; } catch { return; }
+        if (memories.length === 0) return;
+
+        this.messages.push({ role: "user", content: formatMemoriesForInjection(memories) });
+        for (const m of memories) {
+            this.alreadySurfacedMemories.add(m.path);
+            this.sessionMemoryBytes += Buffer.byteLength(m.content, "utf-8");
+        }
     }
 
     private preparePlanFile(): string {
@@ -274,6 +362,9 @@ export class Agent {
         // Set up abort controller for this turn.
         this.abortController = new AbortController();
         this.isProcessing = true;
+
+        // Recall memories relevant to this question while the loop spins up.
+        this.startTurnMemoryPrefetch(userText);
 
         try {
             await this.runAgentLoop();
@@ -351,6 +442,10 @@ export class Agent {
                 return;
             }
             turns++;
+
+            // Pick up the memory prefetch — short bounded wait on the first
+            // iteration, no wait afterwards.
+            await this.consumeMemoryPrefetch(turns === 1 ? 2_000 : 0);
 
             // Each iteration is a fresh "model is working" phase, so the
             // elapsed clock restarts. The defensive endStatus() guarantees

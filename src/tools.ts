@@ -4,6 +4,7 @@ import { StringDecoder } from "node:string_decoder";
 import { dirname, join, basename, resolve } from "node:path";
 import type Anthropic from "@anthropic-ai/sdk";
 import { getSkill, resolveSkillPrompt } from "./skills.js";
+import { saveMemory, listMemories, MEMORY_TYPES, type MemoryType } from "./memory.js";
 
 // ═══════════════════════════════════════════════════════════════
 // Tool Interface — each tool's complete behavior contract
@@ -1105,6 +1106,72 @@ register({
         "Call write to create or update the full todo list at the start of a task or when the plan changes. " +
         "Mark items as in_progress before working on them, and completed when done. " +
         "Call read to check current progress. Keep todos concise and actionable.",
+});
+
+// ─── memory ──────────────────────────────────────────────────
+
+register({
+    name: "memory",
+    description: "Save a persistent memory about the user or project, or list saved memories. Memories survive across sessions and are recalled automatically when relevant. Types: user (preferences, background), feedback (behavior corrections/confirmations, include Why and How to apply), project (goals, decisions, deadlines - absolute dates only), reference (external resource pointers).",
+    inputSchema: {
+        type: "object",
+        properties: {
+            operation: {
+                type: "string",
+                enum: ["save", "list"],
+                description: "Operation: 'save' writes one memory file, 'list' returns all saved memories.",
+            },
+            name: { type: "string", description: "Short kebab-case identifier, e.g. 'prefers-concise-output'. Required for save." },
+            description: { type: "string", description: "One-line summary used for recall matching. Required for save." },
+            type: { type: "string", enum: ["user", "feedback", "project", "reference"], description: "Memory type. Required for save." },
+            content: { type: "string", description: "The memory body. Required for save." },
+        },
+        required: ["operation"],
+    },
+    isConcurrencySafe: () => false,
+    isReadOnly: () => false,
+    isDestructive: () => false,
+    maxResultSizeChars: 5_000,
+
+    async call(input) {
+        const operation = String(input.operation ?? "");
+
+        if (operation === "list") {
+            const memories = listMemories();
+            if (memories.length === 0) return "No memories saved yet.";
+            return memories
+                .map((m) => `- [${m.source}] ${m.name} (${m.type}) - ${m.description}`)
+                .join("\n");
+        }
+
+        if (operation === "save") {
+            const name = String(input.name ?? "").trim();
+            const description = String(input.description ?? "").trim();
+            const type = String(input.type ?? "") as MemoryType;
+            const content = String(input.content ?? "").trim();
+            if (!name) return "Error: 'name' is required for save.";
+            if (!MEMORY_TYPES.includes(type)) {
+                return `Error: 'type' must be one of: ${MEMORY_TYPES.join(", ")}.`;
+            }
+            const path = saveMemory({
+                name,
+                description: description || name,
+                type,
+                content: content || description || name,
+            });
+            return `Memory saved: ${path}`;
+        }
+
+        return `Error: unknown operation "${operation}". Use "save" or "list".`;
+    },
+
+    prompt: () =>
+        "Use the memory tool to persist facts that cannot be derived from the project state: "
+        + "the user's preferences and corrections (feedback), their role and background (user), "
+        + "project decisions and deadlines (project), pointers to external systems (reference). "
+        + "Save when the user states a preference, corrects your behavior, or shares context a future session needs. "
+        + "One fact per save. Feedback bodies must include Why: and How to apply: lines. "
+        + "Do not save code details, git history, or anything already written in CLAUDE.md.",
 });
 
 // ─── tool_search ─────────────────────────────────────────────

@@ -25,7 +25,7 @@ export interface SkillIndexOptions {
 const cache = new Map<string, Skill[]>();
 const FRONTMATTER = /^---\r?\n([\s\S]*?)\r?\n---\r?\n([\s\S]*)$/;
 
-function scalar(value: string | undefined): string {
+export function scalar(value: string | undefined): string {
     const text = (value ?? "").trim();
     if ((text.startsWith("\"") && text.endsWith("\"")) || (text.startsWith("'") && text.endsWith("'"))) return text.slice(1, -1);
     return text;
@@ -49,7 +49,9 @@ function boolean(value: string | undefined, fallback: boolean): boolean {
     return text === "true" || text === "yes" || text === "1";
 }
 
-function parseFrontmatter(content: string): { values: Map<string, string>; prompt: string } | null {
+// Shared with memory.ts — both skills and memories are .md files with
+// simple key: value frontmatter, so one hand-rolled parser serves both.
+export function parseFrontmatter(content: string): { values: Map<string, string>; prompt: string } | null {
     const match = FRONTMATTER.exec(content.trimStart());
     if (!match) return null;
     const values = new Map<string, string>();

@@ -4,6 +4,7 @@ import { execSync } from "node:child_process";
 import * as os from "node:os";
 import { buildToolPromptBlock, getDeferredToolNames } from "./tools.js";
 import { buildSkillPromptBlock } from "./skills.js";
+import { buildMemoryPromptSection } from "./memory.js";
 
 // ═══════════════════════════════════════════════════════════════
 // CLAUDE.md loader — walk up from cwd collecting project instructions
@@ -261,8 +262,9 @@ function probeWindowsTools(): string {
     return `\nKnown tool paths:\n${probes.map(p => `- ${p}`).join("\n")}`;
 }
 
-// Dynamic block: environment, git, CLAUDE.md, deferred tools.
-// Rebuilt each turn because git status and deferred tools can change.
+// Dynamic block: environment, git, CLAUDE.md, memory index, deferred tools.
+// Rebuilt each turn because git status, deferred tools and the memory index
+// (a save mid-session must be visible on the next turn) can change.
 export function buildDynamicSystemContext(): string {
     const platform = `${os.platform()} ${os.arch()}`;
     const shell = process.platform === "win32"
@@ -283,6 +285,7 @@ export function buildDynamicSystemContext(): string {
         getGitContext(),
         deferredLine,
         loadClaudeMd(),
+        buildMemoryPromptSection(),
     ].filter((s) => s.length > 0).join("\n");
 }
 
