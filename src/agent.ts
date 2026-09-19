@@ -107,6 +107,9 @@ export class Agent {
     // ── Auto-save callback ──────────────────────────────────────
     private onChatComplete?: () => void;
 
+    // ── User question callback ──────────────────────────────────
+    private onAskUser?: (question: string, options?: string[]) => Promise<string>;
+
     constructor(options?: AgentOptions) {
         this.model = options?.model || process.env.MINI_MODEL || "claude-sonnet-4-20250514";
         this.client = new Anthropic({
@@ -127,6 +130,11 @@ export class Agent {
     /** Register a callback invoked after each chat() completes. */
     setOnChatComplete(fn: () => void): void {
         this.onChatComplete = fn;
+    }
+
+    /** Register a callback for asking the user questions mid-turn. */
+    setAskUserCallback(fn: (question: string, options?: string[]) => Promise<string>): void {
+        this.onAskUser = fn;
     }
 
     /** Toggle plan mode on/off. */
@@ -307,7 +315,7 @@ export class Agent {
             const thinkingIdx = new Set<number>();
             let thinkingStartedAt = 0;
 
-            const context: ToolContext = { readFileState: this.readFileState };
+            const context: ToolContext = { readFileState: this.readFileState, askUser: this.onAskUser };
             const executor = new ToolExecutor(context);
             const toolResults = new Map<string, Promise<string>>();
             const toolStartTimes = new Map<string, number>();

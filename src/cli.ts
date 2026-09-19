@@ -1,5 +1,6 @@
 import { Agent } from "./agent.js";
 import * as readline from "node:readline";
+import chalk from "chalk";
 import {
     saveSession, loadSession, listSessions, deleteSession,
     latestSessionId, type SessionIndex,
@@ -7,7 +8,7 @@ import {
 import {
     printWelcome, printUserPrompt, printInfo, printError,
     printInterrupted, printHelp, printCostReport, printBlock, endStatus,
-    printConfigReport,
+    printConfigReport, printQuestion,
 } from "./ui.js";
 import { ensureConfig, describeSource } from "./config.js";
 import { parseEffort, EFFORT_LEVELS } from "./thinking.js";
@@ -221,6 +222,7 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
         saveSession(agent.history(), config.model);
     });
 
+    let pendingAskUser: ((answer: string) => void) | null = null;
     // --resume [id]: reload a saved conversation before doing anything else.
     if (flags.resume !== null) {
         const identifier = flags.resume === "" ? undefined : flags.resume;
@@ -236,6 +238,7 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
 
     // ── One-shot mode ────────────────────────────────────────────
     if (flags.oneShot) {
+        agent.setAskUserCallback(async () => "Error: ask_user is unavailable in one-shot mode.");
         await agent.chat(flags.oneShot);
         return;
     }
@@ -253,6 +256,15 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
         // askQuestion() below re-prompts immediately — so the status line has
         // to go first, or a tick lands on top of the live prompt.
         endStatus();
+
+        // If the agent asked a question via ask_user, treat Ctrl+C as "skip".
+        if (pendingAskUser) {
+            const resolve = pendingAskUser;
+            pendingAskUser = null;
+            resolve("");
+            sigintCount = 0;
+            return;
+        }
 
         if (agent.isProcessing) {
             agent.abort();
@@ -274,14 +286,35 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
     printInfo(`endpoint ${config.apiBase}  (${describeSource(bundle.sources.apiBase)}) - /config for details`);
 
     // ── REPL loop with rl.once (strict serial execution) ─────────
-    const askQuestion = (): void => {
-        printUserPrompt();
-        rl.once("line", async (line) => {
+    const handleLine = async (line: string): Promise<void> => {
             const input = line.trim();
             sigintCount = 0;
 
             // Empty line: re-prompt.
-            if (!input) { askQuestion(); return; }
+            if (!input) {
+                // If the agent is waiting for an answer to ask_user, an empty
+                // line means "skip" — return an empty string so the agent can
+                // continue with its best judgment.
+                if (pendingAskUser) {
+                    const resolve = pendingAskUser;
+                    pendingAskUser = null;
+                    resolve("");
+                    return;
+                }
+                askQuestion();
+                return;
+            }
+
+            // ── ask_user response ─────────────────────────────────
+            // If the agent asked a question via ask_user, forward the
+            // user's input as the answer (options are validated by the
+            // tool, not here — the model decides what to do with it).
+            if (pendingAskUser) {
+                const resolve = pendingAskUser;
+                pendingAskUser = null;
+                resolve(input);
+                return;
+            }
 
             // Exit.
             if (input === "exit" || input === "quit") {
@@ -363,7 +396,24 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
             }
 
             askQuestion();
+    };
+
+    // Wire up ask_user after readline and its line handler are ready. The
+    // handler is installed by the question callback itself, because the
+    // normal task prompt has already consumed its line by then.
+    agent.setAskUserCallback((question, options) => {
+        return new Promise<string>((resolve) => {
+            endStatus();
+            printQuestion(question, options);
+            process.stdout.write(chalk.cyan("  Your answer: "));
+            pendingAskUser = resolve;
+            rl.once("line", handleLine);
         });
+    });
+
+    const askQuestion = (): void => {
+        printUserPrompt();
+        rl.once("line", handleLine);
     };
 
     askQuestion();

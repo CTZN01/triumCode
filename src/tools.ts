@@ -12,6 +12,7 @@ import type Anthropic from "@anthropic-ai/sdk";
 // concerns appear (permissions, telemetry, abort signal …).
 export interface ToolContext {
     readFileState?: ReadFileState;
+    askUser?: (question: string, options?: string[]) => Promise<string>;
 }
 
 export interface Tool {
@@ -828,6 +829,44 @@ const runCommandTool = register({
         "run_command runs a program directly — there is NO shell, so pipes, redirects, " +
         "and && do not work. Put the program in \"command\" and each argument separately in \"args\". " +
         "Windows .cmd shims (npm, npx, yarn) are automatically resolved to their underlying node command.",
+});
+
+// ─── ask_user ─────────────────────────────────────────────
+
+const askUserTool = register({
+    name: "ask_user",
+    description: "Ask the user a question and wait for their response. Use this when you need clarification, want to confirm an approach, or need the user to choose between options. The user can also skip by pressing Enter without typing anything.",
+    inputSchema: {
+        type: "object",
+        properties: {
+            question: { type: "string", description: "The question to ask the user" },
+            options: {
+                type: "array",
+                items: { type: "string" },
+                description: "Optional list of choices for the user to pick from (numbered). If omitted, the user types a free-text response."
+            },
+        },
+        required: ["question"],
+    },
+    isConcurrencySafe: () => false,
+    isReadOnly: () => true,
+    isDestructive: () => false,
+    maxResultSizeChars: 2_000,
+
+    async call(input, ctx) {
+        const question = String(input.question ?? "");
+        const options = Array.isArray(input.options) ? input.options.map(String) : undefined;
+
+        if (!question) return "Error: question must not be empty.";
+        if (!ctx.askUser) return "Error: ask_user is not available in this context.";
+
+        return ctx.askUser(question, options);
+    },
+
+    prompt: () =>
+        "Use ask_user when you need to ask the user a question mid-task. " +
+        "Provide 2-3 options when the choice is constrained, or omit options for open-ended questions. " +
+        "The user may skip without answering — respect that and continue with your best judgment.",
 });
 
 // ─── tool_search ─────────────────────────────────────────────

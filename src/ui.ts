@@ -245,6 +245,7 @@ const TOOL_VERBS: Record<string, string> = {
     list_files: "List",
     grep_search: "Search",
     run_command: "Run",
+    ask_user: "Asking",
     tool_search: "Search tools",
 };
 
@@ -261,6 +262,12 @@ function formatCallTarget(name: string, input: Record<string, any>): string {
         case "run_command": {
             const args = Array.isArray(input.args) ? input.args.join(" ") : "";
             return `${input.command} ${args}`.trim();
+        }
+        case "ask_user": {
+            const q = String(input.question ?? "");
+            const preview = q.length > 60 ? q.slice(0, 57) + "..." : q;
+            const opts = Array.isArray(input.options) ? ` (${input.options.length} options)` : "";
+            return `"${preview}"${opts}`;
         }
         default:
             return JSON.stringify(input).slice(0, 80);
@@ -343,6 +350,12 @@ export function classifyResult(name: string, result: string): ResultView {
             return { text: status, ok: exit ? exit[1] === "0" : false };
         }
 
+        case "ask_user": {
+            if (firstLine.startsWith("Error")) return { text: firstLine, ok: false };
+            if (result === "") return { text: "skipped", ok: true };
+            return { text: `answered: ${result.length > 40 ? result.slice(0, 37) + "..." : result}`, ok: true };
+        }
+
         default:
             return { text: `${result.length} chars`, ok: true };
     }
@@ -357,6 +370,20 @@ export function printToolResult(name: string, result: string, elapsedMs: number)
 
 export function printToolError(name: string, error: string): void {
     logLine(chalk.red(`    ↳ ✗ Error: ${error}`));
+}
+
+// ── Interactive question ──────────────────────────────────
+// Displayed when the agent calls ask_user to get input mid-turn.
+
+export function printQuestion(question: string, options?: string[]): void {
+    ensureLineBreak();
+    console.log(chalk.bold.cyan(`\n  ❓ ${question}`));
+    if (options && options.length > 0) {
+        for (let i = 0; i < options.length; i++) {
+            console.log(chalk.cyan(`    ${i + 1}. ${options[i]}`));
+        }
+    }
+    console.log(chalk.dim("    Press Enter to skip without answering."));
 }
 
 // ── Turn outcome ────────────────────────────────────────────
