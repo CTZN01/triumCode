@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 export type PermissionMode = "default" | "plan" | "acceptEdits" | "bypassPermissions" | "dontAsk";
 export type PermissionAction = "allow" | "deny" | "confirm";
@@ -113,6 +113,7 @@ export class PermissionPolicy {
     private readonly confirmed = new Set<string>();
     private readonly rules: PermissionRules;
     private currentMode: PermissionMode;
+    private planFilePath: string | null = null;
 
     constructor(
         mode: PermissionMode = "default",
@@ -126,13 +127,34 @@ export class PermissionPolicy {
         this.currentMode = mode;
     }
 
+    setPlanFilePath(path: string | null): void {
+        this.planFilePath = path;
+    }
+
     check(toolName: string, input: Record<string, any>): PermissionDecision {
         const ruleResult = checkRules(this.rules, toolName, input);
         if (ruleResult === "deny") {
             return { action: "deny", message: `Denied by permission rule for ${toolName}` };
         }
 
-        if (this.currentMode === "plan" && !READ_TOOLS.has(toolName)) {
+        // Plan mode tools are always allowed
+        if (toolName === "enter_plan_mode" || toolName === "exit_plan_mode") {
+            return { action: "allow" };
+        }
+
+        if (this.currentMode === "plan") {
+            // Allow read tools
+            if (READ_TOOLS.has(toolName)) {
+                return { action: "allow" };
+            }
+            // Allow writing/editing the plan file itself
+            if (this.planFilePath && EDIT_TOOLS.has(toolName)) {
+                const filePath = input.file_path || input.path;
+                if (typeof filePath === "string" && resolve(filePath) === resolve(this.planFilePath)) {
+                    return { action: "allow" };
+                }
+            }
+            // Block everything else in plan mode
             return { action: "deny", message: `Blocked in plan mode: ${toolName}` };
         }
 

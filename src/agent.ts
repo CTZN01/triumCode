@@ -1,10 +1,14 @@
 import Anthropic from "@anthropic-ai/sdk";
+import { readFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import * as os from "node:os";
 import { getActiveToolDefinitions, type ReadFileState, type ToolContext } from "./tools.js";
 import { ToolExecutor } from "./tool-executor.js";
 import { buildStaticSystemPrompt, buildDynamicSystemContext, buildUserContextReminder } from "./prompt.js";
 import {
     printToolCall, printToolResult, writeStream, endStream, printCostReport,
     beginStatus, updateStatus, endStatus, printThinkingDuration, pickStatusVerb, printInfo, printTurnEnd,
+    printPlanForApproval, printPlanModeEntered, printPlanModeExited,
 } from "./ui.js";
 import { withRetry } from "./retry.js";
 import {
@@ -22,10 +26,6 @@ import { PermissionPolicy, type PermissionMode } from "./permissions.js";
 // then get cut off mid-sentence — or mid-tool-call. 4096 was small enough to
 // trigger that constantly.
 const DEFAULT_MAX_TOKENS = 32_000;
-
-// Hard ceiling on agent-loop iterations. Without it, a tool that keeps
-// returning the same error loops until the API budget runs out.
-const DEFAULT_MAX_TURNS = 25;
 
 // System prompt as an array of TextBlockParam. The first block (persona +
 // tool guidance) carries cache_control so it is reused across turns without
@@ -120,6 +120,9 @@ export class Agent {
     private onAskUser?: (question: string, options?: string[]) => Promise<string>;
     private permissionPolicy: PermissionPolicy;
 
+    // ── Plan mode state ─────────────────────────────────────────
+    private planFilePath: string | null = null;
+
     constructor(options?: AgentOptions) {
         this.model = options?.model || process.env.MINI_MODEL || "claude-sonnet-4-20250514";
         this.client = new Anthropic({
@@ -133,7 +136,7 @@ export class Agent {
             : DEFAULT_MAX_TOKENS;
         this.maxTurns = options?.maxTurns && options.maxTurns > 0
             ? options.maxTurns
-            : DEFAULT_MAX_TURNS;
+            : 0;
         this.contextWindow = options?.contextWindow && options.contextWindow > 0
             ? Math.floor(options.contextWindow)
             : DEFAULT_CONTEXT_WINDOW;
@@ -156,6 +159,7 @@ export class Agent {
     togglePlanMode(): void {
         this.planMode = !this.planMode;
         this.permissionPolicy.setMode(this.planMode ? "plan" : "default");
+        if (this.planMode) this.preparePlanFile();
     }
 
     /** Abort the currently-running chat() call. */
@@ -199,6 +203,58 @@ export class Agent {
     /** Replace old turns with a local summary at a safe turn boundary. */
     compact(): void {
         this.messages = compactHistory(this.messages);
+    }
+
+    private preparePlanFile(): string {
+        if (this.planFilePath) return this.planFilePath;
+        const directory = join(os.homedir(), ".claude", "plans");
+        mkdirSync(directory, { recursive: true });
+        const stamp = new Date().toISOString().replace(/[.:]/g, "-");
+        this.planFilePath = join(directory, `plan-${stamp}.md`);
+        writeFileSync(this.planFilePath, "# Implementation Plan\n\n", "utf8");
+        this.permissionPolicy.setPlanFilePath(this.planFilePath);
+        return this.planFilePath;
+    }
+
+    private enterPlanModeFromTool(): Promise<string> {
+        if (this.planMode) return Promise.resolve(`Already in plan mode. Plan file: ${this.preparePlanFile()}`);
+        this.planMode = true;
+        this.permissionPolicy.setMode("plan");
+        const path = this.preparePlanFile();
+        printPlanModeEntered(path);
+        return Promise.resolve(`Entered plan mode. Read files and write the plan to ${path}. Call exit_plan_mode when ready.`);
+    }
+
+    private async exitPlanModeFromTool(): Promise<string> {
+        if (!this.planMode) return "Error: the agent is not in plan mode.";
+        const path = this.preparePlanFile();
+        const content = readFileSync(path, "utf8").trim();
+        if (!content || content === "# Implementation Plan") {
+            return "Error: write the implementation plan to the plan file before calling exit_plan_mode.";
+        }
+        printPlanForApproval(content);
+        if (!this.onAskUser) return "Error: plan approval is unavailable in this context.";
+        const answer = (await this.onAskUser("Review the plan and choose how to proceed.", [
+            "clear context and execute",
+            "execute with current context",
+            "execute with manual edit confirmations",
+            "keep planning",
+        ])).trim().toLowerCase();
+
+        if (answer === "4" || answer.includes("keep")) {
+            return "Plan kept for revision. Continue planning and call exit_plan_mode again when ready.";
+        }
+
+        const clear = answer === "1" || answer.includes("clear");
+        const manual = answer === "3" || answer.includes("manual");
+        if (clear) this.clearHistory();
+        this.planMode = false;
+        this.permissionPolicy.setMode(manual ? "default" : "acceptEdits");
+        this.permissionPolicy.setPlanFilePath(null);
+        printPlanModeExited(manual ? "default" : "acceptEdits");
+        return clear
+            ? "Plan approved. Context cleared; proceed with implementation."
+            : "Plan approved. Proceed with implementation.";
     }
 
     async chat(userText: string): Promise<void> {
@@ -290,7 +346,7 @@ export class Agent {
 
         // Agent loop: keep going as long as the model produces tool calls.
         while (true) {
-            if (turns >= this.maxTurns) {
+            if (this.maxTurns > 0 && turns >= this.maxTurns) {
                 printTurnEnd(`stopped after ${this.maxTurns} turns — the task may be unfinished`);
                 return;
             }
@@ -353,6 +409,8 @@ export class Agent {
                     const answer = await this.onAskUser(`Allow this potentially destructive action?\n  ${message}`, ["y", "n"]);
                     return answer.trim().toLowerCase().startsWith("y");
                 },
+                enterPlanMode: () => this.enterPlanModeFromTool(),
+                exitPlanMode: () => this.exitPlanModeFromTool(),
             };
             const executor = new ToolExecutor(context);
             const toolResults = new Map<string, Promise<string>>();

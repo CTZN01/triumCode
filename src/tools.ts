@@ -16,6 +16,8 @@ export interface ToolContext {
     askUser?: (question: string, options?: string[]) => Promise<string>;
     permissionPolicy?: import("./permissions.js").PermissionPolicy;
     confirmPermission?: (message: string) => Promise<boolean>;
+    enterPlanMode?: () => Promise<string>;
+    exitPlanMode?: () => Promise<string>;
 }
 
 export interface Tool {
@@ -238,9 +240,12 @@ function editFileImpl(input: { file_path: string; old_string: string; new_string
     }
 
     const line = content.slice(0, content.indexOf(oldString)).split("\n").length;
-    const written = writeFileImpl({ file_path: input.file_path, content: content.split(oldString).join(newString) });
+    const replacement = content.split(oldString).join(newString);
+    const removedLines = oldString.split("\n").length;
+    const addedLines = newString.split("\n").length;
+    const written = writeFileImpl({ file_path: input.file_path, content: replacement });
     if (written.startsWith("Error")) return written;
-    return `Edited ${input.file_path} at line ${line}`;
+    return `Edited ${input.file_path} at line ${line} (+${addedLines}/-${removedLines} lines)`;
 }
 
 const editFileTool = register({
@@ -964,6 +969,50 @@ register({
         "Use skill when a listed reusable skill matches the user's request. " +
         "Load the skill before acting and follow its prompt and allowed-tools. " +
         "Skills with mode=fork should be treated as isolated sub-agent work.",
+});
+
+// ─── Plan mode tools ────────────────────────────────────────
+
+register({
+    name: "enter_plan_mode",
+    description: "Enter plan mode to switch to a read-only planning phase. In plan mode, you can only read files and write to the plan file. Use this when you need to explore the codebase and design an implementation plan before making changes.",
+    inputSchema: {
+        type: "object",
+        properties: {},
+    },
+    isConcurrencySafe: () => true,
+    isReadOnly: () => true,
+    isDestructive: () => false,
+    maxResultSizeChars: 5_000,
+
+    async call(_input, context) {
+        if (!context.enterPlanMode) return "Error: plan mode is unavailable in this context.";
+        return context.enterPlanMode();
+    },
+
+    prompt: () => "",
+    deferred: true,
+});
+
+register({
+    name: "exit_plan_mode",
+    description: "Exit plan mode after you have finished writing your plan to the plan file. The user will review and approve the plan before you proceed with implementation.",
+    inputSchema: {
+        type: "object",
+        properties: {},
+    },
+    isConcurrencySafe: () => true,
+    isReadOnly: () => true,
+    isDestructive: () => false,
+    maxResultSizeChars: 5_000,
+
+    async call(_input, context) {
+        if (!context.exitPlanMode) return "Error: plan mode is unavailable in this context.";
+        return context.exitPlanMode();
+    },
+
+    prompt: () => "",
+    deferred: true,
 });
 
 // ─── tool_search ─────────────────────────────────────────────

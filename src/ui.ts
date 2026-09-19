@@ -247,6 +247,9 @@ const TOOL_VERBS: Record<string, string> = {
     run_command: "Run",
     ask_user: "Asking",
     tool_search: "Search tools",
+    skill: "Load skill",
+    enter_plan_mode: "Enter plan mode",
+    exit_plan_mode: "Exit plan mode",
 };
 
 function formatCallTarget(name: string, input: Record<string, any>): string {
@@ -269,6 +272,8 @@ function formatCallTarget(name: string, input: Record<string, any>): string {
             const opts = Array.isArray(input.options) ? ` (${input.options.length} options)` : "";
             return `"${preview}"${opts}`;
         }
+        case "skill":
+            return String(input.name ?? "");
         default:
             return JSON.stringify(input).slice(0, 80);
     }
@@ -318,8 +323,8 @@ export function classifyResult(name: string, result: string): ResultView {
             return { text: firstLine, ok: true };
 
         case "edit_file": {
-            const m = /^Edited .* at line (\d+)$/.exec(firstLine);
-            return { text: m ? `Edited at line ${m[1]}` : firstLine, ok: true };
+            const m = /^Edited .* at line (\d+)(?: \(([^)]+)\))?$/.exec(firstLine);
+            return { text: m ? `Edited at line ${m[1]}${m[2] ? ` ${m[2]}` : ""}` : firstLine, ok: true };
         }
 
         case "list_files": {
@@ -422,6 +427,39 @@ export function printCostReport(usage: { input: number; output: number; cost: nu
     if (usage.cost > 0) {
         logLine(`    Cost:   ${chalk.yellow("$" + usage.cost.toFixed(4))}`);
     }
+}
+
+// ── Plan approval ──────────────────────────────────────────
+
+export function printPlanForApproval(planContent: string): void {
+    ensureLineBreak();
+    console.log(chalk.cyan("\n  ━━━ Plan for Approval ━━━"));
+    const lines = planContent.split("\n");
+    const maxLines = 60;
+    const display = lines.slice(0, maxLines);
+    for (const line of display) {
+        console.log(chalk.white("  " + line));
+    }
+    if (lines.length > maxLines) {
+        console.log(chalk.gray(`  ... (${lines.length - maxLines} more lines)`));
+    }
+    console.log(chalk.cyan("  ━━━━━━━━━━━━━━━━━━━━━━\n"));
+}
+
+export function printPlanApprovalOptions(): void {
+    console.log(chalk.yellow("  Choose an option:"));
+    console.log("    1) Clear context and execute — fresh start with auto-accept edits");
+    console.log("    2) Execute — keep context, auto-accept edits");
+    console.log("    3) Manual — keep context, confirm each edit");
+    console.log("    4) Keep planning — provide feedback to revise");
+}
+
+export function printPlanModeEntered(planFilePath: string): void {
+    printInfo(`Entered plan mode (read-only). Plan file: ${planFilePath}`);
+}
+
+export function printPlanModeExited(targetMode: string): void {
+    printInfo(`Exited plan mode → ${targetMode} mode`);
 }
 
 // ── Config report ───────────────────────────────────────────
