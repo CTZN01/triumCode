@@ -16,7 +16,7 @@ import {
     isUnsupportedParamError, filterThinkingBlocks, type EffortLevel,
 } from "./thinking.js";
 import {
-    compactHistory, compressHistory, prepareToolResult, shouldAutoCompact,
+    compactHistory, compressHistory, estimateTokens, prepareToolResult, shouldAutoCompact,
     withCacheBreakpoints, DEFAULT_CONTEXT_WINDOW,
 } from "./context-compression.js";
 import { PermissionPolicy, type PermissionMode } from "./permissions.js";
@@ -104,6 +104,8 @@ export class Agent {
     private maxTokens: number;
     private maxTurns: number;
     private contextWindow: number;
+    private contextUtilization = 0;
+    private permissionMode: PermissionMode;
     // Set once the endpoint has rejected the thinking/effort params, so later
     // turns skip sending them instead of paying a 400 on every request.
     private optionalParamsRejected = false;
@@ -156,6 +158,7 @@ export class Agent {
             : DEFAULT_CONTEXT_WINDOW;
         this.planMode = options?.planMode ?? options?.permissionMode === "plan";
         const permissionMode = options?.permissionMode ?? (this.planMode ? "plan" : "default");
+        this.permissionMode = permissionMode;
         this.permissionPolicy = new PermissionPolicy(permissionMode);
         this.sideQueryFn = options?.sideQuery ?? null;
     }
@@ -173,8 +176,51 @@ export class Agent {
     /** Toggle plan mode on/off. */
     togglePlanMode(): void {
         this.planMode = !this.planMode;
-        this.permissionPolicy.setMode(this.planMode ? "plan" : "default");
+        this.permissionMode = this.planMode ? "plan" : "default";
+        this.permissionPolicy.setMode(this.permissionMode);
         if (this.planMode) this.preparePlanFile();
+    }
+
+    // ── Mid-session reasoning controls (REPL /effort, /thinking) ──
+    // Both take effect from the next request on: openStream re-applies the
+    // params on every turn.
+
+    /** Set reasoning depth; effort only means something while thinking is on, so it turns thinking on. */
+    setEffort(level: EffortLevel): void {
+        this.effort = level;
+        this.thinkingEnabled = true;
+    }
+
+    /** Toggle extended thinking. */
+    setThinking(enabled: boolean): void {
+        this.thinkingEnabled = enabled;
+    }
+
+    getEffort(): EffortLevel | null {
+        return this.effort;
+    }
+
+    isThinkingEnabled(): boolean {
+        return this.thinkingEnabled;
+    }
+
+    /** Compact state for the interactive CLI footer. */
+    getSessionStatus(): { model: string; effort: string; contextPercent: number; mode: string } {
+        // Unset effort and plain "default" mode are omitted by the footer —
+        // internal fallback strings mean nothing to the user.
+        const modeLabels: Record<PermissionMode, string> = {
+            default: "",
+            plan: "plan",
+            acceptEdits: "accept-edits",
+            bypassPermissions: "yolo",
+            dontAsk: "dont-ask",
+        };
+        return {
+            model: this.model,
+            effort: this.effort ?? "",
+            contextPercent: this.contextUtilization * 100,
+            mode: modeLabels[this.permissionMode],
+        };
     }
 
     /** Abort the currently-running chat() call. */
@@ -212,6 +258,7 @@ export class Agent {
     /** Wipe the conversation. Called by /clear. */
     clearHistory(): void {
         this.messages = [];
+        this.contextUtilization = 0;
         this.injectedContextReminder = false;
         // Memories already injected belonged to the cleared conversation.
         this.alreadySurfacedMemories.clear();
@@ -307,6 +354,7 @@ export class Agent {
     private enterPlanModeFromTool(): Promise<string> {
         if (this.planMode) return Promise.resolve(`Already in plan mode. Plan file: ${this.preparePlanFile()}`);
         this.planMode = true;
+        this.permissionMode = "plan";
         this.permissionPolicy.setMode("plan");
         const path = this.preparePlanFile();
         printPlanModeEntered(path);
@@ -337,7 +385,8 @@ export class Agent {
         const manual = answer === "3" || answer.includes("manual");
         if (clear) this.clearHistory();
         this.planMode = false;
-        this.permissionPolicy.setMode(manual ? "default" : "acceptEdits");
+        this.permissionMode = manual ? "default" : "acceptEdits";
+        this.permissionPolicy.setMode(this.permissionMode);
         this.permissionPolicy.setPlanFilePath(null);
         printPlanModeExited(manual ? "default" : "acceptEdits");
         return clear
@@ -460,6 +509,11 @@ export class Agent {
                 idleMs: this.lastRequestAt > 0 ? Date.now() - this.lastRequestAt : 0,
             });
             const cached = withCacheBreakpoints(compressed.messages, buildSystemBlocks(this.planMode));
+            this.contextUtilization = estimateTokens({
+                system: cached.system,
+                messages: cached.messages,
+                tools,
+            }) / Math.max(1, this.contextWindow - 20_000);
             this.lastRequestAt = Date.now();
 
             let stream: any;

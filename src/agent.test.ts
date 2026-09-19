@@ -310,3 +310,31 @@ test("a settled memory prefetch is injected before the first model call", async 
     assert.match(userTexts[1], /^<system-reminder>\nMemory \(saved/);
     assert.match(userTexts[1], /Deploy to https:\/\/staging\.example\.com\./);
 });
+
+// ── Mid-session reasoning controls ──────────────────────────
+
+test("effort and thinking are adjustable mid-session and apply to the next request", async () => {
+    const api = await fakeApi([
+        (w) => { w(start(0, { type: "text", text: "" })); w(textDelta(0, "hi")); w(stop(0)); w(finish("end_turn")); },
+    ]);
+    // test-model is not a default-thinking model, so turn 1 is a plain request.
+    const agent = new Agent({ model: "test-model", apiKey: "k", apiBase: api.url });
+
+    try {
+        await agent.chat("first");
+        assert.equal(api.bodies[0].thinking, undefined);
+        assert.equal(api.bodies[0].output_config, undefined);
+
+        agent.setEffort("high"); // implies thinking on
+        await agent.chat("second");
+        assert.equal(api.bodies[1].thinking.type, "adaptive");
+        assert.equal(api.bodies[1].output_config.effort, "high");
+
+        agent.setThinking(false);
+        await agent.chat("third");
+        assert.equal(api.bodies[2].thinking, undefined);
+        assert.equal(api.bodies[2].output_config.effort, "high");
+    } finally {
+        api.close();
+    }
+});
