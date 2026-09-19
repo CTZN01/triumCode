@@ -7,11 +7,11 @@ import {
 } from "./session.js";
 import {
     printWelcome, printUserPrompt, printInfo, printError,
-    printInterrupted, printHelp, printCostReport, printBlock, endStatus,
-    printConfigReport, printQuestion,
+    printInterrupted, printHelp, printCostReport, printBlock, printTurnStart, endStatus,
+    printConfigReport, printQuestion, printSessionStatus, renderPickStrip,
 } from "./ui.js";
-import { ensureConfig, describeSource } from "./config.js";
-import { parseEffort, EFFORT_LEVELS } from "./thinking.js";
+import { ensureConfig, describeSource, parseSizeTokens } from "./config.js";
+import { parseEffort, EFFORT_LEVELS, type EffortLevel } from "./thinking.js";
 import { getSkill, resolveSkillPrompt } from "./skills.js";
 import { listMemories } from "./memory.js";
 
@@ -25,7 +25,8 @@ interface CliFlags {
     model: string;           // --model / -m
     apiKey: string;          // --api-key
     apiBase: string;         // --api-base
-    thinking: boolean;       // --thinking
+    thinking: boolean | undefined;  // --thinking; undefined = resolve from config/env/default
+    noThinking: boolean;     // --no-thinking (thinking is on by default)
     effort: string;          // --effort low|medium|high|xhigh|max
     permissionMode: string;  // --yolo / -y, --plan, --accept-edits, --dont-ask
     maxCost: number | undefined;
@@ -43,7 +44,8 @@ function parseArgs(argv: string[]): CliFlags {
         model: "",      // resolved later by config.ts
         apiKey: "",     // resolved later by config.ts
         apiBase: "",    // resolved later by config.ts
-        thinking: false,
+        thinking: undefined,
+        noThinking: false,
         effort: "",
         permissionMode: "default",
         maxCost: undefined,
@@ -75,6 +77,8 @@ function parseArgs(argv: string[]): CliFlags {
             flags.model = argv[++i] || flags.model;
         } else if (arg === "--thinking") {
             flags.thinking = true;
+        } else if (arg === "--no-thinking") {
+            flags.noThinking = true;
         } else if (arg === "--effort") {
             const v = argv[++i] || "";
             if (parseEffort(v)) {
@@ -100,8 +104,10 @@ function parseArgs(argv: string[]): CliFlags {
             const v = parseInt(argv[++i], 10);
             if (!isNaN(v)) flags.maxTokens = v;
         } else if (arg === "--context-window") {
-            const v = parseInt(argv[++i], 10);
-            if (!isNaN(v) && v > 0) flags.contextWindow = v;
+            // Accepts plain token counts and size suffixes: 200k, 1M, 1.5m.
+            const v = parseSizeTokens(argv[++i]);
+            if (v) flags.contextWindow = v;
+            else printError("--context-window must be a positive token count, optionally with a k/M suffix (e.g. 200k, 1M)");
         } else if (arg === "--help" || arg === "-h") {
             flags.help = true;
         } else {
@@ -204,7 +210,11 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
 
     // Resolve config from all sources (CLI > ~/.triumcode/config.json > env).
     // If no API key is found anywhere, enters interactive first-run setup.
-    const bundle = await ensureConfig(flags);
+    // --no-thinking is the off switch for thinking's default-on.
+    const bundle = await ensureConfig({
+        ...flags,
+        thinking: flags.thinking ?? (flags.noThinking ? false : undefined),
+    });
     if (!bundle) process.exit(1);
     const config = bundle.config;
 
@@ -253,10 +263,84 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
     }
 
     // ── Interactive REPL ─────────────────────────────────────────
-    const rl = readline.createInterface({
+    // `let` because the strip picker closes and rebuilds the interface
+    // around itself (see stripPick).
+    let rl = readline.createInterface({
         input: process.stdin,
         output: process.stdout,
     });
+
+    // Set while the strip picker owns stdin, cleared by the caller once the
+    // promise resolves. The SIGINT handler checks it because Ctrl+C can
+    // surface as a signal even in raw mode (Windows).
+    let activePickerCancel: (() => void) | null = null;
+
+    /**
+     * Codex-style strip picker: the options render as one horizontal line,
+     * left/right moves the selection, Enter confirms, Esc or Ctrl+C cancels.
+     * Needs a TTY (raw mode); resolves null without one so the caller can
+     * fall back to a plain numbered prompt.
+     *
+     * The main readline interface is CLOSED for the duration, not paused:
+     * a paused interface stops stdin's data flow, and keypress events are
+     * fed by that flow — the picker would freeze with no way to receive
+     * keys. Afterwards a fresh interface takes over.
+     */
+    const stripPick = (options: readonly string[], initial: number): Promise<number | null> => {
+        return new Promise((resolve) => {
+            if (!process.stdin.isTTY) {
+                resolve(null);
+                return;
+            }
+            let idx = initial;
+            let done = false;
+            const draw = () => {
+                process.stdout.write(
+                    `\r\x1b[K  ${renderPickStrip(options, idx)}`
+                    + chalk.dim("   <-/-> move, Enter confirm, Esc cancel"),
+                );
+            };
+            const finish = (result: number | null) => {
+                if (done) return;
+                done = true;
+                process.stdin.removeListener("keypress", onKeypress);
+                process.stdin.setRawMode?.(false);
+                process.stdout.write("\n");
+                // Hand stdin back to a REPL interface; askQuestion() installs
+                // its line listener on whatever `rl` holds by then.
+                rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+                resolve(result);
+            };
+            const onKeypress = (str: string, key: any) => {
+                if (key?.name === "left") {
+                    idx = (idx + options.length - 1) % options.length;
+                    draw();
+                } else if (key?.name === "right") {
+                    idx = (idx + 1) % options.length;
+                    draw();
+                } else if (key?.name === "return" || key?.name === "enter") {
+                    finish(idx);
+                } else if (key?.name === "escape" || (key?.ctrl && key?.name === "c")) {
+                    // Raw mode delivers Ctrl+C as a keypress on Unix; finish()
+                    // is idempotent, so a duplicate SIGINT delivery on Windows
+                    // is harmless.
+                    finish(null);
+                }
+            };
+            readline.emitKeypressEvents(process.stdin);
+            rl.close();
+            // close() pauses stdin, and a paused stream emits no data —
+            // keypress events are fed by that flow, and a paused stdin also
+            // stops keeping the event loop alive (the process would exit
+            // right after drawing the strip). Resume it explicitly.
+            process.stdin.resume();
+            process.stdin.setRawMode?.(true);
+            process.stdin.on("keypress", onKeypress);
+            activePickerCancel = () => finish(null);
+            process.stdout.write("\n");
+            draw();
+        });
+    };
 
     // ── SIGINT handling ──────────────────────────────────────────
     let sigintCount = 0;
@@ -265,6 +349,16 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
         // askQuestion() below re-prompts immediately — so the status line has
         // to go first, or a tick lands on top of the live prompt.
         endStatus();
+
+        // The strip picker owns stdin; Ctrl+C cancels the pick instead of
+        // counting toward exit. finish() is idempotent, so a Ctrl+C that is
+        // delivered both as keypress and as signal (Windows) stays a single
+        // cancel.
+        if (activePickerCancel) {
+            activePickerCancel();
+            sigintCount = 0;
+            return;
+        }
 
         // If the agent asked a question via ask_user, treat Ctrl+C as "skip".
         if (pendingAskUser) {
@@ -295,9 +389,13 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
     printInfo(`endpoint ${config.apiBase}  (${describeSource(bundle.sources.apiBase)}) - /config for details`);
 
     // ── REPL loop with rl.once (strict serial execution) ─────────
+    // The session footer belongs to a completed model exchange — commands
+    // like /config or /help clear this flag so they don't drag it along.
+    let sessionFooterPending = false;
     const handleLine = async (line: string): Promise<void> => {
             const input = line.trim();
             sigintCount = 0;
+            sessionFooterPending = false;
 
             // Empty line: re-prompt.
             if (!input) {
@@ -368,6 +466,85 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
                 return;
             }
 
+            // ── Reasoning controls (adjustable mid-session) ─────────
+            if (input === "/effort" || input.startsWith("/effort ")) {
+                const arg = input.slice(7).trim();
+                if (arg) {
+                    const level = parseEffort(arg);
+                    if (!level) {
+                        printError(`/effort must be one of: ${EFFORT_LEVELS.join(", ")}`);
+                    } else {
+                        agent.setEffort(level);
+                        printInfo(`thinking on, effort ${level}`);
+                    }
+                    askQuestion();
+                    return;
+                }
+                // No argument: Codex-style strip picker when stdin is a TTY,
+                // numbered prompt otherwise.
+                endStatus();
+                printTurnStart();
+                const current = agent.getEffort();
+                const initial = Math.max(0, EFFORT_LEVELS.indexOf(current ?? "high"));
+
+                if (process.stdin.isTTY) {
+                    const picked = await stripPick(EFFORT_LEVELS, initial);
+                    if (picked === null) {
+                        printInfo("cancelled");
+                    } else {
+                        const level = EFFORT_LEVELS[picked];
+                        agent.setEffort(level);
+                        printInfo(`thinking on, effort ${level}`);
+                    }
+                    askQuestion();
+                    return;
+                }
+
+                printQuestion(
+                    "Reasoning effort (thinking turns on):",
+                    EFFORT_LEVELS.map((l) => `${l}${l === current ? "   <- current" : ""}`),
+                );
+                process.stdout.write(chalk.cyan("  Your answer: "));
+                pendingAskUser = (answer) => {
+                    const trimmed = answer.trim().toLowerCase();
+                    if (!trimmed) {
+                        printInfo("cancelled");
+                        askQuestion();
+                        return;
+                    }
+                    const level = (EFFORT_LEVELS as readonly string[]).includes(trimmed)
+                        ? (trimmed as EffortLevel)
+                        : EFFORT_LEVELS[parseInt(trimmed, 10) - 1];
+                    if (!level) {
+                        printError(`pick 1-${EFFORT_LEVELS.length} or one of: ${EFFORT_LEVELS.join(", ")}`);
+                    } else {
+                        agent.setEffort(level);
+                        printInfo(`thinking on, effort ${level}`);
+                    }
+                    askQuestion();
+                };
+                rl.once("line", handleLine);
+                return;
+            }
+
+            if (input === "/thinking" || input.startsWith("/thinking ")) {
+                const arg = input.slice(9).trim().toLowerCase();
+                if (!arg) {
+                    const effort = agent.getEffort();
+                    printInfo(`thinking is ${agent.isThinkingEnabled() ? "on" : "off"}${effort ? `, effort ${effort}` : ""}`);
+                } else if (arg === "on" || arg === "true") {
+                    agent.setThinking(true);
+                    printInfo("thinking on");
+                } else if (arg === "off" || arg === "false") {
+                    agent.setThinking(false);
+                    printInfo("thinking off");
+                } else {
+                    printError("usage: /thinking [on|off]");
+                }
+                askQuestion();
+                return;
+            }
+
             if (input === "/memory") {
                 const memories = listMemories();
                 if (memories.length === 0) {
@@ -425,7 +602,9 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
                     const prompt = resolveSkillPrompt(rawName, argumentParts.join(" "));
                     if (prompt) {
                         try {
+                            printTurnStart();
                             await agent.chat(prompt);
+                            sessionFooterPending = true;
                         } catch (e: any) {
                             if (e.name !== "AbortError" && !e.message?.includes("aborted")) {
                                 printError(e.message);
@@ -439,7 +618,9 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
 
             // ── Chat ──────────────────────────────────────────────
             try {
+                printTurnStart();
                 await agent.chat(input);
+                sessionFooterPending = true;
             } catch (e: any) {
                 if (e.name !== "AbortError" && !e.message?.includes("aborted")) {
                     printError(e.message);
@@ -463,8 +644,17 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
     });
 
     const askQuestion = (): void => {
+        // Only after a completed model exchange — not after /config, /help
+        // and friends: the footer describes the conversation, and a config
+        // viewer has none.
+        if (sessionFooterPending && agent.history().length > 0) {
+            printSessionStatus(agent.getSessionStatus());
+        }
         printUserPrompt();
         rl.once("line", handleLine);
+        // Refresh the prompt explicitly so it is visible before the first key
+        // press as well as after each completed turn.
+        rl.prompt();
     };
 
     askQuestion();
