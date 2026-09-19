@@ -209,3 +209,28 @@ test("context window accepts k/M suffixes; thinking and effort default on", asyn
     assert.equal(mod.parseSizeTokens("-5"), undefined);
     assert.equal(mod.parseSizeTokens(undefined), undefined);
 });
+
+// ── Model presets ───────────────────────────────────────────
+
+test("getModelPresets reads the models map and drops malformed entries", async (t) => {
+    const { mod, restore } = await loadConfig({
+        model: "default-model",
+        models: {
+            mimo: { model: "mimo-v2.5" },
+            sonnet: { model: "claude-sonnet-4-5", apiBase: "https://api.anthropic.com" },
+            broken: { apiBase: "https://no.model/" },
+        },
+    });
+    t.after(restore);
+
+    const presets = mod.getModelPresets();
+    assert.deepEqual(presets.mimo, { model: "mimo-v2.5", apiBase: undefined, apiKey: undefined });
+    assert.equal(presets.sonnet?.apiBase, "https://api.anthropic.com");
+    assert.equal(presets.broken, undefined);
+});
+
+test("getModelPresets returns an empty set without a models map", async (t) => {
+    const { mod, restore } = await loadConfig({ model: "default-model" });
+    t.after(restore);
+    assert.deepEqual(mod.getModelPresets(), {});
+});

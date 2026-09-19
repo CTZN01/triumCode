@@ -338,3 +338,30 @@ test("effort and thinking are adjustable mid-session and apply to the next reque
         api.close();
     }
 });
+
+// ── Mid-session model switching ─────────────────────────────
+
+test("setModel switches the model for the next request and can retarget the endpoint", async () => {
+    const api = await fakeApi([
+        (w) => { w(start(0, { type: "text", text: "" })); w(textDelta(0, "hi")); w(stop(0)); w(finish("end_turn")); },
+    ]);
+    const agent = new Agent({ model: "model-a", apiKey: "k", apiBase: api.url });
+
+    try {
+        await agent.chat("first");
+        assert.equal(api.bodies[0].model, "model-a");
+
+        agent.setModel("model-b");
+        await agent.chat("second");
+        assert.equal(api.bodies[1].model, "model-b");
+        // No endpoint override: the client (and thus the URL) is untouched.
+        assert.equal(api.requests, 2);
+
+        // An endpoint override rebuilds the client — requests go to the new URL.
+        agent.setModel("model-c", "http://127.0.0.1:9"); // nothing listens there
+        await agent.chat("third").catch(() => {});
+        assert.equal(api.requests, 2); // the third request never reached the first server
+    } finally {
+        api.close();
+    }
+});

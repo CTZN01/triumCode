@@ -713,6 +713,9 @@ REPL Commands:
                    opens a strip picker (left/right arrows, Enter confirms).
                    Thinking turns on with it
   /thinking [on|off]  Show or toggle extended thinking
+  /model [name]    Switch model; a bare /model opens a picker over the
+                   "models" presets in ~/.triumcode/config.json. A preset may
+                   also retarget the endpoint and key
   /memory          List saved long-term memories
   /sessions        List all saved sessions
   /delete <id>     Delete a saved session

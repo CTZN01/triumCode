@@ -204,6 +204,28 @@ export class Agent {
         return this.thinkingEnabled;
     }
 
+    /**
+     * Switch the model mid-session (REPL /model); applies from the next
+     * request. A preset may also retarget the endpoint and key — the client
+     * is rebuilt in that case. The thinking/effort rejection flag resets so
+     * a new endpoint gets one chance to accept the params before the
+     * session adapts to plain requests.
+     */
+    setModel(model: string, apiBase?: string, apiKey?: string): void {
+        this.model = model;
+        if (apiBase !== undefined || apiKey !== undefined) {
+            this.client = new Anthropic({
+                baseURL: apiBase || process.env.ANTHROPIC_BASE_URL,
+                apiKey: apiKey || process.env.ANTHROPIC_API_KEY,
+            });
+            this.optionalParamsRejected = false;
+        }
+    }
+
+    getModel(): string {
+        return this.model;
+    }
+
     /** Compact state for the interactive CLI footer. */
     getSessionStatus(): { model: string; effort: string; contextPercent: number; mode: string } {
         // Unset effort and plain "default" mode are omitted by the footer —

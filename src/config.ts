@@ -39,6 +39,15 @@ export interface UserConfig {
     effort?: string;
     // Accepts a plain token count or a k/M suffix string ("200k", "1M").
     contextWindow?: number | string;
+    // Named model presets for the /model command. Each preset may override
+    // the model id and, for cross-provider switching, the endpoint and key.
+    models?: Record<string, ModelPreset>;
+}
+
+export interface ModelPreset {
+    model: string;
+    apiBase?: string;
+    apiKey?: string;
 }
 
 function readConfig(): UserConfig {
@@ -212,6 +221,26 @@ export function resolveConfig(flags: {
     contextWindow?: number;
 }): ResolvedConfig {
     return resolveConfigDetailed(flags).config;
+}
+
+/**
+ * Named model presets from the config file's "models" map, for /model.
+ * Read fresh on every call so edits to config.json show up without a
+ * restart. An absent or malformed map yields an empty set.
+ */
+export function getModelPresets(): Record<string, ModelPreset> {
+    const models = readConfig().models;
+    if (!models || typeof models !== "object" || Array.isArray(models)) return {};
+    const presets: Record<string, ModelPreset> = {};
+    for (const [name, preset] of Object.entries(models)) {
+        if (!preset || typeof preset !== "object" || !preset.model) continue;
+        presets[name] = {
+            model: String(preset.model),
+            apiBase: preset.apiBase ? String(preset.apiBase) : undefined,
+            apiKey: preset.apiKey ? String(preset.apiKey) : undefined,
+        };
+    }
+    return presets;
 }
 
 /**

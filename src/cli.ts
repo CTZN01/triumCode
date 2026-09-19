@@ -10,7 +10,7 @@ import {
     printInterrupted, printHelp, printCostReport, printBlock, printTurnStart, endStatus,
     printConfigReport, printQuestion, printSessionStatus, renderPickStrip,
 } from "./ui.js";
-import { ensureConfig, describeSource, parseSizeTokens } from "./config.js";
+import { ensureConfig, describeSource, parseSizeTokens, getModelPresets } from "./config.js";
 import { parseEffort, EFFORT_LEVELS, type EffortLevel } from "./thinking.js";
 import { getSkill, resolveSkillPrompt } from "./skills.js";
 import { listMemories } from "./memory.js";
@@ -542,6 +542,71 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
                     printError("usage: /thinking [on|off]");
                 }
                 askQuestion();
+                return;
+            }
+
+            // ── Model switching ──────────────────────────────────
+            if (input === "/model" || input.startsWith("/model ")) {
+                const arg = input.slice(6).trim();
+                const presets = getModelPresets();
+
+                const apply = (label: string, preset: { model: string; apiBase?: string; apiKey?: string }): void => {
+                    agent.setModel(preset.model, preset.apiBase, preset.apiKey);
+                    printInfo(`model: ${preset.model}${preset.apiBase ? ` @ ${preset.apiBase}` : ""}${label ? ` (preset "${label}")` : ""}`);
+                };
+
+                if (arg) {
+                    // A preset name wins; anything else is treated as a raw model id.
+                    const preset = presets[arg];
+                    if (preset) {
+                        apply(arg, preset);
+                    } else {
+                        apply("", { model: arg });
+                    }
+                    askQuestion();
+                    return;
+                }
+
+                const names = Object.keys(presets);
+                if (names.length === 0) {
+                    printError("no model presets - add a \"models\" map to ~/.triumcode/config.json, or use /model <model-id>");
+                    askQuestion();
+                    return;
+                }
+
+                // Bare /model: picker over the presets, current one marked.
+                endStatus();
+                printTurnStart();
+                const currentIndex = names.findIndex((n) => presets[n].model === agent.getModel());
+
+                if (process.stdin.isTTY) {
+                    const picked = await stripPick(names, Math.max(0, currentIndex));
+                    if (picked === null) {
+                        printInfo("cancelled");
+                    } else {
+                        apply(names[picked], presets[names[picked]]);
+                    }
+                    askQuestion();
+                    return;
+                }
+
+                printQuestion(
+                    "Model:",
+                    names.map((n, i) => `${n} (${presets[n].model})${i === currentIndex ? "   <- current" : ""}`),
+                );
+                process.stdout.write(chalk.cyan("  Your answer: "));
+                pendingAskUser = (answer) => {
+                    const trimmed = answer.trim();
+                    const idx = parseInt(trimmed, 10) - 1;
+                    const name = presets[trimmed] ? trimmed : names[idx];
+                    if (!name || !presets[name]) {
+                        printError(`pick 1-${names.length} or a preset name: ${names.join(", ")}`);
+                    } else {
+                        apply(name, presets[name]);
+                    }
+                    askQuestion();
+                };
+                rl.once("line", handleLine);
                 return;
             }
 
