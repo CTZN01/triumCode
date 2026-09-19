@@ -85,6 +85,30 @@ export class ToolExecutor {
             );
         }
 
+        const permission = this.context.permissionPolicy?.check(name, input);
+        if (permission?.action === "deny") {
+            return Promise.resolve(`Action denied: ${permission.message}`);
+        }
+        if (permission?.action === "confirm" && permission.message) {
+            if (!this.context.confirmPermission) {
+                return Promise.resolve(`Action denied: confirmation is unavailable for ${permission.message}`);
+            }
+            return this.context.confirmPermission(permission.message).then((confirmed) => {
+                if (!confirmed) return "User denied this action.";
+                if (permission.key) this.context.permissionPolicy?.confirm(permission.key);
+                return this.enqueueAllowed(id, name, input, tool);
+            });
+        }
+
+        return this.enqueueAllowed(id, name, input, tool);
+    }
+
+    private enqueueAllowed(
+        id: string,
+        name: string,
+        input: Record<string, any>,
+        tool: ReturnType<typeof getTool>,
+    ): Promise<string> {
         // Look up the tool and use its input-aware safety classification.
         const isConcurrencySafe_ = tool?.isConcurrencySafe(input) ?? false;
 

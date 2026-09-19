@@ -13,6 +13,8 @@ import type Anthropic from "@anthropic-ai/sdk";
 export interface ToolContext {
     readFileState?: ReadFileState;
     askUser?: (question: string, options?: string[]) => Promise<string>;
+    permissionPolicy?: import("./permissions.js").PermissionPolicy;
+    confirmPermission?: (message: string) => Promise<boolean>;
 }
 
 export interface Tool {

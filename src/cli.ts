@@ -221,6 +221,7 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
         maxTurns: flags.maxTurns,
         contextWindow: config.contextWindow,
         planMode: flags.permissionMode === "plan",
+        permissionMode: flags.permissionMode as "default" | "plan" | "acceptEdits" | "bypassPermissions" | "dontAsk",
     });
 
     // Wire up auto-save: after each chat(), persist the session.

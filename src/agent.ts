@@ -15,6 +15,7 @@ import {
     compactHistory, compressHistory, prepareToolResult, shouldAutoCompact,
     withCacheBreakpoints, DEFAULT_CONTEXT_WINDOW,
 } from "./context-compression.js";
+import { PermissionPolicy, type PermissionMode } from "./permissions.js";
 
 // Extended thinking counts towards max_tokens, and endpoints that think by
 // default (MiMo, for one) will happily spend the whole budget reasoning and
@@ -84,6 +85,7 @@ export interface AgentOptions {
     maxTurns?: number;    // --max-turns flag from CLI
     contextWindow?: number; // --context-window, in tokens
     planMode?: boolean;   // --plan flag from CLI
+    permissionMode?: PermissionMode;
 }
 
 export class Agent {
@@ -116,6 +118,7 @@ export class Agent {
 
     // ── User question callback ──────────────────────────────────
     private onAskUser?: (question: string, options?: string[]) => Promise<string>;
+    private permissionPolicy: PermissionPolicy;
 
     constructor(options?: AgentOptions) {
         this.model = options?.model || process.env.MINI_MODEL || "claude-sonnet-4-20250514";
@@ -134,7 +137,9 @@ export class Agent {
         this.contextWindow = options?.contextWindow && options.contextWindow > 0
             ? Math.floor(options.contextWindow)
             : DEFAULT_CONTEXT_WINDOW;
-        this.planMode = options?.planMode ?? false;
+        this.planMode = options?.planMode ?? options?.permissionMode === "plan";
+        const permissionMode = options?.permissionMode ?? (this.planMode ? "plan" : "default");
+        this.permissionPolicy = new PermissionPolicy(permissionMode);
     }
 
     /** Register a callback invoked after each chat() completes. */
@@ -150,6 +155,7 @@ export class Agent {
     /** Toggle plan mode on/off. */
     togglePlanMode(): void {
         this.planMode = !this.planMode;
+        this.permissionPolicy.setMode(this.planMode ? "plan" : "default");
     }
 
     /** Abort the currently-running chat() call. */
@@ -338,7 +344,16 @@ export class Agent {
             const thinkingIdx = new Set<number>();
             let thinkingStartedAt = 0;
 
-            const context: ToolContext = { readFileState: this.readFileState, askUser: this.onAskUser };
+            const context: ToolContext = {
+                readFileState: this.readFileState,
+                askUser: this.onAskUser,
+                permissionPolicy: this.permissionPolicy,
+                confirmPermission: async (message) => {
+                    if (!this.onAskUser) return false;
+                    const answer = await this.onAskUser(`Allow this potentially destructive action?\n  ${message}`, ["y", "n"]);
+                    return answer.trim().toLowerCase().startsWith("y");
+                },
+            };
             const executor = new ToolExecutor(context);
             const toolResults = new Map<string, Promise<string>>();
             const toolStartTimes = new Map<string, number>();

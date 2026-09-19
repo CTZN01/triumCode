@@ -479,7 +479,7 @@ Options:
   --effort LEVEL   Thinking depth: low | medium | high | xhigh | max
   --resume [id]    Resume a saved session (latest, or by ID prefix)
   --sessions       List all sessions and exit
-  --yolo, -y       Bypass all permission prompts
+    --yolo, -y       Bypass ordinary prompts (configured deny rules still apply)
   --plan           Plan mode: read-only, no edits
   --max-cost N     Stop after $N spent
   --max-tokens N   Max output tokens per request (default: 32000). Thinking
