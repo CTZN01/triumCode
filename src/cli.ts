@@ -7,8 +7,9 @@ import {
 import {
     printWelcome, printUserPrompt, printInfo, printError,
     printInterrupted, printHelp, printCostReport, printBlock, endStatus,
+    printConfigReport,
 } from "./ui.js";
-import { ensureConfig, type ResolvedConfig } from "./config.js";
+import { ensureConfig, describeSource } from "./config.js";
 import { parseEffort, EFFORT_LEVELS } from "./thinking.js";
 
 // ═══════════════════════════════════════════════════════════════
@@ -193,10 +194,16 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
         return;
     }
 
-    // Resolve config from all sources (CLI > .env > env > ~/.triumph/config.json).
+    // Resolve config from all sources (CLI > ~/.triumph/config.json > env).
     // If no API key is found anywhere, enters interactive first-run setup.
-    const config = await ensureConfig(flags);
-    if (!config) process.exit(1);
+    const bundle = await ensureConfig(flags);
+    if (!bundle) process.exit(1);
+    const config = bundle.config;
+
+    // A lower-priority source holding a different value is exactly how a
+    // session ends up talking to an endpoint the user never chose, so say so
+    // up front rather than letting it be discovered from a bill.
+    if (bundle.conflicts.length > 0) printConfigReport(bundle);
 
     const agent = new Agent({
         model: config.model,
@@ -264,6 +271,7 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
     });
 
     printWelcome(config.model);
+    printInfo(`endpoint ${config.apiBase}  (${describeSource(bundle.sources.apiBase)}) - /config for details`);
 
     // ── REPL loop with rl.once (strict serial execution) ─────────
     const askQuestion = (): void => {
@@ -287,6 +295,12 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
                 agent.clearHistory();
                 saveSession(agent.history(), config.model);
                 printInfo("history cleared");
+                askQuestion();
+                return;
+            }
+
+            if (input === "/config") {
+                printConfigReport(bundle);
                 askQuestion();
                 return;
             }

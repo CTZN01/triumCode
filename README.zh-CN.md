@@ -43,9 +43,11 @@ node dist/cli.js --sessions
 | 优先级 | 来源 | 示例 |
 |--------|------|------|
 | 1 | CLI 参数 | `--api-key sk-ant-xxx --model claude-sonnet-4` |
-| 2 | 项目根目录下的 `.env` 文件 | `ANTHROPIC_API_KEY=sk-ant-xxx` |
+| 2 | `~/.triumph/config.json` | 首次运行时自动写入 |
 | 3 | 环境变量 | `export ANTHROPIC_API_KEY=sk-ant-xxx` |
-| 4 | `~/.triumph/config.json` | 首次运行时自动写入 |
+| 4 | 内置默认值 | `https://api.anthropic.com` |
+
+解析是逐字段进行的：配置文件中只存了 API Key 时，仍会从环境变量取 `ANTHROPIC_BASE_URL`。保存的配置优先级高于环境变量是有意为之 —— 首次引导里亲手填的 endpoint，不该被一个残留的 export 静默改道。单次运行或 CI 场景请用 CLI 参数覆盖。
 
 ### CLI 参数
 

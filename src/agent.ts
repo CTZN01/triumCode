@@ -68,9 +68,12 @@ export interface AgentUsage {
 }
 
 export interface AgentOptions {
-    model?: string;       // --model / -m from CLI, falls back to MINI_MODEL env
-    apiKey?: string;      // --api-key from CLI, falls back to ANTHROPIC_API_KEY env
-    apiBase?: string;     // --api-base from CLI, falls back to ANTHROPIC_BASE_URL env
+    // These three are normally resolved by config.ts (CLI flag → config.json →
+    // env var) and passed in explicitly.  The fallbacks below only apply when
+    // an Agent is constructed directly, bypassing the CLI.
+    model?: string;       // --model / -m from CLI; else MINI_MODEL env
+    apiKey?: string;      // --api-key from CLI; else ANTHROPIC_API_KEY env
+    apiBase?: string;     // --api-base from CLI; else ANTHROPIC_BASE_URL env
     thinking?: boolean;   // --thinking flag from CLI
     effort?: string;      // --effort flag from CLI
     maxTokens?: number;   // --max-tokens flag from CLI
@@ -105,7 +108,7 @@ export class Agent {
     private onChatComplete?: () => void;
 
     constructor(options?: AgentOptions) {
-        this.model = options?.model || process.env.MINI_MODEL || "deepseek-mini-1-20260912";
+        this.model = options?.model || process.env.MINI_MODEL || "claude-sonnet-4-20250514";
         this.client = new Anthropic({
             baseURL: options?.apiBase || process.env.ANTHROPIC_BASE_URL,
             apiKey: options?.apiKey || process.env.ANTHROPIC_API_KEY,
@@ -211,7 +214,7 @@ export class Agent {
      */
     private async openStream(
         system: Anthropic.TextBlockParam[],
-        tools: Anthropic.Tool[],
+        tools: Anthropic.Tool[], 
     ): Promise<any> {
         const base: Record<string, any> = {
             model: this.model,

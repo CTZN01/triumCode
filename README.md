@@ -43,9 +43,15 @@ Config is resolved from highest to lowest priority:
 | Priority | Source | Example |
 |----------|--------|---------|
 | 1 | CLI flags | `--api-key sk-ant-xxx --model claude-sonnet-4` |
-| 2 | `.env` file in project root | `ANTHROPIC_API_KEY=sk-ant-xxx` |
+| 2 | `~/.triumph/config.json` | Written by first-run setup |
 | 3 | Environment variables | `export ANTHROPIC_API_KEY=sk-ant-xxx` |
-| 4 | `~/.triumph/config.json` | Written by first-run setup |
+| 4 | Built-in defaults | `https://api.anthropic.com` |
+
+Resolution is per-field, so a config file holding only the API key still picks
+up `ANTHROPIC_BASE_URL` from the environment. The saved config deliberately
+outranks environment variables — an endpoint you typed in during setup should
+not be silently redirected by a stray export. Use the CLI flags to override for
+a single run, or in CI.
 
 ### CLI Flags
 

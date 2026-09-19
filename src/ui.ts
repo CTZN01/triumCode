@@ -1,4 +1,8 @@
 import chalk from "chalk";
+import {
+    describeSource, maskSecret,
+    type ResolvedConfigBundle, type ConfigSource,
+} from "./config.js";
 
 // ═══════════════════════════════════════════════════════════════
 // Terminal UI — all user-visible output goes through here
@@ -393,6 +397,46 @@ export function printCostReport(usage: { input: number; output: number; cost: nu
     }
 }
 
+// ── Config report ───────────────────────────────────────────
+//
+// Answers "where is this actually coming from?" before the user has to ask.
+// ASCII only — see maskSecret(); a double-width glyph would skew the columns
+// in a zh-CN terminal.
+
+export function printConfigReport(bundle: ResolvedConfigBundle): void {
+    const { config, sources, conflicts } = bundle;
+
+    const rows: Array<[string, string, ConfigSource]> = [
+        ["endpoint", config.apiBase, sources.apiBase],
+        ["model",    config.model,   sources.model],
+        ["api key",  maskSecret(config.apiKey), sources.apiKey],
+        ["thinking", config.thinking ? "on" : "off", sources.thinking],
+        ["effort",   config.effort || "-", sources.effort],
+    ];
+
+    const labelW = Math.max(...rows.map(([l]) => l.length));
+    const valueW = Math.max(...rows.map(([, v]) => v.length));
+
+    const lines = [chalk.bold("\n  Configuration"), ""];
+    for (const [label, value, source] of rows) {
+        lines.push(
+            `    ${chalk.dim(label.padEnd(labelW))}  ${value.padEnd(valueW)}  ${chalk.dim(`(${describeSource(source)})`)}`,
+        );
+    }
+
+    if (conflicts.length > 0) {
+        lines.push("", chalk.yellow("  Overridden:"));
+        for (const c of conflicts) {
+            lines.push(chalk.yellow(
+                `    ${c.field} = ${c.shadowedValue}  (from ${describeSource(c.shadowed)}, ignored)`,
+            ));
+        }
+        lines.push(chalk.dim("    The values above win. Unset the variable, or pass the CLI flag."));
+    }
+
+    printBlock(lines.join("\n"));
+}
+
 // ── Help text ───────────────────────────────────────────────
 
 export function printHelp(): void {
@@ -400,9 +444,9 @@ export function printHelp(): void {
 Usage: triumph [options] [prompt]
 
 Options:
-  --api-key KEY    Anthropic API key (or set ANTHROPIC_API_KEY / .env)
-  --api-base URL   API base URL (or set ANTHROPIC_BASE_URL / .env)
-  --model, -m      Model to use (default: from MINI_MODEL env or .env)
+  --api-key KEY    Anthropic API key (or saved in ~/.triumph/config.json)
+  --api-base URL   API base URL (or saved in ~/.triumph/config.json)
+  --model, -m      Model to use
   --thinking       Enable extended thinking. On by default for current Claude
                    models; this forces it on for any other model too
   --effort LEVEL   Thinking depth: low | medium | high | xhigh | max
@@ -418,12 +462,14 @@ Options:
 
 Configuration (in order of priority):
   1. CLI flags (--api-key, --model, --api-base)
-  2. .env file in project root
-  3. Environment variables
-  4. ~/.triumph/config.json (saved by first-run setup)
+  2. ~/.triumph/config.json (saved by first-run setup)
+  3. Environment variables (ANTHROPIC_API_KEY, ANTHROPIC_BASE_URL, MINI_MODEL)
+  4. Built-in defaults
 
 REPL Commands:
   /clear           Clear conversation history
+  /config          Show the active endpoint, model and API key, and which
+                   source each one came from
   /cost            Show token usage and estimated cost
   /compact         Compress conversation history (future)
   /plan            Toggle plan mode
