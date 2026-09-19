@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { join } from "node:path";
 import * as ui from "./ui.js";
 
 // ═══════════════════════════════════════════════════════════════
@@ -17,6 +18,9 @@ interface FakeTty {
 }
 
 function installFakeTty(columns = 80): FakeTty {
+    // Module state (lineOpen, afterToolOutput) leaks across tests in the same
+    // process — every fake terminal starts from a clean slate.
+    ui.resetStreamState();
     const stdout = process.stdout as any;
     const orig = { isTTY: stdout.isTTY, columns: stdout.columns, write: stdout.write };
 
@@ -90,7 +94,7 @@ test("model text and a following tool call land on separate lines", () => {
         assert.equal(vt.screen(), [
             "",
             "You: 我再补充几个经典算法。",
-            "  ⏺ Edit (src/a.py)",
+            "  • Edit src/a.py",
             "    ↳ ✓ Edited at line 211 (81ms)",
         ].join("\n"));
     } finally {
@@ -106,7 +110,7 @@ test("a turn with only tool calls gains no blank line before the result", () => 
         ui.printToolResult("read_file", "a\nb\nc", 74);
 
         assert.equal(vt.screen(), [
-            "  ⏺ Read (src/a.py)",
+            "  • Read src/a.py",
             "    ↳ ✓ 3 lines (74ms)",
         ].join("\n"));
     } finally {
@@ -183,6 +187,108 @@ test("printToolResult renders ✓ / ! / ✗", () => {
             "    ↳ ✓ 2 lines (3ms)",
             "    ↳ ! Warning: stale (4ms)",
             "    ↳ ✗ exit 1 (5ms)",
+        ].join("\n"));
+    } finally {
+        vt.restore();
+    }
+});
+
+// ═══════════════════════════════════════════════════════════════
+// Tool call display
+// ═══════════════════════════════════════════════════════════════
+
+test("a blank line separates tool output from the next text block", () => {
+    const vt = installFakeTty();
+    try {
+        ui.printToolCall("read_file", { file_path: "src/a.py" });
+        ui.endStream();
+        ui.printToolResult("read_file", "a\nb", 3);
+        ui.writeStream("Now I know what to change.");
+        ui.endStream();
+
+        assert.equal(vt.screen(), [
+            "  • Read src/a.py",
+            "    ↳ ✓ 2 lines (3ms)",
+            "",
+            "Now I know what to change.",
+        ].join("\n"));
+    } finally {
+        vt.restore();
+    }
+});
+
+test("consecutive tool lines gain no blank line between them", () => {
+    const vt = installFakeTty();
+    try {
+        ui.printToolCall("read_file", { file_path: "src/a.py" });
+        ui.printToolCall("grep_search", { pattern: "x", path: "src" });
+        ui.printToolResult("read_file", "a\nb", 3);
+        ui.printToolResult("grep_search", "src/a.py:1:x", 5);
+        ui.printToolResult("read_file", "a\nb", 3);   // second turn, no text in between
+
+        assert.equal(vt.screen(), [
+            "  • Read src/a.py",
+            "  • Search \"x\" in src",
+            "    ↳ ✓ 2 lines (3ms)",
+            "    ↳ ✓ 1 match (5ms)",
+            "    ↳ ✓ 2 lines (3ms)",
+        ].join("\n"));
+    } finally {
+        vt.restore();
+    }
+});
+
+test("file paths under the cwd display relative to it", () => {
+    const vt = installFakeTty();
+    try {
+        const abs = join(process.cwd(), "src", "agent.ts");
+        ui.printToolCall("read_file", { file_path: abs });
+        ui.printToolCall("read_file", { file_path: "D:\\some\\other\\place\\file.py" });
+
+        assert.equal(vt.screen(), [
+            "  • Read src/agent.ts",
+            "  • Read D:/some/other/place/file.py",
+        ].join("\n"));
+    } finally {
+        vt.restore();
+    }
+});
+
+test("a long run_command target is truncated to one row, not wrapped", () => {
+    const vt = installFakeTty(60);
+    try {
+        const script = "node -e " + "console.log(1);".repeat(30);
+        ui.printToolCall("run_command", { command: "node", args: ["-e", script] });
+
+        const line = vt.screen();
+        assert.equal(line.split("\n").length, 1, "must stay on one row");
+        assert.ok(line.length <= 60, `expected <= 60 columns, got ${line.length}`);
+        assert.match(line, /\.\.\.$/);
+        assert.match(line, /^  • Run /);
+    } finally {
+        vt.restore();
+    }
+});
+
+test("todo and git_diff calls render a summary instead of raw JSON", () => {
+    const vt = installFakeTty();
+    try {
+        ui.printToolCall("todo", {
+            operation: "write",
+            todos: [
+                { id: 1, content: "a", status: "pending" },
+                { id: 2, content: "b", status: "pending" },
+            ],
+        });
+        ui.printToolCall("todo", { operation: "read" });
+        ui.printToolCall("git_diff", { staged: true, path: "src/tools.ts" });
+        ui.printToolCall("git_diff", {});
+
+        assert.equal(vt.screen(), [
+            "  • Todo write 2 items",
+            "  • Todo read",
+            "  • Git diff staged src/tools.ts",
+            "  • Git diff",
         ].join("\n"));
     } finally {
         vt.restore();

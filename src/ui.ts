@@ -1,4 +1,5 @@
 import chalk from "chalk";
+import { isAbsolute, relative, resolve } from "node:path";
 import {
     describeSource, maskSecret,
     type ResolvedConfigBundle, type ConfigSource,
@@ -7,6 +8,16 @@ import {
 // ═══════════════════════════════════════════════════════════════
 // Terminal UI — all user-visible output goes through here
 // ═══════════════════════════════════════════════════════════════
+
+// ── Palette ─────────────────────────────────────────────────
+// GitHub Primer dark-theme colors — the "Copilot in the terminal" look.
+// Structure stays quiet gray; color appears only where it carries state
+// (running / ok / warn / error), so a wall of tool calls is scannable.
+const ACCENT = chalk.hex("#2F81F7");   // live status: the spinner
+const MUTED  = chalk.hex("#8B949E");   // bullets, call targets, metadata
+const OK     = chalk.hex("#3FB950");   // success
+const WARN   = chalk.hex("#D29922");   // warning
+const ERR    = chalk.hex("#F85149");   // failure
 
 // ── Welcome banner ──────────────────────────────────────────
 
@@ -22,6 +33,12 @@ export function printWelcome(model: string): void {
 // info) must break the line first, or it gets glued onto the model's text.
 
 let lineOpen = false;
+
+// True when the last thing printed was tool activity (a call, a result, a
+// thinking duration). Model text arriving after it opens with a blank line,
+// so each prose block reads as a unit with the tool lines it produced below
+// it, instead of everything gluing into one wall.
+let afterToolOutput = false;
 
 // Emit a newline if the cursor is currently mid-line.
 //
@@ -79,7 +96,7 @@ const SPINNER_VERBS = [
     "Cogitating", "Mulling", "Deliberating", "Ruminating", "Conjuring",
 ];
 
-const STATUS_COLOR = chalk.hex("#D97757");
+const STATUS_COLOR = ACCENT;
 
 /** A label, or a function re-evaluated every frame (for live counts). */
 export type StatusLabel = string | (() => string);
@@ -202,6 +219,7 @@ function formatElapsed(ms: number): string {
 /** "Thought for 2s" — shown when the API returns a thinking block. */
 export function printThinkingDuration(ms: number): void {
     logLine(chalk.dim(`  Thought for ${formatElapsed(ms)}`));
+    afterToolOutput = true;
 }
 
 // ── User prompt ─────────────────────────────────────────────
@@ -217,6 +235,7 @@ export function printUserPrompt(): void {
     process.stdout.write(chalk.cyan("\nYou: "));
     // The line is ended by the user's own echo + Enter, not by us.
     lineOpen = false;
+    afterToolOutput = false;
 }
 
 // ── Info / error / interrupt ────────────────────────────────
@@ -226,12 +245,12 @@ export function printInfo(msg: string): void {
 }
 
 export function printError(msg: string): void {
-    logLine(chalk.red(`  Error: ${msg}`));
+    logLine(ERR(`  Error: ${msg}`));
 }
 
 export function printInterrupted(): void {
     ensureLineBreak();
-    console.log(chalk.yellow("\n  (interrupted)"));
+    console.log(WARN("\n  (interrupted)"));
 }
 
 // ── Tool call display ───────────────────────────────────────
@@ -250,18 +269,34 @@ const TOOL_VERBS: Record<string, string> = {
     skill: "Load skill",
     enter_plan_mode: "Enter plan mode",
     exit_plan_mode: "Exit plan mode",
+    git_diff: "Git diff",
+    todo: "Todo",
 };
+
+// Paths read best relative to the cwd — "src/agent.ts" instead of
+// "D:\triumph_code\src\agent.ts". Targets outside the cwd keep their absolute
+// form; separators are normalized to "/" either way, so Windows paths stop
+// eating half the line width. Purely cosmetic: never used for file access.
+function displayPath(p: string): string {
+    const rel = relative(process.cwd(), resolve(process.cwd(), p));
+    if (rel && !rel.startsWith("..") && !isAbsolute(rel)) {
+        return rel.replaceAll("\\", "/");
+    }
+    return p.replaceAll("\\", "/");
+}
 
 function formatCallTarget(name: string, input: Record<string, any>): string {
     switch (name) {
         case "read_file":
         case "write_file":
         case "edit_file":
-            return input.file_path ?? "";
+            return input.file_path ? displayPath(String(input.file_path)) : "";
         case "list_files":
-            return input.directory_path ?? "";
-        case "grep_search":
-            return `"${input.pattern}" in ${input.path}`;
+            return input.directory_path ? displayPath(String(input.directory_path)) : "";
+        case "grep_search": {
+            const pattern = String(input.pattern ?? "");
+            return input.path ? `"${pattern}" in ${displayPath(String(input.path))}` : `"${pattern}"`;
+        }
         case "run_command": {
             const args = Array.isArray(input.args) ? input.args.join(" ") : "";
             return `${input.command} ${args}`.trim();
@@ -274,6 +309,19 @@ function formatCallTarget(name: string, input: Record<string, any>): string {
         }
         case "skill":
             return String(input.name ?? "");
+        case "git_diff": {
+            const parts: string[] = [];
+            if (input.staged) parts.push("staged");
+            if (input.path) parts.push(displayPath(String(input.path)));
+            return parts.join(" ");
+        }
+        case "todo": {
+            if (input.operation === "write") {
+                const count = Array.isArray(input.todos) ? input.todos.length : 0;
+                return `write ${count} item${count === 1 ? "" : "s"}`;
+            }
+            return String(input.operation ?? "");
+        }
         default:
             return JSON.stringify(input).slice(0, 80);
     }
@@ -282,8 +330,18 @@ function formatCallTarget(name: string, input: Record<string, any>): string {
 export function printToolCall(name: string, input: Record<string, any>): void {
     const verb = TOOL_VERBS[name] ?? name;
     const target = formatCallTarget(name, input);
-    const detail = target ? chalk.gray(`(${target})`) : "";
-    logLine(chalk.yellow(`  ⏺ ${verb}`) + (detail ? ` ${detail}` : ""));
+    afterToolOutput = true;
+    if (!target) {
+        logLine(`  ${MUTED("•")} ${verb}`);
+        return;
+    }
+    // Truncate the plain text before colouring it — slicing a coloured string
+    // can cut an SGR sequence in half. A long run_command script used to wrap
+    // across three rows and bury everything around it.
+    const cols = process.stdout.columns || 80;
+    const budget = Math.max(12, cols - verb.length - 8);
+    const shown = target.length > budget ? target.slice(0, budget - 3) + "..." : target;
+    logLine(`  ${MUTED("•")} ${verb} ${MUTED(shown)}`);
 }
 
 export interface ResultView {
@@ -361,6 +419,14 @@ export function classifyResult(name: string, result: string): ResultView {
             return { text: `answered: ${result.length > 40 ? result.slice(0, 37) + "..." : result}`, ok: true };
         }
 
+        case "todo": {
+            if (firstLine.startsWith("Error")) return { text: firstLine, ok: false };
+            if (firstLine === "No todos.") return { text: "0 todos", ok: true };
+            const totalMatch = /Total: (\d+) \| Completed: (\d+)\/(\d+)/.exec(result);
+            if (totalMatch) return { text: `${totalMatch[2]}/${totalMatch[3]} completed`, ok: true };
+            return { text: firstLine, ok: true };
+        }
+
         default:
             return { text: `${result.length} chars`, ok: true };
     }
@@ -368,13 +434,15 @@ export function classifyResult(name: string, result: string): ResultView {
 
 export function printToolResult(name: string, result: string, elapsedMs: number): void {
     const view = classifyResult(name, result);
-    const mark = view.ok ? chalk.green("✓") : view.warn ? chalk.yellow("!") : chalk.red("✗");
-    const paint = view.ok ? chalk.dim : view.warn ? chalk.yellow : chalk.red;
-    logLine(paint(`    ↳ ${mark} ${view.text} (${elapsedMs}ms)`));
+    afterToolOutput = true;
+    const mark = view.ok ? OK("✓") : view.warn ? WARN("!") : ERR("✗");
+    const text = view.ok ? chalk.dim(view.text) : view.warn ? WARN(view.text) : ERR(view.text);
+    logLine(chalk.dim("    ↳ ") + `${mark} ${text}` + chalk.dim(` (${elapsedMs}ms)`));
 }
 
 export function printToolError(name: string, error: string): void {
-    logLine(chalk.red(`    ↳ ✗ Error: ${error}`));
+    afterToolOutput = true;
+    logLine(chalk.dim("    ↳ ") + ERR(`✗ Error: ${error}`));
 }
 
 // ── Interactive question ──────────────────────────────────
@@ -382,7 +450,9 @@ export function printToolError(name: string, error: string): void {
 
 export function printQuestion(question: string, options?: string[]): void {
     ensureLineBreak();
-    console.log(chalk.bold.cyan(`\n  ❓ ${question}`));
+    // Inquirer-style "?" — an emoji here renders double-width in zh-CN
+    // terminals and visually dwarfs the text around it.
+    console.log(`\n  ${OK("?")} ${chalk.bold.cyan(question)}`);
     if (options && options.length > 0) {
         for (let i = 0; i < options.length; i++) {
             console.log(chalk.cyan(`    ${i + 1}. ${options[i]}`));
@@ -398,7 +468,7 @@ export function printQuestion(question: string, options?: string[]): void {
 // a completed turn all just returned to the prompt.
 
 export function printTurnEnd(reason: string): void {
-    logLine(chalk.yellow(`  ! ${reason}`));
+    logLine(WARN(`  ! ${reason}`));
 }
 
 // ── Streaming output ────────────────────────────────────────
@@ -408,6 +478,10 @@ export function writeStream(text: string): void {
     // would occupy the same row as the first chunk of model text, and the
     // erase would take the text with it.
     endStatus();
+    if (!lineOpen && afterToolOutput) {
+        process.stdout.write("\n");
+        afterToolOutput = false;
+    }
     process.stdout.write(text);
     lineOpen = !text.endsWith("\n");
 }
@@ -416,6 +490,12 @@ export function writeStream(text: string): void {
 // emitted no text (tool calls only) must not gain a stray blank line.
 export function endStream(): void {
     ensureLineBreak();
+}
+
+/** Reset streaming state. Exported for tests: each fake terminal starts clean. */
+export function resetStreamState(): void {
+    lineOpen = false;
+    afterToolOutput = false;
 }
 
 // ── Cost report ─────────────────────────────────────────────
