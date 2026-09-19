@@ -345,8 +345,9 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
             }
 
             if (input === "/compact") {
-                // Future: summarize and compress history.
-                printInfo("/compact not yet implemented — coming soon");
+                agent.compact();
+                saveSession(agent.history(), config.model);
+                printInfo("history compacted");
                 askQuestion();
                 return;
             }

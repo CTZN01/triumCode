@@ -11,6 +11,10 @@ import {
     resolveThinkingMode, applyThinkingParams, applyEffortParams, parseEffort,
     isUnsupportedParamError, filterThinkingBlocks, type EffortLevel,
 } from "./thinking.js";
+import {
+    compactHistory, compressHistory, prepareToolResult, shouldAutoCompact,
+    withCacheBreakpoints,
+} from "./context-compression.js";
 
 // Extended thinking counts towards max_tokens, and endpoints that think by
 // default (MiMo, for one) will happily spend the whole budget reasoning and
@@ -103,6 +107,7 @@ export class Agent {
     // ── Token usage tracking ────────────────────────────────────
     private totalInputTokens = 0;
     private totalOutputTokens = 0;
+    private lastRequestAt = 0;
 
     // ── Auto-save callback ──────────────────────────────────────
     private onChatComplete?: () => void;
@@ -180,6 +185,11 @@ export class Agent {
         this.injectedContextReminder = false;
     }
 
+    /** Replace old turns with a local summary at a safe turn boundary. */
+    compact(): void {
+        this.messages = compactHistory(this.messages);
+    }
+
     async chat(userText: string): Promise<void> {
         // On the first call, prepend the context reminder (CLAUDE.md, date)
         // to the user message. This keeps it out of the cached system blocks
@@ -192,6 +202,7 @@ export class Agent {
         }
 
         this.messages.push({ role: "user", content: userContent });
+        if (shouldAutoCompact(this.messages)) this.compact();
 
         // Set up abort controller for this turn.
         this.abortController = new AbortController();
@@ -223,12 +234,13 @@ export class Agent {
     private async openStream(
         system: Anthropic.TextBlockParam[],
         tools: Anthropic.Tool[], 
+        messages: Anthropic.MessageParam[],
     ): Promise<any> {
         const base: Record<string, any> = {
             model: this.model,
             max_tokens: this.maxTokens,
             system,
-            messages: this.messages,
+            messages,
             tools,
             stream: true,
         };
@@ -280,11 +292,16 @@ export class Agent {
             beginStatus(pickStatusVerb());
 
             const tools = getActiveToolDefinitions();
-            const system = buildSystemBlocks(this.planMode);
+            const compressed = compressHistory(this.messages, {
+                cacheHot: this.lastRequestAt > 0 && Date.now() - this.lastRequestAt < 5 * 60_000,
+                idleMs: this.lastRequestAt > 0 ? Date.now() - this.lastRequestAt : 0,
+            });
+            const cached = withCacheBreakpoints(compressed.messages, buildSystemBlocks(this.planMode));
+            this.lastRequestAt = Date.now();
 
             let stream: any;
             try {
-                stream = await this.openStream(system, tools);
+                stream = await this.openStream(cached.system, tools, cached.messages);
             } catch (e: any) {
                 if (e.name === "AbortError" || this.abortController?.signal.aborted) {
                     // User interrupted — don't push a partial assistant turn.
@@ -526,7 +543,7 @@ export class Agent {
             const resultBlocks: Anthropic.ToolResultBlockParam[] = [];
             for (const block of filtered) {
                 if (block.type !== "tool_use") continue;
-                const output = await toolResults.get(block.id)!;
+                const output = prepareToolResult(await toolResults.get(block.id)!);
                 const elapsed = Date.now() - (toolStartTimes.get(block.id) ?? Date.now());
                 printToolResult(block.name, output, elapsed);
                 resultBlocks.push({
