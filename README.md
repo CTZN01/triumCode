@@ -1,4 +1,4 @@
-# Triumph Code
+# TriumCode
 
 A terminal-native coding agent powered by the Anthropic SDK. Reads files, edits code, searches your codebase, and runs commands — all through natural conversation in your terminal.
 
@@ -15,7 +15,7 @@ npm run build
 node dist/cli.js
 ```
 
-That's it. On first launch, Triumph Code asks for your API key and saves it to `~/.triumph/config.json`. No `.env` files or environment variables to set up manually.
+That's it. On first launch, TriumCode asks for your API key and saves it to `~/.triumcode/config.json`. No `.env` files or environment variables to set up manually.
 
 ## Usage
 
@@ -43,7 +43,7 @@ Config is resolved from highest to lowest priority:
 | Priority | Source | Example |
 |----------|--------|---------|
 | 1 | CLI flags | `--api-key sk-ant-xxx --model claude-sonnet-4` |
-| 2 | `~/.triumph/config.json` | Written by first-run setup |
+| 2 | `~/.triumcode/config.json` | Written by first-run setup |
 | 3 | Environment variables | `export ANTHROPIC_API_KEY=sk-ant-xxx` |
 | 4 | Built-in defaults | `https://api.anthropic.com` |
 
@@ -52,6 +52,17 @@ up `ANTHROPIC_BASE_URL` from the environment. The saved config deliberately
 outranks environment variables — an endpoint you typed in during setup should
 not be silently redirected by a stray export. Use the CLI flags to override for
 a single run, or in CI.
+
+### Upgrading from Triumph Code
+
+The tool was previously called Triumph Code and stored its data under
+`.triumph`. On first run, TriumCode adopts the old directory — `~/.triumph` for
+the saved API key, and `.triumph/` for project session history — by renaming it
+to `.triumcode`. Nothing to do by hand, and no need to re-enter your key.
+
+Adoption only happens when the new directory does not already exist, so it
+never overwrites data written since. If it fails (a locked or read-only
+directory), the CLI starts anyway and first-run setup runs again.
 
 ### CLI Flags
 
@@ -177,10 +188,10 @@ User types message
 
 ## Session Storage
 
-Sessions are stored in `.triumph/sessions/` (project-local):
+Sessions are stored in `.triumcode/sessions/` (project-local):
 
 ```
-.triumph/
+.triumcode/
   sessions/
     a3f8b2c1.json    ← session data (messages + metadata)
     7e0d4f9a.json

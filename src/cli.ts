@@ -195,7 +195,7 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
         return;
     }
 
-    // Resolve config from all sources (CLI > ~/.triumph/config.json > env).
+    // Resolve config from all sources (CLI > ~/.triumcode/config.json > env).
     // If no API key is found anywhere, enters interactive first-run setup.
     const bundle = await ensureConfig(flags);
     if (!bundle) process.exit(1);

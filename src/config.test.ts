@@ -10,16 +10,17 @@ import { tmpdir } from "node:os";
 // query below: a cached module would keep reporting the first test's config.
 let caseId = 0;
 
-const ENV_KEYS = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "MINI_MODEL", "TRIUMPH_EFFORT"] as const;
+const ENV_KEYS = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "MINI_MODEL", "TRIUMCODE_EFFORT"] as const;
 
 async function loadConfig(
     saved: Record<string, unknown> | null,
     env: Record<string, string> = {},
+    configDir = ".triumcode",
 ): Promise<{ mod: typeof import("./config.js"); restore: () => void }> {
-    const home = mkdtempSync(join(tmpdir(), "triumph-config-"));
+    const home = mkdtempSync(join(tmpdir(), "triumcode-config-"));
     if (saved) {
-        mkdirSync(join(home, ".triumph"), { recursive: true });
-        writeFileSync(join(home, ".triumph", "config.json"), JSON.stringify(saved), "utf-8");
+        mkdirSync(join(home, configDir), { recursive: true });
+        writeFileSync(join(home, configDir, "config.json"), JSON.stringify(saved), "utf-8");
     }
 
     const previous: Record<string, string | undefined> = {
@@ -170,5 +171,24 @@ test("describeSource names the file it means", async () => {
     assert.equal(mod.describeSource("flag"), "CLI flag");
     assert.equal(mod.describeSource("env"), "environment");
     assert.equal(mod.describeSource("default"), "built-in default");
-    assert.match(mod.describeSource("config"), /\.triumph\/config\.json$/);
+    assert.match(mod.describeSource("config"), /\.triumcode\/config\.json$/);
+});
+
+// ── Pre-rename migration ────────────────────────────────────
+
+test("a config left at ~/.triumph by an older install is adopted", async (t) => {
+    // Regression: renaming the tool moved this path, which would have sent
+    // every existing user back through first-run setup to re-enter a key
+    // that was sitting on disk the whole time.
+    const { mod, restore } = await loadConfig(
+        { apiKey: "sk-ant-saved", apiBase: "https://saved.example" },
+        {},
+        ".triumph",
+    );
+    t.after(restore);
+
+    const { config, sources } = mod.resolveConfigDetailed({});
+    assert.equal(config.apiKey, "sk-ant-saved");
+    assert.equal(config.apiBase, "https://saved.example");
+    assert.equal(sources.apiKey, "config");
 });

@@ -3,21 +3,27 @@ import {
     unlinkSync, mkdirSync, statSync, renameSync,
 } from "node:fs";
 import { join, resolve, dirname, basename } from "node:path";
+import { migrateDir } from "./migrate.js";
 
 // ═══════════════════════════════════════════════════════════════
 // Session persistence — one JSON file per conversation
 // ═══════════════════════════════════════════════════════════════
 //
 // Storage layout:
-//   .triumph/sessions/<8-char-hex>.json  — full session data
-//   .triumph/session-latest              — plain-text pointer to last active ID
+//   .triumcode/sessions/<8-char-hex>.json  — full session data
+//   .triumcode/session-latest              — plain-text pointer to last active ID
 //
 // Atomically written via temp + rename so a crash mid-write never
 // corrupts the session file.
 
-const TRIUMPH_DIR = resolve(".triumph");
-const SESSIONS_DIR = join(TRIUMPH_DIR, "sessions");
-const LATEST_FILE = join(TRIUMPH_DIR, "session-latest");
+const TRIUMCODE_DIR = resolve(".triumcode");
+const SESSIONS_DIR = join(TRIUMCODE_DIR, "sessions");
+const LATEST_FILE = join(TRIUMCODE_DIR, "session-latest");
+
+// Sessions saved before the rename live in .triumph/.  Adopt them here, at
+// import time: once ensureSessionDir() has created the current directory the
+// two are indistinguishable and the history is stranded.
+migrateDir(resolve(".triumph"), TRIUMCODE_DIR);
 const MAX_SESSIONS = 50;
 
 // ── Types ──────────────────────────────────────────────────────

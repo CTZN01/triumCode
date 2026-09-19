@@ -11,7 +11,7 @@ import {
 // ── Welcome banner ──────────────────────────────────────────
 
 export function printWelcome(model: string): void {
-    console.log(chalk.bold("\n  triumph code"));
+    console.log(chalk.bold("\n  TriumCode"));
     console.log(chalk.dim(`  model: ${model}`));
     console.log(chalk.dim("  /help for commands · Ctrl+C to interrupt · exit to quit\n"));
 }
@@ -468,11 +468,11 @@ export function printConfigReport(bundle: ResolvedConfigBundle): void {
 
 export function printHelp(): void {
     printBlock(`
-Usage: triumph [options] [prompt]
+Usage: triumcode [options] [prompt]
 
 Options:
-  --api-key KEY    Anthropic API key (or saved in ~/.triumph/config.json)
-  --api-base URL   API base URL (or saved in ~/.triumph/config.json)
+  --api-key KEY    Anthropic API key (or saved in ~/.triumcode/config.json)
+  --api-base URL   API base URL (or saved in ~/.triumcode/config.json)
   --model, -m      Model to use
   --thinking       Enable extended thinking. On by default for current Claude
                    models; this forces it on for any other model too
@@ -489,7 +489,7 @@ Options:
 
 Configuration (in order of priority):
   1. CLI flags (--api-key, --model, --api-base)
-  2. ~/.triumph/config.json (saved by first-run setup)
+  2. ~/.triumcode/config.json (saved by first-run setup)
   3. Environment variables (ANTHROPIC_API_KEY, ANTHROPIC_BASE_URL, MINI_MODEL)
   4. Built-in defaults
 

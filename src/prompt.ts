@@ -126,7 +126,7 @@ export function getGitContext(): string {
 // System prompt assembly — static (cacheable) + dynamic blocks
 // ═══════════════════════════════════════════════════════════════
 
-const PERSONA = `You are Triumph Code, an interactive coding agent that helps with software engineering tasks.
+const PERSONA = `You are TriumCode, an interactive coding agent that helps with software engineering tasks.
 
 # Doing tasks
 

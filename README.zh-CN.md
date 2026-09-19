@@ -1,4 +1,4 @@
-# Triumph Code
+# TriumCode
 
 一个基于 Anthropic SDK 的终端原生编码智能体。通过终端中的自然语言对话，即可读取文件、编辑代码、搜索代码库、运行命令。
 
@@ -15,7 +15,7 @@ npm run build
 node dist/cli.js
 ```
 
-就这么简单。首次启动时，Triumph Code 会提示你输入 API Key 并保存到 `~/.triumph/config.json`。无需手动配置 `.env` 文件或环境变量。
+就这么简单。首次启动时，TriumCode 会提示你输入 API Key 并保存到 `~/.triumcode/config.json`。无需手动配置 `.env` 文件或环境变量。
 
 ## 使用方法
 
@@ -43,11 +43,17 @@ node dist/cli.js --sessions
 | 优先级 | 来源 | 示例 |
 |--------|------|------|
 | 1 | CLI 参数 | `--api-key sk-ant-xxx --model claude-sonnet-4` |
-| 2 | `~/.triumph/config.json` | 首次运行时自动写入 |
+| 2 | `~/.triumcode/config.json` | 首次运行时自动写入 |
 | 3 | 环境变量 | `export ANTHROPIC_API_KEY=sk-ant-xxx` |
 | 4 | 内置默认值 | `https://api.anthropic.com` |
 
 解析是逐字段进行的：配置文件中只存了 API Key 时，仍会从环境变量取 `ANTHROPIC_BASE_URL`。保存的配置优先级高于环境变量是有意为之 —— 首次引导里亲手填的 endpoint，不该被一个残留的 export 静默改道。单次运行或 CI 场景请用 CLI 参数覆盖。
+
+### 从 Triumph Code 升级
+
+本工具此前的名字是 Triumph Code，数据存放在 `.triumph` 下。首次运行时，TriumCode 会把旧目录改名接管过来 —— `~/.triumph`（保存的 API Key）和 `.triumph/`（项目内的会话历史）都会迁到 `.triumcode`。无需手动操作，也不用重新输入 Key。
+
+只有在目标目录尚不存在时才会接管，因此不会覆盖迁移之后写入的数据。如果接管失败（目录被占用或只读），CLI 仍会正常启动，走一遍首次配置即可。
 
 ### CLI 参数
 
@@ -173,10 +179,10 @@ src/
 
 ## 会话存储
 
-会话存储在 `.triumph/sessions/`（项目本地）：
+会话存储在 `.triumcode/sessions/`（项目本地）：
 
 ```
-.triumph/
+.triumcode/
   sessions/
     a3f8b2c1.json    ← 会话数据（消息 + 元数据）
     7e0d4f9a.json

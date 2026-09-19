@@ -1,11 +1,11 @@
 {
-  "name": "triumph_code",
+  "name": "triumcode",
   "version": "1.0.0",
   "description": "A coding agent powered by Anthropic SDK with file tools",
   "type": "module",
   "main": "./dist/agent.js",
   "bin": {
-    "triumph": "./dist/cli.js"
+    "triumcode": "./dist/cli.js"
   },
   "scripts": {
     "build": "tsc",

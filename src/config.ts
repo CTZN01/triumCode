@@ -2,9 +2,10 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import * as os from "node:os";
 import * as readline from "node:readline";
+import { migrateDir } from "./migrate.js";
 
 // ═══════════════════════════════════════════════════════════════
-// Global user config — ~/.triumph/config.json
+// Global user config — ~/.triumcode/config.json
 // ═══════════════════════════════════════════════════════════════
 //
 // First-run: if no API key is found anywhere, the CLI enters
@@ -13,7 +14,7 @@ import * as readline from "node:readline";
 //
 // Priority (highest → lowest):
 //   1. CLI flags  (--api-key, --api-base, --model)
-//   2. ~/.triumph/config.json  ← this file
+//   2. ~/.triumcode/config.json  ← this file
 //   3. Environment variables
 //   4. Built-in defaults
 //
@@ -22,8 +23,13 @@ import * as readline from "node:readline";
 // redirected by a stray exported ANTHROPIC_BASE_URL.  CI and
 // one-off runs override with the CLI flags instead.
 
-const CONFIG_DIR = join(os.homedir(), ".triumph");
+const CONFIG_DIR = join(os.homedir(), ".triumcode");
 const CONFIG_FILE = join(CONFIG_DIR, "config.json");
+
+// Installs from before the rename kept the key in ~/.triumph.  This runs at
+// import time, so the path constants below already point at the adopted
+// directory by the time the first read happens.
+migrateDir(join(os.homedir(), ".triumph"), CONFIG_DIR);
 
 /** Same path as CONFIG_FILE, shortened the way the docs write it. */
 const CONFIG_FILE_DISPLAY = CONFIG_FILE
@@ -103,7 +109,7 @@ export interface ResolvedConfigBundle {
 
 /**
  * Resolve config from all sources, highest priority first:
- *   CLI flags > ~/.triumph/config.json > environment variables
+ *   CLI flags > ~/.triumcode/config.json > environment variables
  *
  * Resolution is per-field, so a config file that sets only the key
  * still picks up ANTHROPIC_BASE_URL from the environment.
@@ -131,7 +137,7 @@ export function resolveConfigDetailed(flags: {
         ["flag", flags.model], ["config", saved.model], ["env", process.env.MINI_MODEL],
     ], DEFAULT_MODEL);
     const effort = firstOf<string>([
-        ["flag", flags.effort], ["config", saved.effort], ["env", process.env.TRIUMPH_EFFORT],
+        ["flag", flags.effort], ["config", saved.effort], ["env", process.env.TRIUMCODE_EFFORT],
     ], "");
 
     const thinking: Sourced<boolean> =
@@ -244,14 +250,14 @@ export async function ensureConfig(flags: {
     if (bundle.config.apiKey) return bundle;
 
     // No key found anywhere — enter interactive setup.
-    console.log("\n  Welcome to Triumph Code! Let's get you set up.\n");
+    console.log("\n  Welcome to TriumCode! Let's get you set up.\n");
     console.log("  You need an Anthropic API key to get started.");
     console.log("  Get one at: https://console.anthropic.com/settings/keys\n");
 
     const apiKey = await ask("  Enter your API key (sk-ant-...): ");
     if (!apiKey) {
         console.log("\n  Setup cancelled. You can set the key later via:");
-        console.log("    triumph --api-key <key>");
+        console.log("    triumcode --api-key <key>");
         console.log("    export ANTHROPIC_API_KEY=<key>");
         return null;
     }
