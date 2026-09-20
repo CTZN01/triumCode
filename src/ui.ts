@@ -790,7 +790,7 @@ REPL Commands:
   /compact         Compress conversation history (future)
   /plan            Toggle plan mode
   /effort [level]  Show or change reasoning effort (low..max); a bare /effort
-                   opens a strip picker (left/right arrows, Enter confirms).
+                   opens a picker (up/down arrows, Enter confirms).
                    Thinking turns on with it
   /thinking [on|off]  Show or toggle extended thinking
   /model [name]    Switch model; a bare /model opens a picker over the

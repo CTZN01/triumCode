@@ -316,8 +316,8 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
     let activePickerCancel: (() => void) | null = null;
 
     /**
-     * Codex-style strip picker: the options render as one horizontal line,
-     * left/right moves the selection, Enter confirms, Esc or Ctrl+C cancels.
+     * Codex-style picker: the options render one per line, up/down moves the
+     * selection, Enter confirms, Esc or Ctrl+C cancels.
      * Needs a TTY (raw mode); resolves null without one so the caller can
      * fall back to a plain numbered prompt.
      *
@@ -335,7 +335,7 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
             let idx = initial;
             let done = false;
             const draw = () => {
-                const instruction = "   <-/-> move, Enter confirm, Esc cancel";
+                const instruction = "   ^/v move, Enter confirm, Esc cancel";
                 const lines = [...renderPickList(options, idx), chalk.dim(instruction)];
                 const moveUp = lines.length > 1 ? `\x1b[${lines.length - 1}A` : "";
                 process.stdout.write(moveUp + lines.map((line, i) =>
@@ -354,10 +354,10 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
                 resolve(result);
             };
             const onKeypress = (str: string, key: any) => {
-                if (key?.name === "left") {
+                if (key?.name === "up") {
                     idx = (idx + options.length - 1) % options.length;
                     draw();
-                } else if (key?.name === "right") {
+                } else if (key?.name === "down") {
                     idx = (idx + 1) % options.length;
                     draw();
                 } else if (key?.name === "return" || key?.name === "enter") {
