@@ -123,7 +123,7 @@ triumcode --api-base https://gateway.example/v1 \
 | 命令 | 说明 |
 |------|------|
 | `/clear` | 清空对话历史 |
-| `/cost` | 显示 Token 使用量和预估费用 |
+| `/cost` | 显示 Token 使用量、缓存命中率和预估费用 |
 | `/sessions` | 列出所有已保存的会话 |
 | `/delete <id>` | 删除指定会话 |
 | `/help` | 显示所有命令 |

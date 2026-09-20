@@ -173,7 +173,20 @@ test("chat chunks rebuild text and tool blocks, closing every block before the s
     const delta = events[events.length - 1];
     assert.equal(delta.type, "message_delta");
     assert.equal(delta.delta.stop_reason, "tool_use");
-    assert.deepEqual(delta.usage, { input_tokens: 12, output_tokens: 5 });
+    assert.deepEqual(delta.usage, { input_tokens: 12, output_tokens: 5, cache_read_input_tokens: 0 });
+});
+
+test("cached chat tokens are split out of prompt_tokens", () => {
+    // Chat Completions counts cached tokens inside prompt_tokens, Anthropic
+    // reports them separately. The translator subtracts so that `input_tokens`
+    // means the same thing on both: what the cache did not serve.
+    const events = collect(new ChatStreamTranslator(), [
+        { choices: [{ delta: { content: "hi" }, finish_reason: "stop" }] },
+        { usage: { prompt_tokens: 1000, completion_tokens: 4, prompt_tokens_details: { cached_tokens: 960 } } },
+    ]);
+    assert.deepEqual(events[events.length - 1].usage, {
+        input_tokens: 40, output_tokens: 4, cache_read_input_tokens: 960,
+    });
 });
 
 test("chat reasoning text becomes a thinking block that the loop can time and drop", () => {
@@ -232,7 +245,9 @@ test("responses events rebuild the same block sequence as chat", () => {
     const toolStart = events.find((e) => e.content_block?.type === "tool_use");
     assert.equal(toolStart.content_block.id, "call_b", "call_id becomes the tool_use id the loop pairs results on");
     assert.equal(events[events.length - 1].delta.stop_reason, "tool_use");
-    assert.deepEqual(events[events.length - 1].usage, { input_tokens: 30, output_tokens: 9 });
+    assert.deepEqual(events[events.length - 1].usage, {
+        input_tokens: 30, output_tokens: 9, cache_read_input_tokens: 0,
+    });
 });
 
 test("an incomplete responses turn reports max_tokens", () => {

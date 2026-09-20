@@ -115,6 +115,7 @@ export class ResponsesStreamTranslator {
     private lanes = new Map<string, Lane>();
     private inputTokens = 0;
     private outputTokens = 0;
+    private cacheReadTokens = 0;
     private sawToolCall = false;
     private truncated = false;
     private done = false;
@@ -205,7 +206,13 @@ export class ResponsesStreamTranslator {
             case "response.incomplete": {
                 const response = event.response ?? {};
                 const usage = response.usage ?? {};
-                this.inputTokens = usage.input_tokens ?? this.inputTokens;
+                // Responses counts cached tokens inside input_tokens, the
+                // opposite of Anthropic. Subtract them so the agent's one
+                // accounting model means the same thing on every protocol:
+                // `input` is what the cache did not serve.
+                const cached = usage.input_tokens_details?.cached_tokens ?? 0;
+                this.inputTokens = Math.max(0, (usage.input_tokens ?? this.inputTokens) - cached);
+                this.cacheReadTokens = cached;
                 this.outputTokens = usage.output_tokens ?? this.outputTokens;
                 if (type === "response.incomplete"
                     && response.incomplete_details?.reason === "max_output_tokens") {
@@ -244,7 +251,11 @@ export class ResponsesStreamTranslator {
             delta: {
                 stop_reason: this.truncated ? "max_tokens" : stopReasonFromFinish(null, this.sawToolCall),
             },
-            usage: { input_tokens: this.inputTokens, output_tokens: this.outputTokens },
+            usage: {
+                input_tokens: this.inputTokens,
+                output_tokens: this.outputTokens,
+                cache_read_input_tokens: this.cacheReadTokens,
+            },
         });
         return events;
     }

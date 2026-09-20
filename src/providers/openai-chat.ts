@@ -115,6 +115,7 @@ export class ChatStreamTranslator {
     private unindexedKey = 1_000_000;
     private inputTokens = 0;
     private outputTokens = 0;
+    private cacheReadTokens = 0;
     private finishReason: string | null = null;
     private done = false;
 
@@ -126,7 +127,13 @@ export class ChatStreamTranslator {
             throw new ProviderError(200, `stream error: ${message}`);
         }
         if (chunk?.usage) {
-            this.inputTokens = chunk.usage.prompt_tokens ?? this.inputTokens;
+            // Chat Completions counts cached tokens inside prompt_tokens, the
+            // opposite of Anthropic, which reports them separately. Subtract
+            // them so the agent's one accounting model means the same thing on
+            // every protocol: `input` is what the cache did not serve.
+            const cached = chunk.usage.prompt_tokens_details?.cached_tokens ?? 0;
+            this.inputTokens = Math.max(0, (chunk.usage.prompt_tokens ?? 0) - cached);
+            this.cacheReadTokens = cached;
             this.outputTokens = chunk.usage.completion_tokens ?? this.outputTokens;
         }
 
@@ -220,7 +227,11 @@ export class ChatStreamTranslator {
         events.push({
             type: "message_delta",
             delta: { stop_reason: stopReasonFromFinish(this.finishReason, this.tools.size > 0) },
-            usage: { input_tokens: this.inputTokens, output_tokens: this.outputTokens },
+            usage: {
+                input_tokens: this.inputTokens,
+                output_tokens: this.outputTokens,
+                cache_read_input_tokens: this.cacheReadTokens,
+            },
         });
         return events;
     }

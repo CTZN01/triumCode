@@ -174,7 +174,7 @@ Once inside the interactive REPL:
 | Command | Description |
 |---------|-------------|
 | `/clear` | Clear conversation history |
-| `/cost` | Show token usage and estimated cost |
+| `/cost` | Show token usage, prompt-cache hit rate and estimated cost |
 | `/sessions` | List all saved sessions |
 | `/delete <id>` | Delete a saved session |
 | `/help` | Show all commands |

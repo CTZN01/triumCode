@@ -586,12 +586,27 @@ export function resetStreamState(): void {
 
 // ── Cost report ─────────────────────────────────────────────
 
-export function printCostReport(usage: { input: number; output: number; cost: number }): void {
+export function printCostReport(usage: {
+    input: number;
+    output: number;
+    cacheRead: number;
+    cacheWrite: number;
+    cacheHitRate: number;
+    cost: number;
+}): void {
+    const count = (n: number) => n.toLocaleString("en-US");
+    const prompt = usage.input + usage.cacheRead + usage.cacheWrite;
+
     logLine(chalk.bold("\n  Token usage:"));
-    logLine(`    Input:  ${chalk.cyan(String(usage.input))}`);
-    logLine(`    Output: ${chalk.cyan(String(usage.output))}`);
+    logLine(`    Input:        ${chalk.cyan(count(usage.input))}  ${chalk.dim("(uncached)")}`);
+    // The cache line is the one worth watching: a rate that drops is the
+    // signature of something volatile sitting in the cached prefix, and every
+    // point it loses is a full re-read of the conversation.
+    logLine(`    Cache read:   ${chalk.cyan(count(usage.cacheRead))}  ${chalk.dim(`(${(usage.cacheHitRate * 100).toFixed(1)}% of ${count(prompt)} prompt tokens)`)}`);
+    logLine(`    Cache write:  ${chalk.cyan(count(usage.cacheWrite))}`);
+    logLine(`    Output:       ${chalk.cyan(count(usage.output))}`);
     if (usage.cost > 0) {
-        logLine(`    Cost:   ${chalk.yellow("$" + usage.cost.toFixed(4))}`);
+        logLine(`    Cost:         ${chalk.yellow("$" + usage.cost.toFixed(4))}`);
     }
 }
 
