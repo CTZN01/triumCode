@@ -25,11 +25,17 @@ export class AnthropicProvider implements ModelProvider {
     constructor(cfg: ProviderConfig) {
         // An empty base means "the SDK's own default", not "our default".
         const base = apiRoot(cfg.apiBase) || undefined;
+        // Both credential fields are always set explicitly, and the unused one
+        // is always null. Left undefined, the SDK falls back to the matching
+        // environment variable — so a shell that exports ANTHROPIC_AUTH_TOKEN
+        // made every x-api-key request carry a second, invalid
+        // `Authorization: Bearer` header alongside it, and the gateway
+        // rejected the pair with a 401.
         this.client = cfg.auth === "bearer"
             // authToken is what makes the SDK emit `Authorization: Bearer`;
             // apiKey must be explicitly null, or the SDK insists on x-api-key.
             ? new Anthropic({ baseURL: base, apiKey: null, authToken: cfg.apiKey })
-            : new Anthropic({ baseURL: base, apiKey: cfg.apiKey });
+            : new Anthropic({ baseURL: base, apiKey: cfg.apiKey, authToken: null });
     }
 
     async stream(req: ModelRequest, signal?: AbortSignal): Promise<AsyncIterable<any>> {
