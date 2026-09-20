@@ -131,6 +131,43 @@ test("endStream adds a newline only when text left the cursor mid-line", () => {
     }
 });
 
+test("every streamed line gets the margin, not just the first", () => {
+    // A chunk is whatever the API sent, so a paragraph break arrives glued to
+    // the end of the previous one. Indenting only the chunk's first line left
+    // the rest of the reply at a different column from the line above it.
+    const vt = installFakeTty();
+    try {
+        ui.writeStream("para one\n\npara two\n- item");
+        ui.endStream();
+
+        assert.deepEqual(vt.screen().split("\n"), [
+            "  para one",
+            "",
+            "  para two",
+            "  • item",
+        ]);
+    } finally {
+        vt.restore();
+    }
+});
+
+test("streamed model text is rendered as markdown", () => {
+    const vt = installFakeTty();
+    try {
+        ui.writeStream("**Done** — see `src/ui.ts`\n\n## Next\n1. run tests");
+        ui.endStream();
+
+        assert.deepEqual(vt.screen().split("\n"), [
+            "  Done — see src/ui.ts",
+            "",
+            "  Next",
+            "  1. run tests",
+        ]);
+    } finally {
+        vt.restore();
+    }
+});
+
 // ═══════════════════════════════════════════════════════════════
 // Tool result states
 // ═══════════════════════════════════════════════════════════════
