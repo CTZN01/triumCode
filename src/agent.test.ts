@@ -86,6 +86,15 @@ async function runChat(
         askUser?: (question: string, options?: string[]) => Promise<string>;
     } = {},
 ): Promise<{ agent: Agent; api: FakeApi; output: string; error: any }> {
+    // Memory dirs resolve from the cwd (memory.ts), so a memory saved in the
+    // developer's own checkout arrives as a side query on the first request and
+    // shifts everything asserted below: bodies[0] becomes that side query — a
+    // string system prompt, max_tokens 512 — and requests counts one too many.
+    // Run from a scratch directory, and restore the cwd before returning (tests
+    // in a file are serial, which the memory test below also relies on).
+    const originalCwd = process.cwd();
+    process.chdir(mkdtempSync(join(tmpdir(), "triumcode-agent-cwd-")));
+
     const api = await fakeApi(turns);
     const agent = new Agent({
         model: "test-model", apiKey: "k", apiBase: api.url,
@@ -121,6 +130,7 @@ async function runChat(
     } finally {
         console.log = originalLog;
         api.close();
+        process.chdir(originalCwd);
     }
     return { agent, api, output, error };
 }

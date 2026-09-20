@@ -1,6 +1,6 @@
 import { readFileSync, existsSync, readdirSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
-import { execSync } from "node:child_process";
+import { execSync, type ExecSyncOptionsWithStringEncoding } from "node:child_process";
 import * as os from "node:os";
 import { buildToolPromptBlock, getDeferredToolNames } from "./tools.js";
 import { buildSkillPromptBlock } from "./skills.js";
@@ -110,7 +110,15 @@ export function loadClaudeMd(): string {
 
 export function getGitContext(): string {
     try {
-        const opts = { encoding: "utf-8" as const, timeout: 3000 };
+        // stderr is piped, not inherited. execSync forwards a failing child's
+        // stderr to ours by default, and the `catch` below means "no git here,
+        // carry on" — but the failure still reached the terminal, once per turn,
+        // as `fatal: not a git repository...` in every non-repo directory.
+        const opts: ExecSyncOptionsWithStringEncoding = {
+            encoding: "utf-8",
+            timeout: 3000,
+            stdio: ["ignore", "pipe", "pipe"],
+        };
         const branch = execSync("git rev-parse --abbrev-ref HEAD", opts).trim();
         const log = execSync("git log --oneline -5", opts).trim();
         const status = execSync("git status --short", opts).trim();
