@@ -4,6 +4,7 @@ import { join } from "node:path";
 import * as os from "node:os";
 import { getActiveToolDefinitions, type ReadFileState, type ToolContext } from "./tools.js";
 import { ToolExecutor } from "./tool-executor.js";
+import { envModel } from "./config.js";
 import { buildStaticSystemPrompt, buildDynamicSystemContext, buildUserContextReminder } from "./prompt.js";
 import {
     printToolCall, printToolResult, writeStream, endStream, printCostReport,
@@ -88,7 +89,7 @@ export interface AgentOptions {
     // These three are normally resolved by config.ts (CLI flag → config.json →
     // env var) and passed in explicitly.  The fallbacks below only apply when
     // an Agent is constructed directly, bypassing the CLI.
-    model?: string;       // --model / -m from CLI; else MINI_MODEL env
+    model?: string;       // --model / -m from CLI; else TRIUMCODE_MODEL env
     apiKey?: string;      // --api-key from CLI; else ANTHROPIC_API_KEY env
     apiBase?: string;     // --api-base from CLI; else ANTHROPIC_BASE_URL env
     // Which wire protocol the endpoint speaks. Set per model, because a
@@ -167,7 +168,7 @@ export class Agent {
     private sessionMemoryBytes = 0;
 
     constructor(options?: AgentOptions) {
-        this.model = options?.model || process.env.MINI_MODEL || "claude-sonnet-4-20250514";
+        this.model = options?.model || envModel("claude-sonnet-4-20250514");
         this.protocol = options?.protocol ?? "anthropic";
         this.apiBase = options?.apiBase || process.env.ANTHROPIC_BASE_URL || "";
         this.apiKey = options?.apiKey || process.env.ANTHROPIC_API_KEY || "";
@@ -351,13 +352,13 @@ export class Agent {
 
     /**
      * Side model for memory recall: a tiny non-streaming call, cheap enough
-     * to spend one per turn. Prefers MINI_MODEL (the low-tier model) and
+     * to spend one per turn. Prefers TRIUMCODE_MODEL (the low-tier model) and
      * falls back to the main model. Overridable via AgentOptions.sideQuery
      * for tests.
      */
     private buildSideQuery(): SideQueryFn | null {
         if (this.sideQueryFn) return this.sideQueryFn;
-        const model = process.env.MINI_MODEL || this.model;
+        const model = envModel(this.model);
         return async (system, user, signal) => await withRetry(
             (retrySignal) => this.provider.completeText({ model, system, user, maxTokens: 512 }, retrySignal),
             signal ?? this.abortController?.signal,

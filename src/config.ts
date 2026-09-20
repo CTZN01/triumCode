@@ -28,6 +28,10 @@ import {
 // endpoint the user typed in during setup should not be silently
 // redirected by a stray exported ANTHROPIC_BASE_URL.  CI and
 // one-off runs override with the CLI flags instead.
+//
+// Environment names come in two generations — see ENV_MODEL below. The
+// TRIUMCODE_* spelling is current; the MINI_* pair still resolves so that
+// existing shell profiles and CI secrets keep working.
 
 const CONFIG_DIR = join(os.homedir(), ".triumcode");
 const CONFIG_FILE = join(CONFIG_DIR, "config.json");
@@ -132,6 +136,61 @@ function firstOf<T>(
     return { value: fallback, source: "default" };
 }
 
+/**
+ * The variables each field reads, current spelling first.
+ *
+ * The MINI_* pair predates the TRIUMCODE_ rename. Both still resolve, because
+ * a bare rename is silent: every existing shell profile, CI secret and .env
+ * would drop straight through to the built-in defaults — and for the context
+ * window not even visibly, history would just be compressed earlier than the
+ * model needs. A legacy name that wins its field is reported as deprecated.
+ */
+const ENV_MODEL = ["TRIUMCODE_MODEL", "MINI_MODEL"] as const;
+const ENV_CONTEXT_WINDOW = ["TRIUMCODE_CONTEXT_WINDOW", "MINI_CONTEXT_WINDOW"] as const;
+
+interface EnvRead {
+    value: string | undefined;
+    /** The variable that supplied the value, when one did. */
+    variable?: string;
+    /** Set when `variable` is the deprecated spelling of it. */
+    replacedBy?: string;
+}
+
+/** First variable of `names` that is set. Anything past the first is legacy. */
+function envVar(names: readonly string[]): EnvRead {
+    for (const [i, variable] of names.entries()) {
+        const value = process.env[variable];
+        if (value !== undefined && value !== "") {
+            return { value, variable, replacedBy: i === 0 ? undefined : names[0] };
+        }
+    }
+    return { value: undefined };
+}
+
+/**
+ * The model id the environment asks for, or `fallback`.
+ *
+ * Exported because the side query (memory recall) prefers a smaller model than
+ * the main one, and reads the same variable to find it.
+ */
+export function envModel(fallback: string): string {
+    return envVar(ENV_MODEL).value || fallback;
+}
+
+/** A deprecated variable that took effect — worth a line at startup. */
+export interface ConfigDeprecation {
+    field: string;
+    variable: string;
+    replacement: string;
+}
+
+function deprecationOf(field: string, read: EnvRead, source: ConfigSource): ConfigDeprecation | null {
+    // Only when it won its field: if a flag or the config file outranks it, the
+    // conflict report already says the variable is being ignored.
+    if (source !== "env" || !read.variable || !read.replacedBy) return null;
+    return { field, variable: read.variable, replacement: read.replacedBy };
+}
+
 /** A lower-priority source holding a *different* value than the winner. */
 export interface ConfigConflict {
     field: string;
@@ -145,6 +204,8 @@ export interface ResolvedConfigBundle {
     config: ResolvedConfig;
     sources: Record<keyof ResolvedConfig, ConfigSource>;
     conflicts: ConfigConflict[];
+    /** Legacy variables that supplied a value, so the CLI can say so once. */
+    deprecations: ConfigDeprecation[];
 }
 
 /**
@@ -167,8 +228,9 @@ export function resolveConfigDetailed(flags: ConfigFlags): ResolvedConfigBundle 
     const apiBase = firstOf<string>([
         ["flag", flags.apiBase], ["config", saved.apiBase], ["env", process.env.ANTHROPIC_BASE_URL],
     ], DEFAULT_API_BASE);
+    const modelVar = envVar(ENV_MODEL);
     const model = firstOf<string>([
-        ["flag", flags.model], ["config", saved.model], ["env", process.env.MINI_MODEL],
+        ["flag", flags.model], ["config", saved.model], ["env", modelVar.value],
     ], DEFAULT_MODEL);
     // Anything unrecognised is treated as unset rather than guessed at, so a
     // typo lands on the built-in default and shows up in the /config report.
@@ -185,10 +247,11 @@ export function resolveConfigDetailed(flags: ConfigFlags): ResolvedConfigBundle 
     const effort = firstOf<string>([
         ["flag", flags.effort], ["config", saved.effort], ["env", process.env.TRIUMCODE_EFFORT],
     ], "high");
+    const contextVar = envVar(ENV_CONTEXT_WINDOW);
     const contextWindow = firstOf<number>([
         ["flag", flags.contextWindow],
         ["config", parseSizeTokens(saved.contextWindow)],
-        ["env", parseSizeTokens(process.env.MINI_CONTEXT_WINDOW)],
+        ["env", parseSizeTokens(contextVar.value)],
     ], DEFAULT_CONTEXT_WINDOW);
 
     const thinking: Sourced<boolean> =
@@ -205,6 +268,11 @@ export function resolveConfigDetailed(flags: ConfigFlags): ResolvedConfigBundle 
         contextWindow: contextWindow.source,
     };
 
+    const deprecations = [
+        deprecationOf("model", modelVar, model.source),
+        deprecationOf("contextWindow", contextVar, contextWindow.source),
+    ].filter((d): d is ConfigDeprecation => d !== null);
+
     // Only flag a conflict when the shadowed source would actually have
     // changed the outcome — same value means nothing is being overridden.
     const conflicts: ConfigConflict[] = [];
@@ -220,7 +288,7 @@ export function resolveConfigDetailed(flags: ConfigFlags): ResolvedConfigBundle 
     };
     compare("apiKey",  apiKey,  ["env", process.env.ANTHROPIC_API_KEY]);
     compare("apiBase", apiBase, ["env", process.env.ANTHROPIC_BASE_URL]);
-    compare("model",   model,   ["env", process.env.MINI_MODEL]);
+    compare("model",   model,   ["env", modelVar.value]);
     compare("protocol", protocol, ["env", process.env.TRIUMCODE_PROTOCOL]);
 
     return {
@@ -232,6 +300,7 @@ export function resolveConfigDetailed(flags: ConfigFlags): ResolvedConfigBundle 
         },
         sources,
         conflicts,
+        deprecations,
     };
 }
 
@@ -388,5 +457,6 @@ export async function ensureConfig(flags: ConfigFlags): Promise<ResolvedConfigBu
         },
         // Setup just overwrote the file, so nothing is shadowing it.
         conflicts: [],
+        deprecations: [],
     };
 }

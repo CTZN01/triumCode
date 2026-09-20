@@ -8,7 +8,7 @@ import {
 import {
     printWelcome, printUserPrompt, printInfo, printError,
     printInterrupted, printHelp, printCostReport, printBlock, printTurnStart, endStatus,
-    printConfigReport, printQuestion, printSessionStatus, renderPickStrip,
+    printConfigReport, printQuestion, printSessionStatus, renderPickStrip, printDeprecations,
 } from "./ui.js";
 import { ensureConfig, describeSource, parseSizeTokens, getModelPresets, type ModelPreset } from "./config.js";
 import { parseEffort, EFFORT_LEVELS, type EffortLevel } from "./thinking.js";
@@ -72,14 +72,14 @@ function parseArgs(argv: string[]): CliFlags {
             flags.apiBase = argv[++i] || flags.apiBase;
         } else if (arg === "--protocol") {
             const v = argv[++i] || "";
-            if (!v || parseProtocol(v)) {
+            if (parseProtocol(v)) {
                 flags.protocol = v;
             } else {
                 printError(`--protocol must be one of: ${PROTOCOLS.join(", ")}`);
             }
         } else if (arg === "--auth") {
             const v = argv[++i] || "";
-            if (!v || parseAuthScheme(v)) {
+            if (parseAuthScheme(v)) {
                 flags.auth = v;
             } else {
                 printError(`--auth must be one of: ${AUTH_SCHEMES.join(", ")}`);
@@ -242,7 +242,10 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
     // A lower-priority source holding a different value is exactly how a
     // session ends up talking to an endpoint the user never chose, so say so
     // up front rather than letting it be discovered from a bill.
+    // Otherwise only the deprecated variables get a mention — the full report
+    // already lists them, so printing both would say it twice.
     if (bundle.conflicts.length > 0) printConfigReport(bundle);
+    else printDeprecations(bundle.deprecations);
 
     const agent = new Agent({
         model: config.model,

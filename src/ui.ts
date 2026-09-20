@@ -2,7 +2,7 @@ import chalk from "chalk";
 import { isAbsolute, relative, resolve } from "node:path";
 import {
     describeSource, maskSecret,
-    type ResolvedConfigBundle, type ConfigSource,
+    type ConfigDeprecation, type ResolvedConfigBundle, type ConfigSource,
 } from "./config.js";
 
 // ═══════════════════════════════════════════════════════════════
@@ -635,7 +635,7 @@ export function printPlanModeExited(targetMode: string): void {
 // in a zh-CN terminal.
 
 export function printConfigReport(bundle: ResolvedConfigBundle): void {
-    const { config, sources, conflicts } = bundle;
+    const { config, sources, conflicts, deprecations } = bundle;
 
     const rows: Array<[string, string, ConfigSource]> = [
         ["endpoint", config.apiBase, sources.apiBase],
@@ -667,7 +667,30 @@ export function printConfigReport(bundle: ResolvedConfigBundle): void {
         lines.push(chalk.dim("    The values above win. Unset the variable, or pass the CLI flag."));
     }
 
+    if (deprecations.length > 0) {
+        lines.push("", chalk.yellow("  Deprecated:"));
+        for (const d of deprecations) {
+            lines.push(chalk.yellow(
+                `    ${d.variable} is still read, but is named from before the rename`,
+            ));
+            lines.push(chalk.dim(`    rename it to ${d.replacement} to keep the setting when it goes`));
+        }
+    }
+
     printBlock(lines.join("\n"));
+}
+
+/**
+ * The deprecation notice for a normal startup.
+ *
+ * Kept apart from printConfigReport so a run with nothing else to report stays
+ * quiet: the report is long, and the startup path only needs to mention the
+ * variable that is about to stop working.
+ */
+export function printDeprecations(deprecations: ConfigDeprecation[]): void {
+    for (const d of deprecations) {
+        logLine(WARN(`  ! ${d.variable} is deprecated — rename it to ${d.replacement}`));
+    }
 }
 
 // ── Help text ───────────────────────────────────────────────
@@ -706,8 +729,11 @@ Options:
 Configuration (in order of priority):
   1. CLI flags (--api-key, --model, --api-base, --protocol, --auth)
   2. ~/.triumcode/config.json (saved by first-run setup)
-  3. Environment variables (ANTHROPIC_API_KEY, ANTHROPIC_BASE_URL, MINI_MODEL,
-     TRIUMCODE_PROTOCOL, TRIUMCODE_AUTH)
+  3. Environment variables (ANTHROPIC_API_KEY, ANTHROPIC_BASE_URL,
+     TRIUMCODE_MODEL, TRIUMCODE_PROTOCOL, TRIUMCODE_AUTH,
+     TRIUMCODE_EFFORT, TRIUMCODE_CONTEXT_WINDOW)
+     The older MINI_MODEL and MINI_CONTEXT_WINDOW still work, but are
+     deprecated and will stop being read in a future release
   4. Built-in defaults
 
 REPL Commands:

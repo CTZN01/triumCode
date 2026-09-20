@@ -11,8 +11,9 @@ import { tmpdir } from "node:os";
 let caseId = 0;
 
 const ENV_KEYS = [
-    "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "MINI_MODEL", "TRIUMCODE_EFFORT",
-    "MINI_CONTEXT_WINDOW", "TRIUMCODE_PROTOCOL", "TRIUMCODE_AUTH",
+    "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "TRIUMCODE_MODEL", "TRIUMCODE_EFFORT",
+    "TRIUMCODE_CONTEXT_WINDOW", "TRIUMCODE_PROTOCOL", "TRIUMCODE_AUTH",
+    "MINI_MODEL", "MINI_CONTEXT_WINDOW",
 ] as const;
 
 async function loadConfig(
@@ -284,4 +285,68 @@ test("getModelPresets returns an empty set without a models map", async (t) => {
     const { mod, restore } = await loadConfig({ model: "default-model" });
     t.after(restore);
     assert.deepEqual(mod.getModelPresets(), {});
+});
+
+// ── Environment variable generation ─────────────────────────
+//
+// The TRIUMCODE_* names are current; the MINI_* ones predate the rename and
+// still resolve. Dropping them outright would be silent: every existing shell
+// profile and CI secret would fall through to the built-in defaults.
+
+test("the current environment names outrank the deprecated ones", async (t) => {
+    const { mod, restore } = await loadConfig(null, {
+        TRIUMCODE_MODEL: "new-model",
+        MINI_MODEL: "old-model",
+        TRIUMCODE_CONTEXT_WINDOW: "500k",
+        MINI_CONTEXT_WINDOW: "1000000",
+    });
+    t.after(restore);
+
+    const { config, deprecations } = mod.resolveConfigDetailed({});
+    assert.equal(config.model, "new-model");
+    assert.equal(config.contextWindow, 500_000);
+    assert.deepEqual(deprecations, [], "nothing deprecated is in use");
+});
+
+test("a deprecated variable that still supplies a value is reported, not ignored", async (t) => {
+    const { mod, restore } = await loadConfig(null, {
+        MINI_MODEL: "old-model",
+        MINI_CONTEXT_WINDOW: "1M",
+    });
+    t.after(restore);
+
+    const { config, sources, deprecations } = mod.resolveConfigDetailed({});
+    assert.equal(config.model, "old-model", "the old name still resolves");
+    assert.equal(config.contextWindow, 1_000_000);
+    assert.equal(sources.model, "env");
+
+    assert.deepEqual(deprecations, [
+        { field: "model", variable: "MINI_MODEL", replacement: "TRIUMCODE_MODEL" },
+        { field: "contextWindow", variable: "MINI_CONTEXT_WINDOW", replacement: "TRIUMCODE_CONTEXT_WINDOW" },
+    ]);
+});
+
+test("a deprecated variable that loses to a flag is reported as overridden, not deprecated", async (t) => {
+    const { mod, restore } = await loadConfig(null, { MINI_MODEL: "old-model" });
+    t.after(restore);
+
+    const { config, deprecations, conflicts } = mod.resolveConfigDetailed({ model: "flagged" });
+    assert.equal(config.model, "flagged");
+    // Nothing is deprecated about a variable that is not supplying the value;
+    // the conflict report already covers this case.
+    assert.deepEqual(deprecations, []);
+    assert.deepEqual(conflicts.map((c) => c.field), ["model"]);
+});
+
+test("the side query reads the current model variable, legacy second", async (t) => {
+    const { mod, restore } = await loadConfig(null, { TRIUMCODE_MODEL: "small-model", MINI_MODEL: "older" });
+    t.after(restore);
+
+    assert.equal(mod.envModel("fallback"), "small-model");
+});
+
+test("envModel falls back when no model variable is set", async (t) => {
+    const { mod, restore } = await loadConfig(null, {});
+    t.after(restore);
+    assert.equal(mod.envModel("fallback"), "fallback");
 });

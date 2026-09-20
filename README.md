@@ -57,7 +57,9 @@ a single run, or in CI.
 
 ```
 --api-key KEY     API key
---api-base URL    API base URL (default: https://api.anthropic.com)
+--api-base URL    API base URL. Defaults to https://api.anthropic.com, which
+                  only makes sense for the anthropic protocol — an OpenAI
+                  protocol needs the gateway's own URL
 --model, -m       Model name (default: claude-sonnet-4-20250514)
 --protocol NAME   Wire protocol: anthropic | openai-chat | openai-responses
 --auth SCHEME     Key transport: api-key (x-api-key) | bearer (Authorization)
@@ -78,10 +80,16 @@ a single run, or in CI.
 |----------|---------|---------|
 | `ANTHROPIC_API_KEY` | API key | _(none — required)_ |
 | `ANTHROPIC_BASE_URL` | API endpoint | `https://api.anthropic.com` |
+| `TRIUMCODE_MODEL` | Default model | `claude-sonnet-4-20250514` |
 | `TRIUMCODE_PROTOCOL` | Wire protocol | `anthropic` |
 | `TRIUMCODE_AUTH` | Key transport | derived from the protocol |
-| `MINI_MODEL` | Default model | `claude-sonnet-4-20250514` |
-| `MINI_CONTEXT_WINDOW` | Context window size in tokens | `200000` |
+| `TRIUMCODE_EFFORT` | Thinking depth | `high` |
+| `TRIUMCODE_CONTEXT_WINDOW` | Context window size in tokens | `200000` |
+
+`MINI_MODEL` and `MINI_CONTEXT_WINDOW` are the older names for the last two.
+They still resolve, as a second choice behind the `TRIUMCODE_*` spelling, and
+are deprecated — rename them now. A dropped variable is silent: losing the
+context window only shows up as history compressed earlier than the model needs.
 
 ### Model Protocols
 
@@ -124,6 +132,8 @@ switches backend and protocol in one step:
 
 `--api-base` accepts the URL exactly as vendor docs print it, `/v1` included:
 the version segment is normalized away and each protocol appends its own path.
+The `https://api.anthropic.com` default is the Anthropic protocol's own; the
+OpenAI protocols have no sensible default, so give them the gateway's URL.
 `auth` is only needed when a gateway wants the key spelled differently from what
 its protocol implies — `bearer` sends `Authorization: Bearer`, `api-key` sends
 `x-api-key`.

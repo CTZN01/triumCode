@@ -53,7 +53,8 @@ node dist/cli.js --sessions
 
 ```
 --api-key KEY     API Key
---api-base URL    API 基础地址（默认：https://api.anthropic.com）
+--api-base URL    API 基础地址。默认 https://api.anthropic.com 只对 anthropic
+                  协议有意义 —— OpenAI 协议必须填网关自己的 URL
 --model, -m       模型名称（默认：claude-sonnet-4-20250514）
 --protocol NAME   线协议：anthropic | openai-chat | openai-responses
 --auth SCHEME     Key 的传递方式：api-key（x-api-key）| bearer（Authorization）
@@ -73,10 +74,13 @@ node dist/cli.js --sessions
 |------|------|--------|
 | `ANTHROPIC_API_KEY` | API Key | _（无 — 必填）_ |
 | `ANTHROPIC_BASE_URL` | API 端点 | `https://api.anthropic.com` |
+| `TRIUMCODE_MODEL` | 默认模型 | `claude-sonnet-4-20250514` |
 | `TRIUMCODE_PROTOCOL` | 线协议 | `anthropic` |
 | `TRIUMCODE_AUTH` | Key 的传递方式 | 由协议推导 |
-| `MINI_MODEL` | 默认模型 | `claude-sonnet-4-20250514` |
-| `MINI_CONTEXT_WINDOW` | 上下文窗口大小（token） | `200000` |
+| `TRIUMCODE_EFFORT` | 思考深度 | `high` |
+| `TRIUMCODE_CONTEXT_WINDOW` | 上下文窗口大小（token） | `200000` |
+
+`MINI_MODEL` 和 `MINI_CONTEXT_WINDOW` 是后两项的旧名字，仍能生效，但排在 `TRIUMCODE_*` 之后，且已废弃 —— 请尽快改名。变量失效是静默的：上下文窗口丢失只会表现为历史被压缩得比模型需要的更早。
 
 ### 模型协议
 
@@ -110,7 +114,7 @@ triumcode --api-base https://gateway.example/v1 \
 }
 ```
 
-`--api-base` 可以照厂商文档原样粘贴，带上 `/v1` 也行：版本段会被规范化掉，各协议再拼上自己的路径。只有当网关要求 Key 的写法与该协议默认不一致时才需要配 `auth` —— `bearer` 发 `Authorization: Bearer`，`api-key` 发 `x-api-key`。
+`--api-base` 可以照厂商文档原样粘贴，带上 `/v1` 也行：版本段会被规范化掉，各协议再拼上自己的路径。`https://api.anthropic.com` 这个默认值是 anthropic 协议自己的；OpenAI 协议没有合理的默认端点，必须填网关的 URL。只有当网关要求 Key 的写法与该协议默认不一致时才需要配 `auth` —— `bearer` 发 `Authorization: Bearer`，`api-key` 发 `x-api-key`。
 
 ## REPL 命令
 
