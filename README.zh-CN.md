@@ -20,17 +20,20 @@ node dist/cli.js
 ## 使用方法
 
 ```bash
-# 交互式 REPL
+# 交互式 REPL（新建会话）
 node dist/cli.js
 
 # 单次执行（运行后退出）
 node dist/cli.js "读取 src/agent.ts 并总结它的功能"
 
-# 恢复上一次会话
-node dist/cli.js --resume
+# 继续本项目最近的会话
+node dist/cli.js --continue
 
 # 通过 ID 前缀恢复指定会话
 node dist/cli.js --resume a3f8
+
+# 强制新建会话（默认行为）
+node dist/cli.js --new
 
 # 列出所有已保存的会话
 node dist/cli.js --sessions
@@ -60,6 +63,9 @@ node dist/cli.js --sessions
 --auth SCHEME     Key 的传递方式：api-key（x-api-key）| bearer（Authorization）
 --thinking        启用扩展思维模式
 --resume [id]     恢复最近的会话，或通过 ID 前缀恢复指定会话
+--continue        继续本项目最近的会话（等同于不带参数的 --resume）
+--new             新建会话，已保存的会话保持不变。这是默认行为，
+                  --continue 和 --resume 会覆盖它
 --sessions        列出所有会话后退出
 --yolo, -y        跳过所有权限确认提示
 --plan            计划模式：只读，不执行编辑
@@ -122,7 +128,9 @@ triumcode --api-base https://gateway.example/v1 \
 
 | 命令 | 说明 |
 |------|------|
-| `/clear` | 清空对话历史 |
+| `/clear` | 清空当前对话（清空当前会话） |
+| `/new` | 新建对话，之前的会话会保留 |
+| `/resume [id]` | 恢复已保存的会话；不带参数时弹出选择器 |
 | `/cost` | 显示 Token 使用量、缓存命中率和预估费用 |
 | `/sessions` | 列出所有已保存的会话 |
 | `/delete <id>` | 删除指定会话 |
@@ -216,18 +224,24 @@ src/
 
 ## 会话存储
 
-会话存储在 `.triumcode/sessions/`（项目本地）：
+会话全局存储，按项目根目录（最近一个包含 `.git` 或 `.triumcode` 的祖先目录）
+哈希后分目录存放：
 
 ```
-.triumcode/
+~/.triumcode/
   sessions/
-    a3f8b2c1.json    ← 会话数据（消息 + 元数据）
-    7e0d4f9a.json
-    ...
-  session-latest     ← 指向最近会话的指针
+    <项目哈希>/
+      a3f8b2c1.json    ← 会话数据（消息 + 元数据）
+      7e0d4f9a.json
+      ...
+      session-latest   ← 指向当前活动会话的指针
 ```
 
-- 最多保留 50 个会话（自动清理最旧的）
+- 以项目根目录（而非 cwd）为键，因此从任意子目录启动都能看到同一批会话
+- 不同项目之间会话完全隔离，不会串台
+- 每个项目最多保留 50 个会话（自动清理最旧的）
+- 旧版项目本地 `.triumcode/sessions/` 中的会话会在首次使用时自动迁移
+- 启动 CLI 会**新建**会话；`--continue` / `--resume` 才会恢复已有会话
 - `--resume` 不带参数恢复最近的会话
 - `--resume <前缀>` 通过 ID 前缀匹配（例如 `--resume a3f`）
 
