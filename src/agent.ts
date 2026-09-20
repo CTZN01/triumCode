@@ -1,8 +1,8 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { readFileSync, mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import * as os from "node:os";
-import { getActiveToolDefinitions, type ReadFileState, type ToolContext } from "./tools.js";
+import { getActiveToolDefinitions, toolResultLimit, type ReadFileState, type ToolContext } from "./tools.js";
 import { ToolExecutor } from "./tool-executor.js";
 import { envModel } from "./config.js";
 import { buildStaticSystemPrompt, buildTurnContextReminder } from "./prompt.js";
@@ -366,12 +366,18 @@ export class Agent {
     /** Replace the conversation with a previously saved history. */
     loadHistory(messages: Anthropic.MessageParam[]): void {
         this.messages = messages;
+        // Whether the restored history still contains any given file's contents
+        // is unknowable from here, so no read may claim to have been shown.
+        this.readFileState.clear();
     }
 
     /** Wipe the conversation. Called by /clear. */
     clearHistory(): void {
         this.messages = [];
         this.contextUtilization = 0;
+        // Nothing the model was shown survives the wipe, so neither does the
+        // read-before-write guard's memory of it.
+        this.readFileState.clear();
         // Memories already injected belonged to the cleared conversation.
         this.alreadySurfacedMemories.clear();
         this.sessionMemoryBytes = 0;
@@ -439,6 +445,25 @@ export class Agent {
         for (const m of memories) {
             this.alreadySurfacedMemories.add(m.path);
             this.sessionMemoryBytes += Buffer.byteLength(m.content, "utf-8");
+        }
+    }
+
+    /**
+     * Drop the "already shown" claim for reads whose result compression just
+     * rewrote. The claim is what lets read_file answer a repeat read with a
+     * notice instead of the content; once the content has been evicted from the
+     * conversation, the notice would point at nothing.
+     *
+     * Only the ranges are cleared, not the record: the mtime still stands, so a
+     * write can follow without a forced re-read. That is deliberately coarse —
+     * every range for the path is dropped even if only one was evicted — since
+     * an unnecessary re-read costs tokens while a false "already shown" costs
+     * correctness.
+     */
+    private forgetEvictedReads(paths: Set<string>): void {
+        for (const path of paths) {
+            const record = this.readFileState.get(resolve(path));
+            if (record) record.ranges = [];
         }
     }
 
@@ -609,6 +634,7 @@ export class Agent {
                 cacheHot: this.lastRequestAt > 0 && Date.now() - this.lastRequestAt < 5 * 60_000,
                 idleMs: this.lastRequestAt > 0 ? Date.now() - this.lastRequestAt : 0,
             });
+            this.forgetEvictedReads(compressed.stats.evictedReadPaths);
             const cached = withCacheBreakpoints(compressed.messages, buildSystemBlocks(this.planMode));
             this.contextUtilization = estimateTokens({
                 system: cached.system,
@@ -889,7 +915,10 @@ export class Agent {
             const resultBlocks: Anthropic.ToolResultBlockParam[] = [];
             for (const block of filtered) {
                 if (block.type !== "tool_use") continue;
-                const output = prepareToolResult(await toolResults.get(block.id)!);
+                const output = prepareToolResult(
+                    await toolResults.get(block.id)!,
+                    toolResultLimit(block.name),
+                );
                 const elapsed = Date.now() - (toolStartTimes.get(block.id) ?? Date.now());
                 printToolResult(block.name, output, elapsed);
                 resultBlocks.push({

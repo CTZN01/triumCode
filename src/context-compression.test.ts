@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-    compressHistory, persistLargeResult, prepareToolResult, truncateResult,
+    compressHistory, prepareToolResult, truncateResult,
     withCacheBreakpoints,
 } from "./context-compression.js";
 
@@ -15,13 +15,42 @@ const result = (id: string, content: string) => ({
     content: [{ type: "tool_result", tool_use_id: id, content }],
 });
 
-test("large results persist before head-tail truncation", () => {
+test("a result over the tool's limit is truncated, with the full text kept on disk", () => {
     const value = "a".repeat(60_000);
-    const prepared = prepareToolResult(value, 123);
-    assert.match(prepared, /full tool result saved to/);
-    assert.ok(prepared.length <= 50_000);
+    const prepared = prepareToolResult(value, 50_000, 123);
+    assert.match(prepared, /full result saved to/);
+    // The body is exactly the limit; only the one-line pointer sits on top.
+    assert.ok(prepared.length <= 50_100, `kept ${prepared.length}`);
     assert.match(truncateResult(value), /result truncated/);
-    assert.match(persistLargeResult(value, 123), /123-/);
+});
+
+test("a result within the tool's limit passes through untouched", () => {
+    // The per-tool limit is what stops a 30 KB read of a source file from
+    // arriving as a 2 KB preview of a file the model then cannot see at all.
+    const value = "a".repeat(40_000);
+    assert.equal(prepareToolResult(value, 100_000), value);
+});
+
+test("compression reports the reads it evicted", () => {
+    // read_file answers a repeat read with a notice instead of the content,
+    // which is only honest while that content is still in the conversation.
+    const messages: any[] = [];
+    for (let i = 0; i < 10; i++) {
+        messages.push(tool(`t${i}`, "read_file", { file_path: `f${i}.ts` }));
+        messages.push(result(`t${i}`, `RESULT-${i} ` + "x".repeat(20_000)));
+    }
+
+    const compressed = compressHistory(messages, { contextWindow: 100_000, cacheHot: true });
+    assert.ok(!compressed.stats.evictedReadPaths.has("f9.ts"), "the newest read survived, so it is not evicted");
+    assert.ok(compressed.stats.evictedReadPaths.has("f0.ts"), "the clipped read must be reported");
+});
+
+test("nothing is reported as evicted when compression changes nothing", () => {
+    const messages: any[] = [
+        tool("u1", "read_file", { file_path: "a.ts" }), result("u1", "small"),
+    ];
+    const compressed = compressHistory(messages, { contextWindow: 200_000, cacheHot: true });
+    assert.equal(compressed.stats.evictedReadPaths.size, 0);
 });
 
 test("cache breakpoints do not mutate the original history", () => {
@@ -69,6 +98,47 @@ test("a history below the budget trigger comes back byte-identical", () => {
     const before = JSON.stringify(messages);
     const compressed = compressHistory(messages, { contextWindow: 200_000, cacheHot: true });
     assert.equal(JSON.stringify(compressed.messages), before);
+});
+
+// Three trailing search results, so the reads before them fall outside the
+// "keep the last three" window and are candidates for snipping.
+const trailingSearches = () => [
+    tool("s1", "grep_search", { query: "x" }), result("s1", "search 1"),
+    tool("s2", "grep_search", { query: "x" }), result("s2", "search 2"),
+    tool("s3", "grep_search", { query: "x" }), result("s3", "search 3"),
+];
+
+const toolResultTexts = (compressed: { messages: any[] }) => compressed.messages
+    .flatMap((message: any) => message.content ?? [])
+    .filter((block: any) => block.type === "tool_result")
+    .map((block: any) => String(block.content));
+
+test("a later full read supersedes an earlier one", () => {
+    const compressed = compressHistory([
+        tool("u1", "read_file", { file_path: "a.ts" }), result("u1", "OLD CONTENT"),
+        tool("u2", "read_file", { file_path: "a.ts" }), result("u2", "NEW CONTENT"),
+        ...trailingSearches(),
+    ] as any, { contextWindow: 20_001, cacheHot: false });
+
+    const texts = toolResultTexts(compressed);
+    assert.match(texts[0], /older read_file result snipped/);
+    assert.doesNotMatch(texts[1], /snipped/, "the read that superseded it stays whole");
+});
+
+test("paging through one file does not snipe the earlier pages", () => {
+    // Superseding used to key on the file alone, which held while every read
+    // returned the whole file. With offset/limit the model pages through a long
+    // file, and page two says nothing about whether page one is still needed —
+    // snipping it would delete half the file from the conversation.
+    const compressed = compressHistory([
+        tool("u1", "read_file", { file_path: "big.ts", offset: 1, limit: 1000 }), result("u1", "FIRST PAGE"),
+        tool("u2", "read_file", { file_path: "big.ts", offset: 1001, limit: 1000 }), result("u2", "SECOND PAGE"),
+        ...trailingSearches(),
+    ] as any, { contextWindow: 20_001, cacheHot: false });
+
+    const texts = toolResultTexts(compressed);
+    assert.doesNotMatch(texts[0], /snipped/);
+    assert.doesNotMatch(texts[1], /snipped/);
 });
 
 test("compression preserves the latest three tool results and snips stale reads", () => {
