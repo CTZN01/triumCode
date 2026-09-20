@@ -8,7 +8,7 @@ import {
 import {
     printWelcome, printUserPrompt, printInfo, printError,
     printInterrupted, printHelp, printCostReport, printBlock, printTurnStart, endStatus,
-    printConfigReport, printQuestion, printSessionStatus, renderPickStrip, printDeprecations,
+    printConfigReport, printQuestion, printSessionStatus, renderPickList, printDeprecations,
 } from "./ui.js";
 import { ensureConfig, describeSource, parseSizeTokens, getModelPresets, type ModelPreset } from "./config.js";
 import { parseEffort, EFFORT_LEVELS, type EffortLevel } from "./thinking.js";
@@ -336,11 +336,11 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
             let done = false;
             const draw = () => {
                 const instruction = "   <-/-> move, Enter confirm, Esc cancel";
-                const pickerWidth = Math.max(20, (process.stdout.columns || 80) - 2 - instruction.length);
-                process.stdout.write(
-                    `\r\x1b[K  ${renderPickStrip(options, idx, pickerWidth)}`
-                    + chalk.dim(instruction),
-                );
+                const lines = [...renderPickList(options, idx), chalk.dim(instruction)];
+                const moveUp = lines.length > 1 ? `\x1b[${lines.length - 1}A` : "";
+                process.stdout.write(moveUp + lines.map((line, i) =>
+                    `\x1b[2K\r  ${line}${i < lines.length - 1 ? "\n" : ""}`,
+                ).join(""));
             };
             const finish = (result: number | null) => {
                 if (done) return;

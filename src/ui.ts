@@ -572,6 +572,11 @@ export function renderPickStrip(options: readonly string[], selected: number, ma
         .join(" ");
 }
 
+/** Render one model-pick option per line so long names cannot wrap the picker. */
+export function renderPickList(options: readonly string[], selected: number): string[] {
+    return options.map((option, i) => i === selected ? ACCENT(`[${option}]`) : MUTED(` ${option} `));
+}
+
 // ── Turn outcome ────────────────────────────────────────────
 // Printed only when a turn stops for a reason the model's own output doesn't
 // explain. Silence means the model finished normally — which is exactly the
