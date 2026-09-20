@@ -3,6 +3,12 @@ import { join } from "node:path";
 import * as os from "node:os";
 import * as readline from "node:readline";
 import { DEFAULT_CONTEXT_WINDOW } from "./context-compression.js";
+// The protocol vocabulary lives with the providers that implement it. providers/
+// deliberately never imports this module, so this edge stays one-way.
+import {
+    defaultAuthFor, parseAuthScheme, parseProtocol, PROTOCOLS,
+    type AuthScheme, type Protocol,
+} from "./providers/types.js";
 
 // ═══════════════════════════════════════════════════════════════
 // Global user config — ~/.triumcode/config.json
@@ -35,6 +41,12 @@ export interface UserConfig {
     apiKey?: string;
     apiBase?: string;
     model?: string;
+    // Wire protocol of the endpoint: "anthropic" | "openai-chat" |
+    // "openai-responses". A gateway serves each model through one of them.
+    protocol?: string;
+    // How the key travels: "api-key" (x-api-key) or "bearer" (Authorization).
+    // Unset means "whatever the protocol expects".
+    auth?: string;
     thinking?: boolean;
     effort?: string;
     // Accepts a plain token count or a k/M suffix string ("200k", "1M").
@@ -48,6 +60,12 @@ export interface ModelPreset {
     model: string;
     apiBase?: string;
     apiKey?: string;
+    protocol?: Protocol;
+    auth?: AuthScheme;
+    // Open models publish their own window (128k, 256k), which is not the
+    // Claude-sized default — without this a preset gets its history trimmed
+    // against the wrong budget.
+    contextWindow?: number;
 }
 
 function readConfig(): UserConfig {
@@ -72,9 +90,24 @@ export interface ResolvedConfig {
     apiKey: string;
     apiBase: string;
     model: string;
+    protocol: Protocol;
+    /** Derived from the protocol when no source sets it. */
+    auth: AuthScheme;
     thinking: boolean;
     effort: string;
     contextWindow: number;
+}
+
+/** The per-field overrides the CLI accepts, in the shape each source stores. */
+export interface ConfigFlags {
+    apiKey?: string;
+    apiBase?: string;
+    model?: string;
+    protocol?: string;
+    auth?: string;
+    thinking?: boolean;
+    effort?: string;
+    contextWindow?: number;
 }
 
 /** Where a single resolved field came from. */
@@ -125,14 +158,7 @@ export interface ResolvedConfigBundle {
  * source that is set to something different — the case that used to
  * redirect requests without the user ever seeing it.
  */
-export function resolveConfigDetailed(flags: {
-    apiKey?: string;
-    apiBase?: string;
-    model?: string;
-    thinking?: boolean;
-    effort?: string;
-    contextWindow?: number;
-}): ResolvedConfigBundle {
+export function resolveConfigDetailed(flags: ConfigFlags): ResolvedConfigBundle {
     const saved = readConfig();
 
     const apiKey = firstOf<string>([
@@ -144,6 +170,18 @@ export function resolveConfigDetailed(flags: {
     const model = firstOf<string>([
         ["flag", flags.model], ["config", saved.model], ["env", process.env.MINI_MODEL],
     ], DEFAULT_MODEL);
+    // Anything unrecognised is treated as unset rather than guessed at, so a
+    // typo lands on the built-in default and shows up in the /config report.
+    const protocol = firstOf<Protocol>([
+        ["flag", parseProtocol(flags.protocol) ?? undefined],
+        ["config", parseProtocol(saved.protocol) ?? undefined],
+        ["env", parseProtocol(process.env.TRIUMCODE_PROTOCOL) ?? undefined],
+    ], "anthropic");
+    const auth = firstOf<AuthScheme>([
+        ["flag", parseAuthScheme(flags.auth) ?? undefined],
+        ["config", parseAuthScheme(saved.auth) ?? undefined],
+        ["env", parseAuthScheme(process.env.TRIUMCODE_AUTH) ?? undefined],
+    ], defaultAuthFor(protocol.value));
     const effort = firstOf<string>([
         ["flag", flags.effort], ["config", saved.effort], ["env", process.env.TRIUMCODE_EFFORT],
     ], "high");
@@ -162,6 +200,7 @@ export function resolveConfigDetailed(flags: {
 
     const sources = {
         apiKey: apiKey.source, apiBase: apiBase.source, model: model.source,
+        protocol: protocol.source, auth: auth.source,
         thinking: thinking.source, effort: effort.source,
         contextWindow: contextWindow.source,
     };
@@ -182,10 +221,12 @@ export function resolveConfigDetailed(flags: {
     compare("apiKey",  apiKey,  ["env", process.env.ANTHROPIC_API_KEY]);
     compare("apiBase", apiBase, ["env", process.env.ANTHROPIC_BASE_URL]);
     compare("model",   model,   ["env", process.env.MINI_MODEL]);
+    compare("protocol", protocol, ["env", process.env.TRIUMCODE_PROTOCOL]);
 
     return {
         config: {
             apiKey: apiKey.value, apiBase: apiBase.value, model: model.value,
+            protocol: protocol.value, auth: auth.value,
             thinking: thinking.value, effort: effort.value,
             contextWindow: contextWindow.value,
         },
@@ -212,14 +253,7 @@ export function parseSizeTokens(value: string | number | undefined): number | un
     return tokens > 0 ? tokens : undefined;
 }
 
-export function resolveConfig(flags: {
-    apiKey?: string;
-    apiBase?: string;
-    model?: string;
-    thinking?: boolean;
-    effort?: string;
-    contextWindow?: number;
-}): ResolvedConfig {
+export function resolveConfig(flags: ConfigFlags): ResolvedConfig {
     return resolveConfigDetailed(flags).config;
 }
 
@@ -227,6 +261,10 @@ export function resolveConfig(flags: {
  * Named model presets from the config file's "models" map, for /model.
  * Read fresh on every call so edits to config.json show up without a
  * restart. An absent or malformed map yields an empty set.
+ *
+ * A preset carries its protocol on purpose: a gateway serves each model
+ * through a different API, so switching model and switching protocol are the
+ * same act, and getting one wrong would fail every request in the session.
  */
 export function getModelPresets(): Record<string, ModelPreset> {
     const models = readConfig().models;
@@ -238,6 +276,9 @@ export function getModelPresets(): Record<string, ModelPreset> {
             model: String(preset.model),
             apiBase: preset.apiBase ? String(preset.apiBase) : undefined,
             apiKey: preset.apiKey ? String(preset.apiKey) : undefined,
+            protocol: parseProtocol(preset.protocol) ?? undefined,
+            auth: parseAuthScheme(preset.auth) ?? undefined,
+            contextWindow: parseSizeTokens(preset.contextWindow as number | string | undefined),
         };
     }
     return presets;
@@ -293,14 +334,7 @@ async function ask(prompt: string): Promise<string> {
  * Returns the resolved config plus source provenance, or null if the
  * user cancelled.
  */
-export async function ensureConfig(flags: {
-    apiKey?: string;
-    apiBase?: string;
-    model?: string;
-    thinking?: boolean;
-    effort?: string;
-    contextWindow?: number;
-}): Promise<ResolvedConfigBundle | null> {
+export async function ensureConfig(flags: ConfigFlags): Promise<ResolvedConfigBundle | null> {
     const bundle = resolveConfigDetailed(flags);
 
     // API key already available — nothing to do.
@@ -308,10 +342,11 @@ export async function ensureConfig(flags: {
 
     // No key found anywhere — enter interactive setup.
     console.log("\n  Welcome to TriumCode! Let's get you set up.\n");
-    console.log("  You need an Anthropic API key to get started.");
-    console.log("  Get one at: https://console.anthropic.com/settings/keys\n");
+    console.log("  You need an API key for the endpoint you will use.");
+    console.log("  Anthropic:  https://console.anthropic.com/settings/keys");
+    console.log("  A gateway (OpenCode Zen and friends): the key from its own console\n");
 
-    const apiKey = await ask("  Enter your API key (sk-ant-...): ");
+    const apiKey = await ask("  Enter your API key: ");
     if (!apiKey) {
         console.log("\n  Setup cancelled. You can set the key later via:");
         console.log("    triumcode --api-key <key>");
@@ -322,7 +357,15 @@ export async function ensureConfig(flags: {
     const apiBase = await ask(`  API base URL [${DEFAULT_API_BASE}]: `) || DEFAULT_API_BASE;
     const model = await ask(`  Default model [${DEFAULT_MODEL}]: `) || DEFAULT_MODEL;
 
-    const toSave: UserConfig = { apiKey, apiBase, model };
+    let protocol: Protocol = "anthropic";
+    const typedProtocol = await ask(`  API protocol [anthropic] — ${PROTOCOLS.join(" | ")}: `);
+    if (typedProtocol) {
+        const parsed = parseProtocol(typedProtocol);
+        if (parsed) protocol = parsed;
+        else console.log(`  ! "${typedProtocol}" is not a protocol — using anthropic`);
+    }
+
+    const toSave: UserConfig = { apiKey, apiBase, model, protocol };
     writeConfig(toSave);
 
     console.log(`\n  ✓ Config saved to ${CONFIG_FILE}`);
@@ -331,13 +374,14 @@ export async function ensureConfig(flags: {
     // the user knows which endpoint is now in effect without having to ask.
     return {
         config: {
-            apiKey, apiBase, model,
+            apiKey, apiBase, model, protocol, auth: defaultAuthFor(protocol),
             thinking: flags.thinking ?? true,
             effort: flags.effort || "high",
             contextWindow: flags.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
         },
         sources: {
             apiKey: "config", apiBase: "config", model: "config",
+            protocol: "config", auth: "default",
             thinking: flags.thinking !== undefined ? "flag" : "default",
             effort: flags.effort ? "flag" : "default",
             contextWindow: flags.contextWindow ? "flag" : "default",

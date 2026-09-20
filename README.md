@@ -56,9 +56,11 @@ a single run, or in CI.
 ### CLI Flags
 
 ```
---api-key KEY     Anthropic API key
+--api-key KEY     API key
 --api-base URL    API base URL (default: https://api.anthropic.com)
 --model, -m       Model name (default: claude-sonnet-4-20250514)
+--protocol NAME   Wire protocol: anthropic | openai-chat | openai-responses
+--auth SCHEME     Key transport: api-key (x-api-key) | bearer (Authorization)
 --thinking        Enable Extended Thinking mode
 --resume [id]     Resume latest session, or a specific one by ID prefix
 --sessions        List all sessions and exit
@@ -76,8 +78,55 @@ a single run, or in CI.
 |----------|---------|---------|
 | `ANTHROPIC_API_KEY` | API key | _(none — required)_ |
 | `ANTHROPIC_BASE_URL` | API endpoint | `https://api.anthropic.com` |
+| `TRIUMCODE_PROTOCOL` | Wire protocol | `anthropic` |
+| `TRIUMCODE_AUTH` | Key transport | derived from the protocol |
 | `MINI_MODEL` | Default model | `claude-sonnet-4-20250514` |
 | `MINI_CONTEXT_WINDOW` | Context window size in tokens | `200000` |
+
+### Model Protocols
+
+TriumCode speaks three wire protocols, because a model gateway serves each of
+its models through whichever API that model's upstream actually exposes. One
+base URL is not enough — you also pick a protocol:
+
+| Protocol | Endpoint appended | Typical models behind a gateway |
+|----------|-------------------|---------------------------------|
+| `anthropic` | `/v1/messages` | Claude, MiniMax, Qwen |
+| `openai-chat` | `/v1/chat/completions` | DeepSeek, GLM, Kimi, MiMo |
+| `openai-responses` | `/v1/responses` | GPT, Grok |
+
+Conversation history stays in Anthropic's message shape internally, so sessions,
+context compression and memory recall behave the same on every protocol. A
+gateway that rejects an optional parameter (`thinking`, `effort`,
+`stream_options`, `reasoning`) is detected on the first 400 and stops being sent
+that parameter for the rest of the session.
+
+```bash
+# One-off run against a gateway
+triumcode --api-base https://gateway.example/v1 \
+          --protocol openai-chat --model deepseek-v4 "refactor src/tools.ts"
+```
+
+Named presets in `~/.triumcode/config.json` carry the protocol, so `/model`
+switches backend and protocol in one step:
+
+```json
+{
+  "apiBase": "https://api.anthropic.com",
+  "model": "claude-sonnet-4-20250514",
+  "models": {
+    "deep":  { "model": "deepseek-v4",   "apiBase": "https://gateway.example/v1", "protocol": "openai-chat",     "contextWindow": "128k" },
+    "gpt":   { "model": "gpt-5-luna",    "apiBase": "https://gateway.example/v1", "protocol": "openai-responses", "contextWindow": "200k" },
+    "mimin": { "model": "minimax-m3",    "apiBase": "https://gateway.example/v1", "protocol": "anthropic",        "auth": "api-key" }
+  }
+}
+```
+
+`--api-base` accepts the URL exactly as vendor docs print it, `/v1` included:
+the version segment is normalized away and each protocol appends its own path.
+`auth` is only needed when a gateway wants the key spelled differently from what
+its protocol implies — `bearer` sends `Authorization: Bearer`, `api-key` sends
+`x-api-key`.
 
 ### Skills
 

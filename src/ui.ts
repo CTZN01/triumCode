@@ -640,6 +640,8 @@ export function printConfigReport(bundle: ResolvedConfigBundle): void {
     const rows: Array<[string, string, ConfigSource]> = [
         ["endpoint", config.apiBase, sources.apiBase],
         ["model",    config.model,   sources.model],
+        ["protocol", config.protocol, sources.protocol],
+        ["auth",     config.auth,    sources.auth],
         ["api key",  maskSecret(config.apiKey), sources.apiKey],
         ["thinking", config.thinking ? "on" : "off", sources.thinking],
         ["effort",   config.effort || "-", sources.effort],
@@ -675,9 +677,14 @@ export function printHelp(): void {
 Usage: triumcode [options] [prompt]
 
 Options:
-  --api-key KEY    Anthropic API key (or saved in ~/.triumcode/config.json)
+  --api-key KEY    API key (or saved in ~/.triumcode/config.json)
   --api-base URL   API base URL (or saved in ~/.triumcode/config.json)
   --model, -m      Model to use
+  --protocol NAME  Wire protocol: anthropic (default) | openai-chat |
+                   openai-responses. A model gateway serves each model through
+                   one of these, so the model choice usually decides this
+  --auth SCHEME    How the key travels: api-key (x-api-key) | bearer
+                   (Authorization). Defaults to what the protocol expects
   --thinking       Enable extended thinking. On by default for current Claude
                    models, and on by default for everything else too; this
                    forces it on for any other model as well
@@ -697,9 +704,10 @@ Options:
   --help, -h       Show this help
 
 Configuration (in order of priority):
-  1. CLI flags (--api-key, --model, --api-base)
+  1. CLI flags (--api-key, --model, --api-base, --protocol, --auth)
   2. ~/.triumcode/config.json (saved by first-run setup)
-  3. Environment variables (ANTHROPIC_API_KEY, ANTHROPIC_BASE_URL, MINI_MODEL)
+  3. Environment variables (ANTHROPIC_API_KEY, ANTHROPIC_BASE_URL, MINI_MODEL,
+     TRIUMCODE_PROTOCOL, TRIUMCODE_AUTH)
   4. Built-in defaults
 
 REPL Commands:
@@ -715,7 +723,7 @@ REPL Commands:
   /thinking [on|off]  Show or toggle extended thinking
   /model [name]    Switch model; a bare /model opens a picker over the
                    "models" presets in ~/.triumcode/config.json. A preset may
-                   also retarget the endpoint and key
+                   also retarget the endpoint, key, protocol and context window
   /memory          List saved long-term memories
   /sessions        List all saved sessions
   /delete <id>     Delete a saved session

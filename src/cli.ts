@@ -10,8 +10,11 @@ import {
     printInterrupted, printHelp, printCostReport, printBlock, printTurnStart, endStatus,
     printConfigReport, printQuestion, printSessionStatus, renderPickStrip,
 } from "./ui.js";
-import { ensureConfig, describeSource, parseSizeTokens, getModelPresets } from "./config.js";
+import { ensureConfig, describeSource, parseSizeTokens, getModelPresets, type ModelPreset } from "./config.js";
 import { parseEffort, EFFORT_LEVELS, type EffortLevel } from "./thinking.js";
+import {
+    parseAuthScheme, parseProtocol, AUTH_SCHEMES, PROTOCOLS,
+} from "./providers/types.js";
 import { getSkill, resolveSkillPrompt } from "./skills.js";
 import { listMemories } from "./memory.js";
 
@@ -25,6 +28,8 @@ interface CliFlags {
     model: string;           // --model / -m
     apiKey: string;          // --api-key
     apiBase: string;         // --api-base
+    protocol: string;        // --protocol anthropic|openai-chat|openai-responses
+    auth: string;            // --auth api-key|bearer
     thinking: boolean | undefined;  // --thinking; undefined = resolve from config/env/default
     noThinking: boolean;     // --no-thinking (thinking is on by default)
     effort: string;          // --effort low|medium|high|xhigh|max
@@ -44,6 +49,8 @@ function parseArgs(argv: string[]): CliFlags {
         model: "",      // resolved later by config.ts
         apiKey: "",     // resolved later by config.ts
         apiBase: "",    // resolved later by config.ts
+        protocol: "",   // resolved later by config.ts
+        auth: "",       // resolved later by config.ts
         thinking: undefined,
         noThinking: false,
         effort: "",
@@ -63,6 +70,20 @@ function parseArgs(argv: string[]): CliFlags {
             flags.apiKey = argv[++i] || flags.apiKey;
         } else if (arg === "--api-base") {
             flags.apiBase = argv[++i] || flags.apiBase;
+        } else if (arg === "--protocol") {
+            const v = argv[++i] || "";
+            if (!v || parseProtocol(v)) {
+                flags.protocol = v;
+            } else {
+                printError(`--protocol must be one of: ${PROTOCOLS.join(", ")}`);
+            }
+        } else if (arg === "--auth") {
+            const v = argv[++i] || "";
+            if (!v || parseAuthScheme(v)) {
+                flags.auth = v;
+            } else {
+                printError(`--auth must be one of: ${AUTH_SCHEMES.join(", ")}`);
+            }
         } else if (arg === "--resume") {
             const next = argv[i + 1];
             if (next && !next.startsWith("--")) {
@@ -227,6 +248,8 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
         model: config.model,
         apiKey: config.apiKey,
         apiBase: config.apiBase,
+        protocol: config.protocol,
+        auth: config.auth,
         thinking: config.thinking,
         effort: config.effort,
         maxTokens: flags.maxTokens,
@@ -386,7 +409,7 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
     });
 
     printWelcome(config.model);
-    printInfo(`endpoint ${config.apiBase}  (${describeSource(bundle.sources.apiBase)}) - /config for details`);
+    printInfo(`endpoint ${config.apiBase} via ${config.protocol}  (${describeSource(bundle.sources.apiBase)}) - /config for details`);
 
     // ── REPL loop with rl.once (strict serial execution) ─────────
     // The session footer belongs to a completed model exchange — commands
@@ -550,9 +573,18 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
                 const arg = input.slice(6).trim();
                 const presets = getModelPresets();
 
-                const apply = (label: string, preset: { model: string; apiBase?: string; apiKey?: string }): void => {
-                    agent.setModel(preset.model, preset.apiBase, preset.apiKey);
-                    printInfo(`model: ${preset.model}${preset.apiBase ? ` @ ${preset.apiBase}` : ""}${label ? ` (preset "${label}")` : ""}`);
+                const apply = (label: string, preset: ModelPreset): void => {
+                    agent.setModel({
+                        model: preset.model,
+                        apiBase: preset.apiBase,
+                        apiKey: preset.apiKey,
+                        protocol: preset.protocol,
+                        auth: preset.auth,
+                        contextWindow: preset.contextWindow,
+                    });
+                    const where = preset.apiBase ? ` @ ${preset.apiBase}` : "";
+                    const via = preset.protocol ? ` via ${preset.protocol}` : "";
+                    printInfo(`model: ${preset.model}${where}${via}${label ? ` (preset "${label}")` : ""}`);
                 };
 
                 if (arg) {

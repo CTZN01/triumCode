@@ -129,7 +129,9 @@ export function isUnsupportedParamError(error: any): boolean {
     if (error?.status !== 400) return false;
     const message = String(error?.message ?? "").toLowerCase();
     if (!message) return false;
-    return ["thinking", "budget_tokens", "effort", "output_config"].some((k) =>
+    // `reasoning` covers the OpenAI protocols' spelling of the same idea
+    // (reasoning_effort, reasoning.effort).
+    return ["thinking", "budget_tokens", "effort", "output_config", "reasoning"].some((k) =>
         message.includes(k),
     );
 }

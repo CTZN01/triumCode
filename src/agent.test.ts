@@ -38,6 +38,7 @@ type Turn = (write: (event: any) => void) => void;
 interface FakeApi {
     url: string;
     bodies: any[];
+    headers: any[];
     requests: number;
     close(): void;
 }
@@ -45,10 +46,12 @@ interface FakeApi {
 async function fakeApi(turns: Turn[]): Promise<FakeApi> {
     let n = 0;
     const bodies: any[] = [];
+    const headers: any[] = [];
 
     const server = http.createServer(async (req, res) => {
         let raw = "";
         for await (const chunk of req) raw += chunk;
+        headers.push(req.headers);
         try { bodies.push(JSON.parse(raw)); } catch { bodies.push(null); }
 
         res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
@@ -66,6 +69,7 @@ async function fakeApi(turns: Turn[]): Promise<FakeApi> {
     return {
         url: `http://127.0.0.1:${port}`,
         bodies,
+        headers,
         get requests() { return n; },
         close: () => server.close(),
     };
@@ -351,16 +355,41 @@ test("setModel switches the model for the next request and can retarget the endp
         await agent.chat("first");
         assert.equal(api.bodies[0].model, "model-a");
 
-        agent.setModel("model-b");
+        agent.setModel({ model: "model-b" });
         await agent.chat("second");
         assert.equal(api.bodies[1].model, "model-b");
-        // No endpoint override: the client (and thus the URL) is untouched.
+        // No endpoint override: the provider (and thus the URL) is untouched.
         assert.equal(api.requests, 2);
 
         // An endpoint override rebuilds the client — requests go to the new URL.
-        agent.setModel("model-c", "http://127.0.0.1:9"); // nothing listens there
+        agent.setModel({ model: "model-c", apiBase: "http://127.0.0.1:9" }); // nothing listens there
         await agent.chat("third").catch(() => {});
         assert.equal(api.requests, 2); // the third request never reached the first server
+    } finally {
+        api.close();
+    }
+});
+
+test("a bare model switch keeps an explicitly chosen auth scheme", async () => {
+    const api = await fakeApi([
+        (w) => { w(start(0, { type: "text", text: "" })); w(textDelta(0, "hi")); w(stop(0)); w(finish("end_turn")); },
+    ]);
+    // The gateway wants a bearer token; x-api-key would be rejected.
+    const agent = new Agent({ model: "model-a", apiKey: "k", apiBase: api.url, auth: "bearer" });
+
+    try {
+        await agent.chat("first");
+        assert.equal(api.headers[0].authorization, "Bearer k");
+        assert.equal(api.headers[0]["x-api-key"], undefined);
+
+        // A model-only switch does not rebuild the provider, so it must not
+        // rewrite the scheme either — the next retarget would then rebuild the
+        // provider with a scheme the session never actually used.
+        agent.setModel({ model: "model-b" });
+        agent.setModel({ apiBase: api.url });
+        await agent.chat("second");
+        assert.equal(api.headers[1].authorization, "Bearer k");
+        assert.equal(api.bodies[1].model, "model-b");
     } finally {
         api.close();
     }

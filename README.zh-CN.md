@@ -52,9 +52,11 @@ node dist/cli.js --sessions
 ### CLI 参数
 
 ```
---api-key KEY     Anthropic API Key
+--api-key KEY     API Key
 --api-base URL    API 基础地址（默认：https://api.anthropic.com）
 --model, -m       模型名称（默认：claude-sonnet-4-20250514）
+--protocol NAME   线协议：anthropic | openai-chat | openai-responses
+--auth SCHEME     Key 的传递方式：api-key（x-api-key）| bearer（Authorization）
 --thinking        启用扩展思维模式
 --resume [id]     恢复最近的会话，或通过 ID 前缀恢复指定会话
 --sessions        列出所有会话后退出
@@ -71,8 +73,44 @@ node dist/cli.js --sessions
 |------|------|--------|
 | `ANTHROPIC_API_KEY` | API Key | _（无 — 必填）_ |
 | `ANTHROPIC_BASE_URL` | API 端点 | `https://api.anthropic.com` |
+| `TRIUMCODE_PROTOCOL` | 线协议 | `anthropic` |
+| `TRIUMCODE_AUTH` | Key 的传递方式 | 由协议推导 |
 | `MINI_MODEL` | 默认模型 | `claude-sonnet-4-20250514` |
 | `MINI_CONTEXT_WINDOW` | 上下文窗口大小（token） | `200000` |
+
+### 模型协议
+
+TriumCode 会说三种线协议。原因是模型网关对它旗下的每个模型，走的都是该模型上游真正提供的那套 API —— 光有一个 base URL 不够，还得指定协议：
+
+| 协议 | 拼接的端点 | 网关后常见的模型 |
+|------|------------|------------------|
+| `anthropic` | `/v1/messages` | Claude、MiniMax、Qwen |
+| `openai-chat` | `/v1/chat/completions` | DeepSeek、GLM、Kimi、MiMo |
+| `openai-responses` | `/v1/responses` | GPT、Grok |
+
+会话历史在内部始终保存为 Anthropic 的消息形态，所以会话存取、上下文压缩、记忆召回在三种协议下行为一致。网关不接受的可选参数（`thinking`、`effort`、`stream_options`、`reasoning`）会在第一次 400 时被识别，本次会话之后不再发送。
+
+```bash
+# 针对网关单次运行
+triumcode --api-base https://gateway.example/v1 \
+          --protocol openai-chat --model deepseek-v4 "重构 src/tools.ts"
+```
+
+`~/.triumcode/config.json` 里的命名预设自带协议，`/model` 一步就能同时切换后端和协议：
+
+```json
+{
+  "apiBase": "https://api.anthropic.com",
+  "model": "claude-sonnet-4-20250514",
+  "models": {
+    "deep":  { "model": "deepseek-v4", "apiBase": "https://gateway.example/v1", "protocol": "openai-chat", "contextWindow": "128k" },
+    "gpt":   { "model": "gpt-5-luna",  "apiBase": "https://gateway.example/v1", "protocol": "openai-responses", "contextWindow": "200k" },
+    "mimin": { "model": "minimax-m3",  "apiBase": "https://gateway.example/v1", "protocol": "anthropic", "auth": "api-key" }
+  }
+}
+```
+
+`--api-base` 可以照厂商文档原样粘贴，带上 `/v1` 也行：版本段会被规范化掉，各协议再拼上自己的路径。只有当网关要求 Key 的写法与该协议默认不一致时才需要配 `auth` —— `bearer` 发 `Authorization: Bearer`，`api-key` 发 `x-api-key`。
 
 ## REPL 命令
 

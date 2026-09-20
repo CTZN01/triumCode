@@ -12,7 +12,15 @@ import {
 } from "./ui.js";
 import { withRetry } from "./retry.js";
 import {
-    resolveThinkingMode, applyThinkingParams, applyEffortParams, parseEffort,
+    createProvider,
+    defaultAuthFor,
+    type AuthScheme,
+    type ModelProvider,
+    type ModelRequest,
+    type Protocol,
+} from "./providers/index.js";
+import {
+    resolveThinkingMode, parseEffort,
     isUnsupportedParamError, filterThinkingBlocks, type EffortLevel,
 } from "./thinking.js";
 import {
@@ -83,6 +91,11 @@ export interface AgentOptions {
     model?: string;       // --model / -m from CLI; else MINI_MODEL env
     apiKey?: string;      // --api-key from CLI; else ANTHROPIC_API_KEY env
     apiBase?: string;     // --api-base from CLI; else ANTHROPIC_BASE_URL env
+    // Which wire protocol the endpoint speaks. Set per model, because a
+    // gateway routes each model to one of /messages, /chat/completions and
+    // /responses — see src/providers/.
+    protocol?: Protocol;
+    auth?: AuthScheme;    // how the key travels; defaults by protocol
     thinking?: boolean;   // --thinking flag from CLI
     effort?: string;      // --effort flag from CLI
     maxTokens?: number;   // --max-tokens flag from CLI
@@ -93,9 +106,23 @@ export interface AgentOptions {
     sideQuery?: SideQueryFn; // override for the memory-recall side model (tests)
 }
 
+/** What /model <preset> can retarget in one step. */
+export interface ModelTarget {
+    model?: string;
+    apiBase?: string;
+    apiKey?: string;
+    protocol?: Protocol;
+    auth?: AuthScheme;
+    contextWindow?: number;
+}
+
 export class Agent {
-    private client: Anthropic;
+    private provider: ModelProvider;
     private model: string;
+    private protocol: Protocol;
+    private auth: AuthScheme;
+    private apiBase: string;
+    private apiKey: string;
     private messages: Anthropic.MessageParam[] = [];
     private readFileState: ReadFileState = new Map();
     private injectedContextReminder = false;
@@ -141,10 +168,11 @@ export class Agent {
 
     constructor(options?: AgentOptions) {
         this.model = options?.model || process.env.MINI_MODEL || "claude-sonnet-4-20250514";
-        this.client = new Anthropic({
-            baseURL: options?.apiBase || process.env.ANTHROPIC_BASE_URL,
-            apiKey: options?.apiKey || process.env.ANTHROPIC_API_KEY,
-        });
+        this.protocol = options?.protocol ?? "anthropic";
+        this.apiBase = options?.apiBase || process.env.ANTHROPIC_BASE_URL || "";
+        this.apiKey = options?.apiKey || process.env.ANTHROPIC_API_KEY || "";
+        this.auth = options?.auth ?? defaultAuthFor(this.protocol);
+        this.provider = this.buildProvider();
         this.thinkingEnabled = options?.thinking ?? false;
         this.effort = parseEffort(options?.effort);
         this.maxTokens = options?.maxTokens && options.maxTokens > 0
@@ -161,6 +189,14 @@ export class Agent {
         this.permissionMode = permissionMode;
         this.permissionPolicy = new PermissionPolicy(permissionMode);
         this.sideQueryFn = options?.sideQuery ?? null;
+    }
+
+    private buildProvider(): ModelProvider {
+        return createProvider(this.protocol, {
+            apiBase: this.apiBase,
+            apiKey: this.apiKey,
+            auth: this.auth,
+        });
     }
 
     /** Register a callback invoked after each chat() completes. */
@@ -206,24 +242,44 @@ export class Agent {
 
     /**
      * Switch the model mid-session (REPL /model); applies from the next
-     * request. A preset may also retarget the endpoint and key — the client
-     * is rebuilt in that case. The thinking/effort rejection flag resets so
-     * a new endpoint gets one chance to accept the params before the
-     * session adapts to plain requests.
+     * request. A preset may also retarget the endpoint, key, protocol and
+     * context window — anything that changes the request rebuilds the provider.
+     * The thinking/effort rejection flag resets when it does, so a new
+     * endpoint gets one chance to accept the params before the session adapts
+     * to plain requests.
      */
-    setModel(model: string, apiBase?: string, apiKey?: string): void {
-        this.model = model;
-        if (apiBase !== undefined || apiKey !== undefined) {
-            this.client = new Anthropic({
-                baseURL: apiBase || process.env.ANTHROPIC_BASE_URL,
-                apiKey: apiKey || process.env.ANTHROPIC_API_KEY,
-            });
-            this.optionalParamsRejected = false;
+    setModel(target: ModelTarget): void {
+        if (target.model) this.model = target.model;
+        if (target.contextWindow && target.contextWindow > 0) {
+            this.contextWindow = Math.floor(target.contextWindow);
         }
+
+        const protocol = target.protocol ?? this.protocol;
+        const authChanged = target.auth !== undefined && target.auth !== this.auth;
+        const endpointChanged = target.apiBase !== undefined || target.apiKey !== undefined
+            || target.protocol !== undefined || authChanged;
+
+        if (target.apiBase !== undefined) this.apiBase = target.apiBase;
+        if (target.apiKey !== undefined) this.apiKey = target.apiKey;
+        if (target.protocol !== undefined) this.protocol = target.protocol;
+        // Only an explicit auth, or a new protocol carrying its own default,
+        // replaces the scheme. A bare /model<name> must not drop a --auth the
+        // user set: the provider is not rebuilt in that case, so the session
+        // would keep sending the old header while believing it sends the new one.
+        if (target.auth !== undefined) this.auth = target.auth;
+        else if (target.protocol !== undefined) this.auth = defaultAuthFor(protocol);
+
+        if (!endpointChanged) return;
+        this.provider = this.buildProvider();
+        this.optionalParamsRejected = false;
     }
 
     getModel(): string {
         return this.model;
+    }
+
+    getProtocol(): Protocol {
+        return this.protocol;
     }
 
     /** Compact state for the interactive CLI footer. */
@@ -302,20 +358,10 @@ export class Agent {
     private buildSideQuery(): SideQueryFn | null {
         if (this.sideQueryFn) return this.sideQueryFn;
         const model = process.env.MINI_MODEL || this.model;
-        return async (system, user, signal) => {
-            const response = await withRetry(
-                (retrySignal) => this.client.messages.create({
-                    model,
-                    max_tokens: 512,
-                    system,
-                    messages: [{ role: "user", content: user }],
-                    signal: retrySignal,
-                } as any),
-                signal ?? this.abortController?.signal,
-            );
-            const blocks: any[] = (response as any).content ?? [];
-            return blocks.filter((b) => b.type === "text").map((b) => b.text).join("");
-        };
+        return async (system, user, signal) => await withRetry(
+            (retrySignal) => this.provider.completeText({ model, system, user, maxTokens: 512 }, retrySignal),
+            signal ?? this.abortController?.signal,
+        );
     }
 
     // Fire the memory prefetch at the moment the user's message arrives, so
@@ -452,39 +498,34 @@ export class Agent {
     }
 
     /**
-     * Open the message stream for one turn, with thinking/effort params when
-     * they apply.
+     * Open the message stream for one turn. The provider shapes the request
+     * for its own protocol — thinking/effort included when they apply.
      *
      * A 400 naming one of those fields means the endpoint doesn't implement it
-     * — an ordinary situation when ANTHROPIC_BASE_URL points at a
-     * partially-compatible server. Drop them for the rest of the session and
-     * retry once, rather than failing a turn that would otherwise work.
+     * — an ordinary situation when a gateway fronts a model that predates them.
+     * Drop them for the rest of the session and retry once, rather than failing
+     * a turn that would otherwise work.
      */
     private async openStream(
         system: Anthropic.TextBlockParam[],
         tools: Anthropic.Tool[], 
         messages: Anthropic.MessageParam[],
-    ): Promise<any> {
-        const base: Record<string, any> = {
+    ): Promise<AsyncIterable<any>> {
+        const request = (plain: boolean): ModelRequest => ({
             model: this.model,
-            max_tokens: this.maxTokens,
+            maxTokens: this.maxTokens,
             system,
             messages,
             tools,
-            stream: true,
-        };
-
-        const tuned = { ...base };
-        if (!this.optionalParamsRejected) {
-            applyThinkingParams(tuned, resolveThinkingMode(this.model, this.thinkingEnabled), this.maxTokens);
-            applyEffortParams(tuned, this.effort);
-        }
+            thinkingMode: plain ? "disabled" : resolveThinkingMode(this.model, this.thinkingEnabled),
+            effort: plain ? null : this.effort,
+        });
 
         try {
             // withRetry wraps the API call: 429/503/529 and network
             // errors are retried with exponential backoff + jitter.
             return await withRetry(
-                (signal) => this.client.messages.create({ ...tuned, signal } as any),
+                (signal) => this.provider.stream(request(false), signal),
                 this.abortController?.signal,
             );
         } catch (e: any) {
@@ -493,7 +534,7 @@ export class Agent {
             this.optionalParamsRejected = true;
             printInfo(`endpoint does not support thinking/effort (${briefApiError(e)}) — continuing without them`);
             return await withRetry(
-                (signal) => this.client.messages.create({ ...base, signal } as any),
+                (signal) => this.provider.stream(request(true), signal),
                 this.abortController?.signal,
             );
         }

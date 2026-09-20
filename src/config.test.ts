@@ -10,7 +10,10 @@ import { tmpdir } from "node:os";
 // query below: a cached module would keep reporting the first test's config.
 let caseId = 0;
 
-const ENV_KEYS = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "MINI_MODEL", "TRIUMCODE_EFFORT", "MINI_CONTEXT_WINDOW"] as const;
+const ENV_KEYS = [
+    "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "MINI_MODEL", "TRIUMCODE_EFFORT",
+    "MINI_CONTEXT_WINDOW", "TRIUMCODE_PROTOCOL", "TRIUMCODE_AUTH",
+] as const;
 
 async function loadConfig(
     saved: Record<string, unknown> | null,
@@ -218,15 +221,63 @@ test("getModelPresets reads the models map and drops malformed entries", async (
         models: {
             mimo: { model: "mimo-v2.5" },
             sonnet: { model: "claude-sonnet-4-5", apiBase: "https://api.anthropic.com" },
+            // A gateway serves each model through one of its APIs, so a preset
+            // has to carry the protocol, the auth header, and the window the
+            // model actually publishes.
+            deep: {
+                model: "deepseek-v4",
+                apiBase: "https://opencode.ai/zen/go/v1",
+                protocol: "openai-chat",
+                auth: "bearer",
+                contextWindow: "128k",
+            },
+            typo: { model: "whatever", protocol: "openai-wide" },
             broken: { apiBase: "https://no.model/" },
         },
     });
     t.after(restore);
 
     const presets = mod.getModelPresets();
-    assert.deepEqual(presets.mimo, { model: "mimo-v2.5", apiBase: undefined, apiKey: undefined });
+    assert.deepEqual(presets.mimo, {
+        model: "mimo-v2.5", apiBase: undefined, apiKey: undefined,
+        protocol: undefined, auth: undefined, contextWindow: undefined,
+    });
     assert.equal(presets.sonnet?.apiBase, "https://api.anthropic.com");
+    assert.equal(presets.deep?.protocol, "openai-chat");
+    assert.equal(presets.deep?.auth, "bearer");
+    assert.equal(presets.deep?.contextWindow, 128_000);
+    assert.equal(presets.typo?.protocol, undefined, "an unknown protocol is not guessed at");
     assert.equal(presets.broken, undefined);
+});
+
+test("protocol resolves by precedence and auth derives from it", async (t) => {
+    const { mod, restore } = await loadConfig(
+        { apiKey: "k", apiBase: "https://gateway.example/v1", protocol: "openai-chat" },
+        { TRIUMCODE_PROTOCOL: "openai-responses" },
+    );
+    t.after(restore);
+
+    const flagged = mod.resolveConfigDetailed({ protocol: "anthropic" });
+    assert.equal(flagged.config.protocol, "anthropic");
+    assert.equal(flagged.sources.protocol, "flag");
+    // Anthropic's own scheme wins when the protocol changes under it.
+    assert.equal(flagged.config.auth, "api-key");
+    assert.equal(flagged.sources.auth, "default");
+
+    const fromConfig = mod.resolveConfigDetailed({});
+    assert.equal(fromConfig.config.protocol, "openai-chat", "the saved value outranks env");
+    assert.equal(fromConfig.config.auth, "bearer");
+});
+
+test("protocol defaults to anthropic, and its auth to x-api-key", async (t) => {
+    const { mod, restore } = await loadConfig(null, {});
+    t.after(restore);
+
+    const { config, sources } = mod.resolveConfigDetailed({});
+    assert.equal(config.protocol, "anthropic");
+    assert.equal(sources.protocol, "default");
+    assert.equal(config.auth, "api-key");
+    assert.equal(sources.auth, "default");
 });
 
 test("getModelPresets returns an empty set without a models map", async (t) => {
