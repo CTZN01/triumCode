@@ -8,6 +8,16 @@ export const TOOL_RESULT_PERSIST_THRESHOLD = 30_000;
 export const TOOL_RESULT_TRUNCATE_THRESHOLD = 50_000;
 export const DEFAULT_CONTEXT_WINDOW = 200_000;
 
+// Tool-output budget, as a fraction of the usable window. The budget runs when
+// utilization crosses the trigger and clips back down to the low-water mark.
+// The gap between the two is the point: see budget().
+export const BUDGET_TRIGGER = 0.6;
+export const BUDGET_LOW_WATER = 0.45;
+
+// A clipped tool result keeps this much of itself, so the model still sees
+// what the call returned before deciding whether to re-run it.
+const BUDGETED_PREVIEW_CHARS = 500;
+
 const RESULT_DIR = join(os.homedir(), ".mini-claude", "tool-results");
 const PREVIEW_CHARS = 2_000;
 
@@ -75,9 +85,18 @@ function replaceToolResults(messages: Message[], replacer: (block: Block, index:
 }
 
 function toolResultCount(messages: Message[]): number {
-    return messages.reduce((count, message) => count +
-        (message.role === "user" && Array.isArray(message.content)
-            ? (message.content as Block[]).filter((block) => block.type === "tool_result").length : 0), 0);
+    return toolResultBlocks(messages).length;
+}
+
+function toolResultBlocks(messages: Message[]): Block[] {
+    const blocks: Block[] = [];
+    for (const message of messages) {
+        if (message.role !== "user" || !Array.isArray(message.content)) continue;
+        for (const block of message.content as Block[]) {
+            if (block.type === "tool_result") blocks.push(block);
+        }
+    }
+    return blocks;
 }
 
 export function estimateTokens(value: unknown): number {
@@ -89,17 +108,59 @@ function snippet(message: Message, label: string, text: string): string {
     return `[${label}]\n${preview}`;
 }
 
+function toolResultChars(messages: Message[]): number {
+    return toolResultBlocks(messages).reduce((sum, block) => sum + textOf(block).length, 0);
+}
+
+/**
+ * How many characters of tool output fit once the conversation is trimmed back
+ * to `targetTokens`. Everything that is not a tool result is fixed cost, so the
+ * tool results absorb the whole difference.
+ */
+function toolResultBudgetChars(messages: Message[], targetTokens: number): number {
+    const fixedChars = JSON.stringify(messages).length - toolResultChars(messages);
+    return Math.max(0, targetTokens * 4 - fixedChars);
+}
+
+/**
+ * Cap the tool output the prompt carries, spending the budget on the newest
+ * results and letting the oldest fall back to a preview.
+ *
+ * This used to walk the other way, which was backwards twice over. It kept the
+ * oldest results whole, ran the budget out partway through, and then clipped
+ * every result after that point to 500 characters — including the file the
+ * model had just read. Unable to see it, the model read it again, which costs
+ * far more than the characters the clip saved.
+ *
+ * Every result costs at least a preview, so that much is spent before any
+ * result is kept whole.
+ */
 function budget(messages: Message[], maxChars: number): Message[] {
-    let remaining = maxChars;
-    return replaceToolResults(messages, (block) => {
-        const text = textOf(block);
-        if (text.length <= remaining) {
-            remaining -= text.length;
-            return null;
+    const blocks = toolResultBlocks(messages);
+    const kept = new Set<Block>();
+    let straddle: Block | null = null;
+    let straddleChars = 0;
+    let remaining = maxChars - blocks.length * BUDGETED_PREVIEW_CHARS;
+
+    for (let i = blocks.length - 1; i >= 0 && remaining > 0; i--) {
+        const length = textOf(blocks[i]).length;
+        if (length <= remaining) {
+            remaining -= length;
+            kept.add(blocks[i]);
+            continue;
         }
-        const kept = Math.max(500, remaining);
-        remaining = 0;
-        return snippet(block as Message, "tool result budgeted", truncateResult(text, kept));
+        // The one block the budget runs out inside keeps as much of its head
+        // as is left, so the boundary does not lose a result entirely.
+        straddle = blocks[i];
+        straddleChars = remaining;
+        break;
+    }
+
+    return replaceToolResults(messages, (block) => {
+        if (kept.has(block)) return null;
+        const text = textOf(block);
+        const limit = block === straddle ? straddleChars : BUDGETED_PREVIEW_CHARS;
+        return snippet(block as Message, "tool result budgeted", truncateResult(text, limit));
     });
 }
 
@@ -191,7 +252,15 @@ export function compressHistory(messages: Message[], options: CompressionOptions
     const cacheAllowsEdits = !options.cacheHot || utilization >= 0.75;
     let next = messages.map((message) => ({ ...message }));
 
-    if (utilization > 0.5) next = budget(next, utilization > 0.7 ? 15_000 * 4 : 30_000 * 4);
+    // Gated on a high-water mark rather than run continuously. Prompt caching
+    // matches on a byte-exact prefix, so a budget re-derived on every request
+    // slides its boundary by however much the last turn added — and a boundary
+    // that moves invalidates the cache for the whole conversation behind it,
+    // costing more than the characters it saves. Clipping in one jump down to
+    // the low-water mark keeps the prefix byte-stable in between.
+    if (utilization > BUDGET_TRIGGER) {
+        next = budget(next, toolResultBudgetChars(next, effectiveWindow * BUDGET_LOW_WATER));
+    }
     if (utilization > 0.6 && cacheAllowsEdits) next = snip(next);
     if (cold) next = microcompact(next);
 
