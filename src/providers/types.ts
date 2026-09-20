@@ -222,7 +222,12 @@ export async function* readSse(res: Response): AsyncGenerator<Record<string, any
         while (true) {
             const { done, value } = await reader.read();
             if (done) break;
-            buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
+            buffer += decoder.decode(value, { stream: true });
+            // Normalize on the buffer, not on the chunk. A `\r\n` split across
+            // two reads survives the chunk-level replace as `\r\n\r\n` — which
+            // the `\n\n` boundary below does not match. The two frames would
+            // then fuse into one unparseable payload and both be dropped.
+            if (buffer.includes("\r\n")) buffer = buffer.replace(/\r\n/g, "\n");
             let cut = buffer.indexOf("\n\n");
             while (cut >= 0) {
                 const frame = buffer.slice(0, cut);

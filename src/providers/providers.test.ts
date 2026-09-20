@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
 import { Agent } from "../agent.js";
-import { apiRoot, endpoint, PROTOCOLS, parseProtocol, defaultAuthFor } from "./types.js";
+import { apiRoot, endpoint, PROTOCOLS, parseProtocol, defaultAuthFor, readSse } from "./types.js";
 import {
     OpenAIChatProvider, ChatStreamTranslator, toChatMessages, toChatTools,
 } from "./openai-chat.js";
@@ -48,6 +48,33 @@ test("protocols parse case-insensitively and refuse anything else", () => {
     assert.equal(defaultAuthFor("anthropic"), "api-key");
     assert.equal(defaultAuthFor("openai-chat"), "bearer");
     assert.equal(PROTOCOLS.length, 3);
+});
+
+// ── Server-sent events ──────────────────────────────────────
+
+/** A Response whose body arrives in exactly the chunks given. */
+function sseBody(chunks: string[]): Response {
+    const encoder = new TextEncoder();
+    let i = 0;
+    const body = new ReadableStream({
+        pull(controller) {
+            if (i >= chunks.length) { controller.close(); return; }
+            controller.enqueue(encoder.encode(chunks[i++]));
+        },
+    });
+    return new Response(body, { headers: { "content-type": "text/event-stream" } });
+}
+
+test("a CRLF split across two reads does not fuse two SSE frames", async () => {
+    // Normalizing each chunk on arrival leaves the split pair as \r\n\r\n, which
+    // the \n\n frame boundary does not match: the frame never closes, the next
+    // one is absorbed into it, and the joined payload parses as neither.
+    // These chunks cut between the CR and LF of a separator.
+    const events: any[] = [];
+    for await (const event of readSse(sseBody(['data: {"n":1}\r\n\r', '\ndata: {"n":2}\r\n\r\n']))) {
+        events.push(event);
+    }
+    assert.deepEqual(events, [{ n: 1 }, { n: 2 }]);
 });
 
 // ── Request bodies ──────────────────────────────────────────
@@ -168,6 +195,24 @@ test("a truncated chat turn reports max_tokens", () => {
         { choices: [{ delta: {}, finish_reason: "length" }] },
     ]);
     assert.equal(events[events.length - 1].delta.stop_reason, "max_tokens");
+});
+
+test("an index-less tool call gets its own block instead of merging into an indexed one", () => {
+    // The fallback key must not share the key space of real `index` values: a
+    // call that omits `index` would otherwise land on an occupied key, and its
+    // arguments would be appended to the call that owns it.
+    const events = collect(new ChatStreamTranslator(), [
+        { choices: [{ delta: { tool_calls: [{ index: 0, id: "call_a", function: { name: "read_file", arguments: '{"file_path":"a.ts"}' } }] } }] },
+        { choices: [{ delta: { tool_calls: [{ id: "call_b", function: { name: "grep_search", arguments: '{"pattern":"x"}' } }] } }] },
+        { choices: [{ delta: {}, finish_reason: "tool_calls" }] },
+    ]);
+
+    const starts = events.filter((e) => e.type === "content_block_start");
+    assert.equal(starts.length, 2, "the second call opens a block of its own");
+    assert.equal(starts[1].content_block.id, "call_b");
+    assert.equal(starts[1].content_block.name, "grep_search");
+    assert.equal(deltasOf(events, starts[0].index), '{"file_path":"a.ts"}');
+    assert.equal(deltasOf(events, starts[1].index), '{"pattern":"x"}', "no fragment leaks into the other call");
 });
 
 test("responses events rebuild the same block sequence as chat", () => {

@@ -108,7 +108,11 @@ export class ChatStreamTranslator {
     private textIndex: number | null = null;
     private thinkingIndex: number | null = null;
     private tools = new Map<number, { index: number; id: string; name: string }>();
-    private inputKey = 0;
+    // Real `index` values are small non-negative integers, so the fallback
+    // counter starts far above them: an index-less call must not land on a key
+    // an indexed call already owns, or the two merge into one block and the
+    // second call's arguments get appended to the first.
+    private unindexedKey = 1_000_000;
     private inputTokens = 0;
     private outputTokens = 0;
     private finishReason: string | null = null;
@@ -173,7 +177,7 @@ export class ChatStreamTranslator {
         for (const call of delta.tool_calls ?? []) {
             // `index` is positional but not always sent; fall back to arrival
             // order so a second call does not overwrite the first.
-            const key = typeof call.index === "number" ? call.index : this.inputKey++;
+            const key = typeof call.index === "number" ? call.index : this.unindexedKey++;
             let tool = this.tools.get(key);
             if (!tool) {
                 tool = { index: this.nextIndex++, id: call.id ?? `call_${key}`, name: call.function?.name ?? "" };
