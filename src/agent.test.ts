@@ -419,6 +419,30 @@ test("setModel switches the model for the next request and can retarget the endp
     }
 });
 
+test("the session status names the preset, not the model string", () => {
+    // Two presets can serve one model through different endpoints, so the
+    // model id alone does not say which route the session is on.
+    const agent = new Agent({ model: "model-a", apiKey: "k", apiBase: "http://127.0.0.1:9" });
+
+    agent.setModel({ model: "deepseek-flash", label: "deepseek-v4.1-flash-official" });
+    assert.equal(agent.getSessionStatus().model, "deepseek-v4.1-flash-official");
+    assert.equal(agent.getModel(), "deepseek-flash", "the request still carries the model id");
+
+    // Switching by raw id has no preset to name, so the id is the label.
+    agent.setModel({ model: "other-model" });
+    assert.equal(agent.getSessionStatus().model, "other-model");
+
+    // An endpoint-only retarget leaves the model alone, so it leaves the name
+    // alone too — otherwise the footer would lose the route it is describing.
+    agent.setModel({ model: "deepseek-flash", label: "deepseek-v4.1-flash-official" });
+    agent.setModel({ apiBase: "http://127.0.0.1:8" });
+    assert.equal(agent.getSessionStatus().model, "deepseek-v4.1-flash-official");
+
+    // An explicit empty label is a caller saying "there is no preset name".
+    agent.setModel({ model: "deepseek-flash", label: "" });
+    assert.equal(agent.getSessionStatus().model, "deepseek-flash");
+});
+
 test("a bare model switch keeps an explicitly chosen auth scheme", async () => {
     const api = await fakeApi([
         (w) => { w(start(0, { type: "text", text: "" })); w(textDelta(0, "hi")); w(stop(0)); w(finish("end_turn")); },

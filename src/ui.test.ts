@@ -581,6 +581,23 @@ test("session footer stays compact and includes the active state", () => {
     }
 });
 
+test("a long model name gives way to the session state", () => {
+    // A preset name is much longer than a model id, and the footer used to cut
+    // the line from the right — which pushed effort, context and mode off it.
+    const vt = installFakeTty(80);
+    try {
+        ui.printSessionStatus({ model: "deepseek-v4.1-flash-official", effort: "high", contextPercent: 12.4, mode: "plan" });
+        const [blank, line] = vt.screen().split("\n");
+        assert.equal(blank, "");
+        assert.ok(line.length <= 79, `expected <= 79 columns, got ${line.length}: ${line}`);
+        assert.match(line, /\.\.\./, "the name is what gets shortened");
+        assert.match(line, /model: deepseek-v4\.1-flash/);
+        assert.match(line, /mode: plan$/, "the live state survives");
+    } finally {
+        vt.restore();
+    }
+});
+
 test("session footer omits unset effort and plain default mode", () => {
     const vt = installFakeTty();
     try {

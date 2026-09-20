@@ -259,20 +259,39 @@ export function printSessionStatus(status: SessionStatus): void {
     const context = `${percent < 10 ? percent.toFixed(1) : Math.round(percent)}%`;
     // Empty effort/mode segments are dropped — an "effort: default" line
     // tells the user nothing.
-    const parts = [
-        `model: ${status.model}`,
+    const state = [
         status.effort && `effort: ${status.effort}`,
         `context: ${context}`,
         status.mode && `mode: ${status.mode}`,
-    ].filter((p): p is string => Boolean(p));
-    const text = "  " + parts.join(" | ");
+    ].filter((p): p is string => Boolean(p)).join(" | ");
+
+    const indent = "  ";
+    const model = `model: ${status.model}`;
     const cols = process.stdout.columns || 80;
-    const budget = isTty() ? Math.max(20, cols - 1) : text.length;
-    const shown = text.length > budget ? text.slice(0, Math.max(0, budget - 3)) + "..." : text;
+    const budget = isTty() ? Math.max(20, cols - 1) : Infinity;
+    const room = budget - indent.length - (state ? state.length + 3 : 0);
+
+    // The model name is the longest segment and the one that changes least, so
+    // it is the segment that gives way. Cutting the tail instead — as this did —
+    // drops effort, context and mode off the line, and a preset name is easily
+    // long enough to do it.
+    let text: string;
+    if (room >= 8) {
+        const shown = model.length <= room ? model : model.slice(0, room - 3) + "...";
+        text = indent + shown + (state ? ` | ${state}` : "");
+    } else if (room >= 0) {
+        // The state fits but the name does not; the state is what the user
+        // cannot get anywhere else on screen.
+        text = indent + state;
+    } else {
+        const full = indent + model + (state ? ` | ${state}` : "");
+        text = full.slice(0, Math.max(0, budget - 3)) + "...";
+    }
+
     // Every turn, with a blank line above so it doesn't crowd the reply.
     ensureLineBreak();
     console.log();
-    logLine(chalk.dim(shown));
+    logLine(chalk.dim(text));
 }
 
 /** Current status state. Exported for tests. */
