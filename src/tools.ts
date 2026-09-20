@@ -89,15 +89,87 @@ export function getAllTools(): Tool[] {
 // Read-before-edit guard
 // ═══════════════════════════════════════════════════════════════
 
-// Guards two failures: a blind edit (old_string written from memory of a state
-// that was never current), and a stale overwrite (the user edited the file
-// after we read it). The map is threaded in by the caller, not held here —
-// "has this been read" is per-conversation, and two agents in one process must
-// not license each other's writes.
-export type ReadFileState = Map<string, number>;
+// Guards three failures: a blind edit (old_string written from memory of a
+// state that was never current), a stale overwrite (the user edited the file
+// after we read it), and a repeat read (the model asking again for content it
+// already has, which costs a full file's worth of tokens for nothing). The map
+// is threaded in by the caller, not held here — "has this been read" is
+// per-conversation, and two agents in one process must not license each
+// other's writes.
+export interface ReadRecord {
+    /** mtime at the last read, for the stale-write guard. */
+    mtimeMs: number;
+    /**
+     * Line ranges already handed to the model, merged and sorted. A repeat
+     * read of a range in here is answered with a notice instead of the
+     * content — but only while that content is still in the conversation, so
+     * the caller drops these when compression evicts the result.
+     */
+    ranges: Array<[number, number]>;
+    /** Line count at the last read, so a shrunk file invalidates the ranges. */
+    totalLines: number;
+}
 
-function recordRead(absPath: string, state: ReadFileState): void {
-    try { state.set(absPath, statSync(absPath).mtimeMs); } catch { /* raced with a delete */ }
+export type ReadFileState = Map<string, ReadRecord>;
+
+/**
+ * Note that the model has seen `range` of this file.
+ *
+ * Without a range (a write, which the model authored itself) the ranges are
+ * cleared rather than kept: the file changed, so anything the model was shown
+ * before is no longer what is on disk. The mtime is still recorded, which is
+ * what lets a write follow a read without a second read in between.
+ */
+function recordRead(
+    absPath: string,
+    state: ReadFileState,
+    range?: [number, number],
+    totalLines?: number,
+): void {
+    let mtimeMs: number;
+    try {
+        mtimeMs = statSync(absPath).mtimeMs;
+    } catch {
+        return;  // raced with a delete
+    }
+
+    const previous = state.get(absPath);
+    const carried = previous && previous.mtimeMs === mtimeMs ? previous.ranges : [];
+    state.set(absPath, {
+        mtimeMs,
+        ranges: range ? mergeRange(carried, range) : [],
+        totalLines: totalLines ?? (previous && previous.mtimeMs === mtimeMs ? previous.totalLines : 0),
+    });
+}
+
+/** Insert a range into a sorted, merged list. */
+function mergeRange(ranges: Array<[number, number]>, next: [number, number]): Array<[number, number]> {
+    const merged: Array<[number, number]> = [];
+    for (const range of [...ranges, next].sort((a, b) => a[0] - b[0])) {
+        const last = merged[merged.length - 1];
+        if (last && range[0] <= last[1] + 1) last[1] = Math.max(last[1], range[1]);
+        else merged.push([range[0], range[1]]);
+    }
+    return merged;
+}
+
+// Whether the model has already been shown this exact range of an unchanged
+// file. Anything that could make the earlier content wrong — a different
+// mtime, a different line count — answers false.
+function alreadyShown(
+    absPath: string,
+    state: ReadFileState,
+    range: [number, number],
+    totalLines: number,
+): boolean {
+    const record = state.get(absPath);
+    if (!record || record.totalLines !== totalLines) return false;
+    try {
+        if (statSync(absPath).mtimeMs !== record.mtimeMs) return false;
+    } catch {
+        return false;
+    }
+    return record.ranges.some(([start, end]) => start <= range[0] && end >= range[1]);
 }
 
 // Null when the write may proceed, or the message to hand back to the model.
@@ -113,10 +185,22 @@ function staleWrite(absPath: string, verb: string, state: ReadFileState): string
     } catch (e: any) {
         return `Error: cannot stat ${absPath}: ${e.message}`;
     }
-    if (current !== seen) {
+    if (current !== seen.mtimeMs) {
         return `Warning: ${absPath} was modified externally since you last read it. Read it again before ${verb} it, so you are working from its current contents.`;
     }
     return null;
+}
+
+// Only reached for a tool that is not in the registry, which cannot happen
+// through the agent loop — the model can only call tools it was given.
+const DEFAULT_MAX_RESULT_CHARS = 50_000;
+
+/**
+ * The per-tool result cap, in characters. Each tool declares its own, so a
+ * 50 KB file listing passes through whole while a 50 KB grep output does not.
+ */
+export function toolResultLimit(name: string): number {
+    return getTool(name)?.maxResultSizeChars ?? DEFAULT_MAX_RESULT_CHARS;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -125,24 +209,84 @@ function staleWrite(absPath: string, verb: string, state: ReadFileState): string
 
 // ─── read_file ───────────────────────────────────────────────
 
-function readFileImpl(input: { file_path: string }): string {
+// A read returns at most this many lines unless the model asks for fewer.
+// Without a cap the only limit was the tool result size, and a result over
+// that limit came back as a short preview of a file the model then could not
+// see — so the cap belongs here, where the model can page past it.
+export const READ_DEFAULT_LINES = 2_000;
+const READ_MAX_LINES = 5_000;
+// Past this the file is not something to read into a conversation at all.
+const READ_MAX_BYTES = 20 * 1024 * 1024;
+
+type ReadResult =
+    | { ok: true; text: string; start: number; end: number; totalLines: number }
+    | { ok: false; message: string };
+
+// A binary file decoded as utf-8 is a wall of replacement characters: real
+// tokens, no information, and it displaces whatever the model was working on.
+function looksBinary(buffer: Buffer): boolean {
+    return buffer.subarray(0, 8_000).includes(0);
+}
+
+// The model does not always send a number, and the schema is not enforced by
+// the API. A NaN that reaches the line maths renders as "NaN | line" all the
+// way down the result.
+function wholeNumber(value: unknown, fallback: number): number {
+    const n = Math.floor(Number(value));
+    return Number.isFinite(n) ? n : fallback;
+}
+
+function readFileImpl(input: { file_path: string; offset?: number; limit?: number }): ReadResult {
+    let buffer: Buffer;
     try {
-        const content = readFileSync(input.file_path, "utf-8");
-        const lines = content.split("\n");
-        return lines
-            .map((line, i) => `${String(i + 1).padStart(4)} | ${line}`)
-            .join("\n");
+        buffer = readFileSync(input.file_path);
     } catch (e: any) {
-        return `Error reading file: ${e.message}`;
+        return { ok: false, message: `Error reading file: ${e.message}` };
     }
+
+    if (looksBinary(buffer)) {
+        return { ok: false, message: `Error: ${input.file_path} is a binary file. read_file returns text only — use grep_search to find what you need in it.` };
+    }
+    if (buffer.byteLength > READ_MAX_BYTES) {
+        return { ok: false, message: `Error: ${input.file_path} is ${Math.round(buffer.byteLength / 1_048_576)} MB, too large to read. Use grep_search to find what you need, or read it with offset/limit through run_command.` };
+    }
+
+    const lines = buffer.toString("utf-8").split("\n");
+    const totalLines = lines.length;
+
+    const start = Math.max(1, wholeNumber(input.offset, 1));
+    if (start > totalLines) {
+        return { ok: false, message: `Error: offset ${start} is past the end of ${input.file_path}, which has ${totalLines} lines.` };
+    }
+
+    const count = Math.min(Math.max(1, wholeNumber(input.limit, READ_DEFAULT_LINES)), READ_MAX_LINES);
+    const end = Math.min(totalLines, start + count - 1);
+
+    // Pad to the widest line number in this slice rather than to a fixed
+    // width: on a file of a few hundred lines that is most of the padding.
+    const width = String(end).length;
+    let text = lines
+        .slice(start - 1, end)
+        .map((line, i) => `${String(start + i).padStart(width)} | ${line}`)
+        .join("\n");
+
+    if (end < totalLines) {
+        text += `\n\n[lines ${start}-${end} of ${totalLines}. Continue with offset=${end + 1}.]`;
+    }
+
+    return { ok: true, text, start, end, totalLines };
 }
 
 const readFileTool = register({
     name: "read_file",
-    description: "Read the contents of a file. Returns the file content with line numbers.",
+    description: "Read the contents of a text file, with line numbers. Returns up to 2000 lines by default; pass offset and limit to page through a longer file. Reading a range you have already been shown returns a short notice instead of the content again.",
     inputSchema: {
         type: "object",
-        properties: { file_path: { type: "string", description: "The path to the file to read" } },
+        properties: {
+            file_path: { type: "string", description: "The path to the file to read" },
+            offset: { type: "number", description: "Line number to start at, 1-based. Defaults to 1." },
+            limit: { type: "number", description: "How many lines to return, at most 5000. Defaults to 2000." },
+        },
         required: ["file_path"],
     },
     isConcurrencySafe: () => true,
@@ -151,14 +295,22 @@ const readFileTool = register({
     maxResultSizeChars: 100_000,
 
     async call(input, ctx) {
-        const result = readFileImpl(input as { file_path: string });
-        if (ctx.readFileState && !result.startsWith("Error")) {
-            recordRead(resolve(input.file_path), ctx.readFileState);
+        const result = readFileImpl(input as { file_path: string; offset?: number; limit?: number });
+        if (!result.ok) return result.message;
+
+        const absPath = resolve(input.file_path);
+        const range: [number, number] = [result.start, result.end];
+
+        if (ctx.readFileState && alreadyShown(absPath, ctx.readFileState, range, result.totalLines)) {
+            return `${input.file_path} is unchanged since you read lines ${result.start}-${result.end} of it, and that content is already above in this conversation. Pass a different offset or limit if you need another part of the file.`;
         }
-        return result;
+        if (ctx.readFileState) {
+            recordRead(absPath, ctx.readFileState, range, result.totalLines);
+        }
+        return result.text;
     },
 
-    prompt: () => "Always read a file before editing or writing to it.",
+    prompt: () => "Always read a file before editing or writing to it. read_file returns the first 2000 lines unless you pass offset/limit — page through a longer file rather than assuming you have seen all of it.",
 });
 
 // ─── write_file ──────────────────────────────────────────────
