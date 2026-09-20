@@ -5,7 +5,7 @@ import * as os from "node:os";
 import { getActiveToolDefinitions, type ReadFileState, type ToolContext } from "./tools.js";
 import { ToolExecutor } from "./tool-executor.js";
 import { envModel } from "./config.js";
-import { buildStaticSystemPrompt, buildDynamicSystemContext, buildUserContextReminder } from "./prompt.js";
+import { buildStaticSystemPrompt, buildTurnContextReminder } from "./prompt.js";
 import {
     printToolCall, printToolResult, writeStream, endStream, printCostReport,
     beginStatus, updateStatus, endStatus, printThinkingDuration, pickStatusVerb, printInfo, printTurnEnd,
@@ -40,20 +40,18 @@ import {
 // trigger that constantly.
 const DEFAULT_MAX_TOKENS = 32_000;
 
-// System prompt as an array of TextBlockParam. The first block (persona +
-// tool guidance) carries cache_control so it is reused across turns without
-// being re-processed by the model. The second block (environment, git,
-// CLAUDE.md) is rebuilt each turn.
+// The system prompt, as one cacheable block.
+//
+// One block, not two, and nothing volatile in it. Prompt caching matches on a
+// byte-exact prefix, so any byte that changes here re-processes the entire
+// conversation behind it — which is why git status and the date live in the
+// per-turn reminder instead (see buildTurnContextReminder).
 function buildSystemBlocks(planMode: boolean): Anthropic.TextBlockParam[] {
     return [
         {
             type: "text",
             text: buildStaticSystemPrompt(planMode),
             cache_control: { type: "ephemeral" },
-        },
-        {
-            type: "text",
-            text: buildDynamicSystemContext(),
         },
     ];
 }
@@ -80,8 +78,15 @@ function briefApiError(error: any): string {
 }
 
 export interface AgentUsage {
+    /** Prompt tokens billed at full price — the ones the cache did not serve. */
     input: number;
     output: number;
+    /** Prompt tokens served from cache (billed at ~0.1x). */
+    cacheRead: number;
+    /** Prompt tokens written to cache (billed at ~1.25x). */
+    cacheWrite: number;
+    /** cacheRead / (input + cacheRead + cacheWrite), 0 when nothing was sent. */
+    cacheHitRate: number;
     cost: number;
 }
 
@@ -126,7 +131,6 @@ export class Agent {
     private apiKey: string;
     private messages: Anthropic.MessageParam[] = [];
     private readFileState: ReadFileState = new Map();
-    private injectedContextReminder = false;
     private thinkingEnabled: boolean;
     private effort: EffortLevel | null;
     private maxTokens: number;
@@ -144,8 +148,12 @@ export class Agent {
     public isProcessing = false;
 
     // ── Token usage tracking ────────────────────────────────────
+    // `input` counts only uncached prompt tokens; cached ones are tracked
+    // separately, because that split is the whole point of the number.
     private totalInputTokens = 0;
     private totalOutputTokens = 0;
+    private totalCacheReadTokens = 0;
+    private totalCacheWriteTokens = 0;
     private lastRequestAt = 0;
 
     // ── Auto-save callback ──────────────────────────────────────
@@ -307,11 +315,39 @@ export class Agent {
         this.abortController?.abort();
     }
 
+    /**
+     * Record the prompt-side half of a request's usage.
+     *
+     * Anthropic reports it once, in message_start. The OpenAI translators
+     * report it in their closing message_delta, so the caller decides which
+     * event is authoritative for the protocol — see the stream loop.
+     */
+    private addPromptUsage(usage: any): void {
+        this.totalInputTokens += usage.input_tokens ?? 0;
+        this.totalCacheReadTokens += usage.cache_read_input_tokens ?? 0;
+        this.totalCacheWriteTokens += usage.cache_creation_input_tokens ?? 0;
+    }
+
     /** Token usage for the current session. */
     getUsage(): AgentUsage {
-        // Rough cost estimate: $3/M input, $15/M output (Claude Sonnet-tier).
-        const cost = (this.totalInputTokens * 3 + this.totalOutputTokens * 15) / 1_000_000;
-        return { input: this.totalInputTokens, output: this.totalOutputTokens, cost };
+        // Rough cost estimate, Sonnet-tier base rates: $3/M input, $15/M
+        // output, with cached prompt tokens at 0.1x and cache writes at 1.25x.
+        const cost = (
+            this.totalInputTokens * 3
+            + this.totalCacheReadTokens * 0.3
+            + this.totalCacheWriteTokens * 3.75
+            + this.totalOutputTokens * 15
+        ) / 1_000_000;
+
+        const promptTokens = this.totalInputTokens + this.totalCacheReadTokens + this.totalCacheWriteTokens;
+        return {
+            input: this.totalInputTokens,
+            output: this.totalOutputTokens,
+            cacheRead: this.totalCacheReadTokens,
+            cacheWrite: this.totalCacheWriteTokens,
+            cacheHitRate: promptTokens > 0 ? this.totalCacheReadTokens / promptTokens : 0,
+            cost,
+        };
     }
 
     showCost(): void {
@@ -330,15 +366,12 @@ export class Agent {
     /** Replace the conversation with a previously saved history. */
     loadHistory(messages: Anthropic.MessageParam[]): void {
         this.messages = messages;
-        // Assume the context reminder was already part of the saved state.
-        this.injectedContextReminder = true;
     }
 
     /** Wipe the conversation. Called by /clear. */
     clearHistory(): void {
         this.messages = [];
         this.contextUtilization = 0;
-        this.injectedContextReminder = false;
         // Memories already injected belonged to the cleared conversation.
         this.alreadySurfacedMemories.clear();
         this.sessionMemoryBytes = 0;
@@ -464,17 +497,21 @@ export class Agent {
     }
 
     async chat(userText: string): Promise<void> {
-        // On the first call, prepend the context reminder (CLAUDE.md, date)
-        // to the user message. This keeps it out of the cached system blocks
-        // while ensuring the model sees project instructions early.
-        let userContent: string = userText;
-        if (!this.injectedContextReminder) {
-            const reminder = buildUserContextReminder();
-            if (reminder) userContent = `${reminder}\n\n${userText}`;
-            this.injectedContextReminder = true;
-        }
-
-        this.messages.push({ role: "user", content: userContent });
+        // The volatile half of the context — git state, the date, which
+        // deferred tools are still unloaded — rides on the user's message
+        // rather than the system prompt. This message is new every turn, so
+        // nothing behind it is invalidated; the same bytes in the system prompt
+        // would cost a re-read of the whole conversation every time the agent
+        // wrote a file.
+        //
+        // Blocks rather than a bare string: withCacheBreakpoints attaches the
+        // tail cache breakpoint to a content block, so a string message would
+        // leave the turn with nothing to cache.
+        const reminder = buildTurnContextReminder();
+        this.messages.push({
+            role: "user",
+            content: [{ type: "text", text: `${reminder}\n\n${userText}` }],
+        });
         if (shouldAutoCompact(this.messages, this.contextWindow)) this.compact();
 
         // Set up abort controller for this turn.
@@ -594,6 +631,11 @@ export class Agent {
             // ── Streaming accumulation state ────────────────────────
             const assistantContent: Anthropic.ContentBlockParam[] = [];
             let currentText = "";
+            // Which event carries the prompt-side usage differs by protocol:
+            // Anthropic sends it in message_start and echoes it in
+            // message_delta, the OpenAI translators only in message_delta.
+            // Taking the first one that arrives counts it exactly once.
+            let promptUsageCounted = false;
             // "end_turn" / "tool_use" / "max_tokens" / "refusal" / ...
             // max_tokens is the one that matters: it means the turn was cut off.
             let stopReason: string | null = null;
@@ -739,11 +781,22 @@ export class Agent {
                             }
                             break;
                         }
+                        case "message_start": {
+                            const usage = (event as any).message?.usage;
+                            if (usage) {
+                                this.addPromptUsage(usage);
+                                promptUsageCounted = true;
+                            }
+                            break;
+                        }
                         case "message_delta": {
                             // Track token usage from the stream.
                             const usage = (event as any).usage;
                             if (usage) {
-                                this.totalInputTokens += usage.input_tokens ?? 0;
+                                if (!promptUsageCounted) {
+                                    this.addPromptUsage(usage);
+                                    promptUsageCounted = true;
+                                }
                                 this.totalOutputTokens += usage.output_tokens ?? 0;
                             }
                             // Discarding this was why a truncated turn looked

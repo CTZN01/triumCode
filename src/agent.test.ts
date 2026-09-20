@@ -19,7 +19,7 @@ const MESSAGE_START = {
     message: {
         id: "msg_1", type: "message", role: "assistant", model: "m",
         content: [], stop_reason: null, stop_sequence: null,
-        usage: { input_tokens: 1, output_tokens: 0 },
+        usage: { input_tokens: 1, output_tokens: 0, cache_read_input_tokens: 4 },
     },
 };
 
@@ -273,6 +273,55 @@ test("a clean finish prints no turn-end notice", async () => {
         (w) => { w(start(0, { type: "text", text: "" })); w(textDelta(0, "all done")); w(stop(0)); w(finish("end_turn")); },
     ]);
     assert.doesNotMatch(output, /^ {2}! /m, `unexpected notice in:\n${output}`);
+});
+
+// ── Prompt caching ──────────────────────────────────────────
+
+test("volatile context rides on the user message, not the cached system prompt", async () => {
+    const { api } = await runChat([
+        (w) => { w(start(0, { type: "text", text: "" })); w(textDelta(0, "hi")); w(stop(0)); w(finish("end_turn")); },
+    ]);
+
+    // One cacheable block, and nothing in it may change between turns. Prompt
+    // caching matches on a byte-exact prefix, so git status sitting here (as it
+    // did) re-processed the whole conversation every time the agent wrote a
+    // file — the single largest source of wasted tokens in the loop.
+    const system = api.bodies[0].system;
+    assert.equal(system.length, 1, "the system prompt is one cacheable block");
+    assert.equal(system[0].cache_control.type, "ephemeral");
+    assert.match(system[0].text, /You are TriumCode/);
+    assert.doesNotMatch(system[0].text, /# currentDate/);
+    assert.doesNotMatch(system[0].text, /Git branch:/);
+
+    // The date and the git state ride on the user's message instead. That
+    // message is new every turn, so it invalidates nothing behind it.
+    const first = api.bodies[0].messages[0] as any;
+    assert.equal(first.role, "user");
+    assert.match(first.content[0].text, /^<system-reminder>/);
+    assert.match(first.content[0].text, /# currentDate/);
+    assert.match(first.content[0].text, /do the thing/);
+});
+
+test("prompt usage is counted once when the gateway echoes it", async () => {
+    // Anthropic reports the prompt side in message_start and repeats it in
+    // message_delta; MiMo echoes it in both. Taking whichever arrives first
+    // counts it exactly once — and reading only message_delta, as this did,
+    // counted nothing at all on a first-party endpoint, where the delta
+    // carries output_tokens and nothing else.
+    const { agent } = await runChat([
+        (w) => {
+            w(start(0, { type: "text", text: "" }));
+            w(textDelta(0, "hi"));
+            w(stop(0));
+            w({ type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { input_tokens: 999, output_tokens: 5 } });
+        },
+    ]);
+
+    const usage = agent.getUsage();
+    assert.equal(usage.input, 1, "the message_start count, not the echo");
+    assert.equal(usage.output, 5);
+    assert.equal(usage.cacheRead, 4);
+    assert.equal(usage.cacheHitRate, 4 / 5);
 });
 
 // ── Memory recall ────────────────────────────────────────────

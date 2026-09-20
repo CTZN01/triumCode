@@ -125,8 +125,23 @@ export function getGitContext(): string {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// System prompt assembly — static (cacheable) + dynamic blocks
+// System prompt assembly — one cacheable block + a volatile reminder
 // ═══════════════════════════════════════════════════════════════
+//
+// The split here is not cosmetic, it is the difference between a cache hit and
+// a full re-read of the conversation.
+//
+// The system prompt sits at the front of the request, ahead of every message,
+// and prompt caching matches on a byte-exact prefix. Anything that changes
+// between two requests therefore invalidates the cache not just for itself but
+// for the entire history behind it — the whole conversation is re-processed at
+// full price. Git status changes every time the agent writes a file, which is
+// constantly, so a `git status` call in the system prompt costs a full history
+// re-read on almost every write.
+//
+// So: everything session-stable goes in the system prompt (cached once), and
+// everything volatile goes in a <system-reminder> prepended to the user's
+// message, which is a new message every turn and invalidates nothing.
 
 const PERSONA = `You are TriumCode, an interactive coding agent that helps with software engineering tasks.
 
@@ -224,19 +239,39 @@ You are in strict plan mode. ALWAYS present a plan before making any changes, ev
 During planning you may read files and search code, but do NOT edit, write, or run commands that modify files.
 Execute only after the user explicitly approves the plan.`;
 
-// Static block: persona + tool usage guidance. Constant within a session,
-// cacheable across turns via prompt caching.
+// The system prompt: everything constant for the session, in the order the
+// model reads it. Cached as one block by the caller.
+//
+// The memory index is the one part that can change mid-session (the agent
+// saves a memory, and the index should show it on the next turn). That costs
+// one cache miss per save, which is rare and worth the freshness.
 export function buildStaticSystemPrompt(planMode = false): string {
     const toolBlock = buildToolPromptBlock();
     const skillBlock = buildSkillPromptBlock();
     const persona = planMode ? PERSONA + PLAN_MODE : PERSONA;
-    return [persona, toolBlock, skillBlock].filter(Boolean).join("\n\n");
+    return [
+        persona,
+        toolBlock,
+        skillBlock,
+        buildEnvironmentContext(),
+        loadClaudeMd(),
+        buildMemoryPromptSection(),
+    ].filter(Boolean).join("\n\n");
 }
 
 // Probe common development tools on Windows to give the model actionable
-// context about .cmd shims and available runtimes. Runs once per turn but
-// commands are fast (< 50ms) and results are deterministic.
+// context about .cmd shims and available runtimes. The result cannot change
+// within a session, so it is probed once and memoized — it used to spawn two
+// processes on every single request.
+let probedTools: string | null = null;
+
 function probeWindowsTools(): string {
+    if (probedTools !== null) return probedTools;
+    probedTools = probeWindowsToolsUncached();
+    return probedTools;
+}
+
+function probeWindowsToolsUncached(): string {
     if (process.platform !== "win32") return "";
 
     const probes: string[] = [];
@@ -262,19 +297,13 @@ function probeWindowsTools(): string {
     return `\nKnown tool paths:\n${probes.map(p => `- ${p}`).join("\n")}`;
 }
 
-// Dynamic block: environment, git, CLAUDE.md, memory index, deferred tools.
-// Rebuilt each turn because git status, deferred tools and the memory index
-// (a save mid-session must be visible on the next turn) can change.
-export function buildDynamicSystemContext(): string {
+// Where the session is running. Constant for the whole session, so it belongs
+// in the cached system prompt rather than in the per-turn reminder.
+function buildEnvironmentContext(): string {
     const platform = `${os.platform()} ${os.arch()}`;
     const shell = process.platform === "win32"
         ? (process.env.ComSpec || "cmd.exe")
         : (process.env.SHELL || "/bin/sh");
-
-    const deferred = getDeferredToolNames();
-    const deferredLine = deferred.length > 0
-        ? `\n\nDeferred tools (activate via tool_search): ${deferred.join(", ")}`
-        : "";
 
     return [
         "# Environment",
@@ -282,22 +311,27 @@ export function buildDynamicSystemContext(): string {
         `Platform: ${platform}`,
         `Shell: ${shell}`,
         probeWindowsTools(),
-        getGitContext(),
-        deferredLine,
-        loadClaudeMd(),
-        buildMemoryPromptSection(),
     ].filter((s) => s.length > 0).join("\n");
 }
 
-// User-context reminder: CLAUDE.md + current date. Injected once as a
-// <system-reminder> block in the first user message, so the model sees it
-// without it being part of the (cached) system prompt.
-export function buildUserContextReminder(): string {
+// The volatile half: git state, the date, and which deferred tools are still
+// behind tool_search. Prepended to the user's message for the turn.
+//
+// This must not move into the system prompt. Git status changes on every file
+// the agent writes, and a changing byte in the system prompt invalidates the
+// cache for the whole conversation behind it. Here it costs its own few dozen
+// tokens, on a message that is new anyway, and invalidates nothing.
+export function buildTurnContextReminder(): string {
     const date = new Date().toISOString().split("T")[0];
-    const claudeMd = loadClaudeMd();
 
     const parts: string[] = [];
-    if (claudeMd) parts.push(claudeMd);
+    const git = getGitContext().trim();
+    if (git) parts.push(git);
+
+    const deferred = getDeferredToolNames();
+    if (deferred.length > 0) {
+        parts.push(`Deferred tools (activate via tool_search): ${deferred.join(", ")}`);
+    }
     parts.push(`# currentDate\nToday's date is ${date}.`);
 
     return `<system-reminder>\n${parts.join("\n\n")}\n</system-reminder>`;
