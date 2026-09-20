@@ -598,6 +598,14 @@ test("a long model name gives way to the session state", () => {
     }
 });
 
+test("the model picker stays within the terminal width", () => {
+    const rendered = ui.renderPickStrip([
+        "mimo-v2.5", "mimo-v2.5-pro", "deepseek-v4.1-flash-official", "deepseek-v4.1-flash-volc",
+    ], 2, 38).replace(/\x1b\[[0-9;]*m/g, "");
+    assert.ok(rendered.length <= 38, `expected <= 38 columns, got ${rendered.length}: ${rendered}`);
+    assert.match(rendered, /\[dee\.\.\.\]/);
+});
+
 test("session footer omits unset effort and plain default mode", () => {
     const vt = installFakeTty();
     try {

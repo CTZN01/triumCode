@@ -559,8 +559,15 @@ export function printQuestion(question: string, options?: string[]): void {
 // One line of a Codex-style strip picker: `low  [high]  xhigh`. The selection
 // is bracketed and accent-colored; ASCII only, so a zh-CN terminal keeps
 // every column aligned. Redrawn in place with \r\x1b[K by the caller.
-export function renderPickStrip(options: readonly string[], selected: number): string {
-    return options
+export function renderPickStrip(options: readonly string[], selected: number, maxWidth = Infinity): string {
+    const separatorWidth = Math.max(0, options.length - 1);
+    const wrapperWidth = options.length * 2;
+    const labelWidth = Math.max(3, Math.floor((maxWidth - separatorWidth - wrapperWidth) / Math.max(1, options.length)));
+    const labels = options.map((option) => {
+        if (option.length <= labelWidth) return option;
+        return labelWidth <= 3 ? option.slice(0, labelWidth) : option.slice(0, labelWidth - 3) + "...";
+    });
+    return labels
         .map((option, i) => (i === selected ? ACCENT(`[${option}]`) : MUTED(` ${option} `)))
         .join(" ");
 }

@@ -335,9 +335,11 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
             let idx = initial;
             let done = false;
             const draw = () => {
+                const instruction = "   <-/-> move, Enter confirm, Esc cancel";
+                const pickerWidth = Math.max(20, (process.stdout.columns || 80) - 2 - instruction.length);
                 process.stdout.write(
-                    `\r\x1b[K  ${renderPickStrip(options, idx)}`
-                    + chalk.dim("   <-/-> move, Enter confirm, Esc cancel"),
+                    `\r\x1b[K  ${renderPickStrip(options, idx, pickerWidth)}`
+                    + chalk.dim(instruction),
                 );
             };
             const finish = (result: number | null) => {
