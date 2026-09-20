@@ -20,17 +20,20 @@ That's it. On first launch, TriumCode asks for your API key and saves it to `~/.
 ## Usage
 
 ```bash
-# Interactive REPL
+# Interactive REPL (starts a new session)
 node dist/cli.js
 
 # Single-shot (run and exit)
 node dist/cli.js "read src/agent.ts and summarize what it does"
 
-# Resume last session
-node dist/cli.js --resume
+# Continue the most recent session in this project
+node dist/cli.js --continue
 
 # Resume a specific session by ID prefix
 node dist/cli.js --resume a3f8
+
+# Force a new session even when a saved one exists (the default)
+node dist/cli.js --new
 
 # List all saved sessions
 node dist/cli.js --sessions
@@ -64,7 +67,12 @@ a single run, or in CI.
 --protocol NAME   Wire protocol: anthropic | openai-chat | openai-responses
 --auth SCHEME     Key transport: api-key (x-api-key) | bearer (Authorization)
 --thinking        Enable Extended Thinking mode
---resume [id]     Resume latest session, or a specific one by ID prefix
+--resume [id]     Resume a saved session: the most recent one, or a specific
+                  one by ID prefix
+--continue        Resume the most recent session in this project (same as a
+                  bare --resume)
+--new             Start a new session, leaving saved ones untouched. This is
+                  the default; --continue and --resume override it
 --sessions        List all sessions and exit
 --yolo, -y        Bypass all permission prompts
 --plan            Plan mode: read-only, no edits
@@ -173,7 +181,9 @@ Once inside the interactive REPL:
 
 | Command | Description |
 |---------|-------------|
-| `/clear` | Clear conversation history |
+| `/clear` | Clear the current conversation (empties this session) |
+| `/new` | Start a new conversation; the previous session is kept |
+| `/resume [id]` | Resume a saved session; a bare `/resume` opens a picker |
 | `/cost` | Show token usage, prompt-cache hit rate and estimated cost |
 | `/sessions` | List all saved sessions |
 | `/delete <id>` | Delete a saved session |
@@ -267,19 +277,27 @@ User types message
 
 ## Session Storage
 
-Sessions are stored in `.triumcode/sessions/` (project-local):
+Sessions are stored globally, one directory per project, keyed by the project
+root (the nearest ancestor holding `.git` or `.triumcode`):
 
 ```
-.triumcode/
+~/.triumcode/
   sessions/
-    a3f8b2c1.json    ← session data (messages + metadata)
-    7e0d4f9a.json
-    ...
-  session-latest     ← pointer to most recent session
+    <project-hash>/
+      a3f8b2c1.json    ← session data (messages + metadata)
+      7e0d4f9a.json
+      ...
+      session-latest   ← pointer to the active session
 ```
 
-- Max 50 sessions (oldest auto-pruned)
-- `--resume` with no argument resumes the latest
+- Keying on the project root rather than the cwd means the same session list is
+  visible no matter which subdirectory the CLI is started from
+- Different projects never share sessions
+- Max 50 sessions per project (oldest auto-pruned)
+- Sessions from the old project-local `.triumcode/sessions/` are migrated on
+  first use
+- Starting the CLI begins a **new** session; `--continue`/`--resume` restore one
+- `--resume` with no argument resumes the most recent session
 - `--resume <prefix>` matches by ID prefix (e.g. `--resume a3f`)
 
 ## Development

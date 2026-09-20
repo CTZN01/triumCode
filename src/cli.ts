@@ -3,12 +3,14 @@ import * as readline from "node:readline";
 import chalk from "chalk";
 import {
     saveSession, loadSession, listSessions, deleteSession,
-    latestSessionId, type SessionIndex,
+    latestSessionId, setActiveSession, startNewSession, clearActiveSession,
+    projectRoot, type SessionIndex, type SessionData,
 } from "./session.js";
 import {
     printWelcome, printUserPrompt, printInfo, printError,
     printInterrupted, printHelp, printCostReport, printBlock, printTurnStart, endStatus,
     printConfigReport, printQuestion, printSessionStatus, renderPickList, printDeprecations,
+    printSessionResumed,
 } from "./ui.js";
 import { ensureConfig, describeSource, parseSizeTokens, getModelPresets, type ModelPreset } from "./config.js";
 import { parseEffort, EFFORT_LEVELS, type EffortLevel } from "./thinking.js";
@@ -24,6 +26,8 @@ import { listMemories } from "./memory.js";
 
 interface CliFlags {
     resume: string | null;   // null = no --resume; "" = --resume (latest); "abc" = --resume abc
+    cont: boolean;           // --continue: resume the most recent session
+    forceNew: boolean;       // --new: start fresh, ignore saved sessions
     sessions: boolean;       // --sessions: list and exit
     model: string;           // --model / -m
     apiKey: string;          // --api-key
@@ -45,6 +49,8 @@ interface CliFlags {
 function parseArgs(argv: string[]): CliFlags {
     const flags: CliFlags = {
         resume: null,
+        cont: false,
+        forceNew: false,
         sessions: false,
         model: "",      // resolved later by config.ts
         apiKey: "",     // resolved later by config.ts
@@ -92,6 +98,10 @@ function parseArgs(argv: string[]): CliFlags {
             } else {
                 flags.resume = "";
             }
+        } else if (arg === "--continue") {
+            flags.cont = true;
+        } else if (arg === "--new") {
+            flags.forceNew = true;
         } else if (arg === "--sessions") {
             flags.sessions = true;
         } else if (arg === "--model" || arg === "-m") {
@@ -166,6 +176,23 @@ function formatModel(model: string): string {
     return model.replace(/-\d{8}$/, "");
 }
 
+/** ASCII-only truncation: the picker redraw math assumes one column per char. */
+function clip(s: string, max: number): string {
+    if (s.length <= max) return s;
+    return max <= 3 ? s.slice(0, max) : s.slice(0, max - 3) + "...";
+}
+
+/**
+ * One line per session for the /resume picker. Kept inside the terminal width
+ * deliberately: the picker erases and redraws by line count, so an option that
+ * wraps desynchronizes the cursor and smears the list.
+ */
+function formatSessionOption(s: SessionIndex, maxWidth: number): string {
+    const head = `${s.id.slice(0, 8)}  ${formatDate(s.updated)}  ${String(s.messageCount).padStart(2)} msgs  `;
+    const room = maxWidth - head.length;
+    return head + (room >= 8 ? clip(s.title, room) : "");
+}
+
 function printSessionTable(sessions: SessionIndex[], currentId: string | null): void {
     if (sessions.length === 0) {
         printBlock("  (no saved sessions)");
@@ -229,6 +256,14 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
         return;
     }
 
+    // At most one flag may decide which session the run starts in; two of them
+    // would be a silent coin toss.
+    if ([flags.cont, flags.resume !== null, flags.forceNew].filter(Boolean).length > 1) {
+        printError("use only one of --continue, --resume, --new");
+        process.exitCode = 1;
+        return;
+    }
+
     // Resolve config from all sources (CLI > ~/.triumcode/config.json > env).
     // If no API key is found anywhere, enters interactive first-run setup.
     // --no-thinking is the off switch for thinking's default-on.
@@ -282,17 +317,52 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
     });
 
     let pendingAskUser: ((answer: string) => void) | null = null;
-    // --resume [id]: reload a saved conversation before doing anything else.
-    if (flags.resume !== null) {
-        const identifier = flags.resume === "" ? undefined : flags.resume;
+
+    // ── Which session this run starts in ─────────────────────────
+    // Loading a saved conversation also makes it the active session: saveSession
+    // appends to whatever the pointer names, so without that step the next turn
+    // would extend the wrong file.
+    let resumed: SessionData | null = null;
+
+    const resumeByIdentifier = (identifier?: string): SessionData | null => {
         const saved = loadSession(identifier);
+        if (!saved) return null;
+        agent.loadHistory(saved.messages as any);
+        setActiveSession(saved.id);
+        return saved;
+    };
+
+    // "Most recent" is the pointer when there is one, and the newest file
+    // otherwise — a pointer retired by an earlier default run must not make
+    // --continue come up empty.
+    const resumeLatest = (): SessionData | null => {
+        const byPointer = resumeByIdentifier(undefined);
+        if (byPointer) return byPointer;
+        const newest = listSessions()[0];
+        return newest ? resumeByIdentifier(newest.id) : null;
+    };
+
+    /** Announce a restored conversation, if one was actually restored. */
+    const announceResume = (saved: SessionData | null): void => {
         if (saved) {
-            agent.loadHistory(saved.messages as any);
-            const preview = saved.title.length > 50 ? saved.title.slice(0, 50) + "…" : saved.title;
-            printInfo(`resumed session ${saved.id.slice(0, 8)} — ${saved.messages.length} messages — "${preview}"`);
-        } else {
-            printInfo(`no session found${identifier ? ` matching "${identifier}"` : ""}`);
+            printSessionResumed(saved.id, saved.messages.length, saved.title, formatDate(saved.updated));
         }
+    };
+
+    if (flags.cont || flags.resume !== null) {
+        const identifier = flags.resume || undefined;
+        resumed = identifier ? resumeByIdentifier(identifier) : resumeLatest();
+        if (!resumed) {
+            printInfo(`no saved session to resume${identifier ? ` matching "${identifier}"` : ""}`);
+            // A failed explicit resume must not fall back to whatever session
+            // the pointer happened to name — the user asked for one that is
+            // not there, so start clean.
+            startNewSession();
+        }
+    } else {
+        // Default, and --new: retire the pointer so the first save mints a new
+        // session, leaving every saved conversation intact for --continue.
+        startNewSession();
     }
 
     // ── One-shot mode ────────────────────────────────────────────
@@ -428,6 +498,13 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
     });
 
     printWelcome(agent.getSessionStatus().model);
+    if (resumed) {
+        printSessionResumed(
+            resumed.id, resumed.messages.length, resumed.title, formatDate(resumed.updated),
+        );
+    } else {
+        printInfo(`new session - project ${projectRoot()}`);
+    }
     printInfo(`endpoint ${config.apiBase} via ${config.protocol}  (${describeSource(bundle.sources.apiBase)}) - /config for details`);
 
     // ── REPL loop with rl.once (strict serial execution) ─────────
@@ -475,9 +552,72 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
             // ── Slash commands ─────────────────────────────────────
             if (input === "/clear") {
                 agent.clearHistory();
-                saveSession(agent.history(), agent.getSessionStatus().model);
+                // Empties the session on disk too — saveSession() ignores an
+                // empty history, so without this the wipe would not outlive
+                // the process.
+                clearActiveSession();
                 printInfo("history cleared");
                 askQuestion();
+                return;
+            }
+
+            if (input === "/new") {
+                agent.clearHistory();
+                startNewSession();
+                printInfo("new session - the previous one is kept under /sessions");
+                askQuestion();
+                return;
+            }
+
+            // ── Resume a saved session ─────────────────────────────
+            if (input === "/resume" || input.startsWith("/resume ")) {
+                const arg = input.slice(7).trim();
+
+                if (arg) {
+                    const saved = resumeByIdentifier(arg);
+                    if (saved) announceResume(saved);
+                    else printError(`no session found matching "${arg}"`);
+                    askQuestion();
+                    return;
+                }
+
+                const sessions = listSessions();
+                if (sessions.length === 0) {
+                    printInfo("no saved sessions");
+                    askQuestion();
+                    return;
+                }
+
+                endStatus();
+                printTurnStart();
+                // Room for the "  " indent and the brackets renderPickList adds.
+                const width = Math.max(24, (process.stdout.columns || 80) - 4);
+                const labels = sessions.map((s) => formatSessionOption(s, width));
+
+                if (process.stdin.isTTY) {
+                    const picked = await stripPick(labels, 0);
+                    if (picked === null) printInfo("cancelled");
+                    else announceResume(resumeByIdentifier(sessions[picked].id));
+                    askQuestion();
+                    return;
+                }
+
+                printQuestion("Resume which session?", labels);
+                process.stdout.write(chalk.cyan("  Your answer: "));
+                pendingAskUser = (answer) => {
+                    const trimmed = answer.trim();
+                    if (!trimmed) {
+                        printInfo("cancelled");
+                        askQuestion();
+                        return;
+                    }
+                    const chosen = sessions[parseInt(trimmed, 10) - 1]
+                        ?? sessions.find((s) => s.id.startsWith(trimmed));
+                    if (!chosen) printError(`pick 1-${sessions.length} or a session id prefix`);
+                    else announceResume(resumeByIdentifier(chosen.id));
+                    askQuestion();
+                };
+                rl.once("line", handleLine);
                 return;
             }
 

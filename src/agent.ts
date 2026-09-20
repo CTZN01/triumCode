@@ -392,6 +392,10 @@ export class Agent {
     /** Replace the conversation with a previously saved history. */
     loadHistory(messages: Anthropic.MessageParam[]): void {
         this.messages = messages;
+        // Utilization describes the request that was in flight when the
+        // previous session was saved, not the one just restored — it is
+        // recomputed on the next request.
+        this.contextUtilization = 0;
         // Whether the restored history still contains any given file's contents
         // is unknowable from here, so no read may claim to have been shown.
         this.readFileState.clear();
