@@ -232,7 +232,8 @@ async function* chatEvents(res: Response): AsyncGenerator<any> {
     for (const event of translator.finish()) yield event;
 }
 
-export class OpenAIChatProvider implements ModelProvider {    public readonly protocol = "openai-chat" as const;
+export class OpenAIChatProvider implements ModelProvider {
+    public readonly protocol = "openai-chat" as const;
     private cfg: ProviderConfig;
     // Some gateways reject unknown fields, and `stream_options` is the only one
     // here that is an optimisation (usage on the final chunk) rather than part
