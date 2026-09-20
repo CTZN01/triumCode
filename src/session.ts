@@ -30,14 +30,27 @@ const MAX_SESSIONS = 50;
  * Nearest ancestor holding a project marker, or the cwd when there is none.
  * The home directory is never accepted as a root: a stray ~/.git (a dotfiles
  * repo) would otherwise fold every project on the machine into one store.
+ *
+ * Home is tested *before* the markers, and that order is the whole point:
+ * ~/.triumcode is the global config directory this CLI creates, so it is
+ * itself a marker. Checking markers first made the home guard unreachable —
+ * every directory under home with no project of its own resolved to home and
+ * shared one session store.
  */
 export function projectRoot(): string {
     const start = resolve(process.cwd());
+    const home = os.homedir();
+    // homedir() comes from the environment and the cwd from the OS, so their
+    // casing can differ on Windows.
+    const isHome = (dir: string): boolean =>
+        process.platform === "win32"
+            ? dir.toLowerCase() === home.toLowerCase()
+            : dir === home;
     let dir = start;
     while (true) {
-        if (existsSync(join(dir, ".git")) || existsSync(join(dir, ".triumcode"))) return dir;
         const parent = dirname(dir);
-        if (parent === dir || dir === os.homedir()) return start;
+        if (isHome(dir) || parent === dir) return start;
+        if (existsSync(join(dir, ".git")) || existsSync(join(dir, ".triumcode"))) return dir;
         dir = parent;
     }
 }

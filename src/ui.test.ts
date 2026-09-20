@@ -131,6 +131,43 @@ test("endStream adds a newline only when text left the cursor mid-line", () => {
     }
 });
 
+test("every streamed line gets the margin, not just the first", () => {
+    // A chunk is whatever the API sent, so a paragraph break arrives glued to
+    // the end of the previous one. Indenting only the chunk's first line left
+    // the rest of the reply at a different column from the line above it.
+    const vt = installFakeTty();
+    try {
+        ui.writeStream("para one\n\npara two\n- item");
+        ui.endStream();
+
+        assert.deepEqual(vt.screen().split("\n"), [
+            "  para one",
+            "",
+            "  para two",
+            "  • item",
+        ]);
+    } finally {
+        vt.restore();
+    }
+});
+
+test("streamed model text is rendered as markdown", () => {
+    const vt = installFakeTty();
+    try {
+        ui.writeStream("**Done** — see `src/ui.ts`\n\n## Next\n1. run tests");
+        ui.endStream();
+
+        assert.deepEqual(vt.screen().split("\n"), [
+            "  Done — see src/ui.ts",
+            "",
+            "  Next",
+            "  1. run tests",
+        ]);
+    } finally {
+        vt.restore();
+    }
+});
+
 // ═══════════════════════════════════════════════════════════════
 // Tool result states
 // ═══════════════════════════════════════════════════════════════
@@ -609,6 +646,49 @@ test("the model picker renders one option per line", () => {
         "[deepseek-v4.1-flash-official]",
         " deepseek-v4.1-flash-volc ",
     ]);
+});
+
+// ── ask_user ────────────────────────────────────────────────
+
+test("the question head leaves the option list to the picker", () => {
+    // The picker draws the choices itself, with a highlight. Numbering them
+    // here as well would print the same list twice, and the static list has no
+    // highlight to say which row Enter would take.
+    const vt = installFakeTty();
+    try {
+        ui.printQuestionHead("Which storage layout?");
+        const lines = vt.screen().split("\n");
+        assert.match(lines[1], /\?.*Which storage layout\?/);
+        assert.doesNotMatch(vt.screen(), /1\./, "no numbered duplicate list");
+        assert.doesNotMatch(vt.screen(), /Press Enter to skip/, "the picker states its own keys");
+    } finally {
+        vt.restore();
+    }
+});
+
+test("the typed question keeps its numbered options and skip hint", () => {
+    const vt = installFakeTty();
+    try {
+        ui.printQuestion("Which storage layout?", ["per-project", "global"]);
+        const screen = vt.screen();
+        assert.match(screen, /1\. per-project/);
+        assert.match(screen, /2\. global/);
+        assert.match(screen, /Press Enter to skip without answering\./);
+    } finally {
+        vt.restore();
+    }
+});
+
+test("a picked answer is echoed back", () => {
+    // Selecting with the picker leaves the highlight on a row that the next
+    // print overwrites, so without the echo the choice is invisible.
+    const vt = installFakeTty();
+    try {
+        ui.printAnswer("global");
+        assert.match(vt.screen(), /✓ global/);
+    } finally {
+        vt.restore();
+    }
 });
 
 test("session footer omits unset effort and plain default mode", () => {
