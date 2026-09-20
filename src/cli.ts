@@ -247,8 +247,22 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
     if (bundle.conflicts.length > 0) printConfigReport(bundle);
     else printDeprecations(bundle.deprecations);
 
+    // A preset name is the route identity shown in the UI. Infer it only
+    // when the resolved startup settings identify exactly one preset; equal
+    // model IDs on different routes must remain explicit via /model.
+    const startupPresets = getModelPresets();
+    const startupLabels = Object.entries(startupPresets)
+        .filter(([, preset]) => preset.model === config.model)
+        .filter(([, preset]) => !preset.apiBase || preset.apiBase === config.apiBase)
+        .filter(([, preset]) => !preset.protocol || preset.protocol === config.protocol)
+        .filter(([, preset]) => !preset.auth || preset.auth === config.auth)
+        .filter(([, preset]) => !preset.apiKey || preset.apiKey === config.apiKey)
+        .map(([label]) => label);
+    const startupModelLabel = startupLabels.length === 1 ? startupLabels[0] : "";
+
     const agent = new Agent({
         model: config.model,
+        modelLabel: startupModelLabel,
         apiKey: config.apiKey,
         apiBase: config.apiBase,
         protocol: config.protocol,
@@ -264,7 +278,7 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
 
     // Wire up auto-save: after each chat(), persist the session.
     agent.setOnChatComplete(() => {
-        saveSession(agent.history(), config.model);
+        saveSession(agent.history(), agent.getSessionStatus().model);
     });
 
     let pendingAskUser: ((answer: string) => void) | null = null;
@@ -411,7 +425,7 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
         }
     });
 
-    printWelcome(config.model);
+    printWelcome(agent.getSessionStatus().model);
     printInfo(`endpoint ${config.apiBase} via ${config.protocol}  (${describeSource(bundle.sources.apiBase)}) - /config for details`);
 
     // ── REPL loop with rl.once (strict serial execution) ─────────
@@ -459,7 +473,7 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
             // ── Slash commands ─────────────────────────────────────
             if (input === "/clear") {
                 agent.clearHistory();
-                saveSession(agent.history(), config.model);
+                saveSession(agent.history(), agent.getSessionStatus().model);
                 printInfo("history cleared");
                 askQuestion();
                 return;
@@ -479,7 +493,7 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
 
             if (input === "/compact") {
                 agent.compact();
-                saveSession(agent.history(), config.model);
+                saveSession(agent.history(), agent.getSessionStatus().model);
                 printInfo("history compacted");
                 askQuestion();
                 return;
@@ -584,10 +598,13 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
                         protocol: preset.protocol,
                         auth: preset.auth,
                         contextWindow: preset.contextWindow,
+                        // The preset name is what the footer shows, so two
+                        // presets serving one model stay distinguishable.
+                        label,
                     });
                     const where = preset.apiBase ? ` @ ${preset.apiBase}` : "";
                     const via = preset.protocol ? ` via ${preset.protocol}` : "";
-                    printInfo(`model: ${preset.model}${where}${via}${label ? ` (preset "${label}")` : ""}`);
+                    printInfo(`model: ${label || preset.model}${where}${via}`);
                 };
 
                 if (arg) {
@@ -612,7 +629,18 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
                 // Bare /model: picker over the presets, current one marked.
                 endStatus();
                 printTurnStart();
-                const currentIndex = names.findIndex((n) => presets[n].model === agent.getModel());
+
+                // Which preset the session is on. The label is the identity: two
+                // presets can serve the same model string through different
+                // endpoints, and matching on the model alone would mark both as
+                // current. With no label, a model string still identifies a
+                // preset as long as exactly one claims it.
+                const currentIndex = ((): number => {
+                    const label = agent.getModelLabel();
+                    if (label && presets[label]) return names.indexOf(label);
+                    const claimed = names.filter((n) => presets[n].model === agent.getModel());
+                    return claimed.length === 1 ? names.indexOf(claimed[0]) : -1;
+                })();
 
                 if (process.stdin.isTTY) {
                     const picked = await stripPick(names, Math.max(0, currentIndex));

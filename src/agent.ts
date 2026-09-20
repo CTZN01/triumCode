@@ -95,6 +95,7 @@ export interface AgentOptions {
     // env var) and passed in explicitly.  The fallbacks below only apply when
     // an Agent is constructed directly, bypassing the CLI.
     model?: string;       // --model / -m from CLI; else TRIUMCODE_MODEL env
+    modelLabel?: string;  // named preset identity for display and session history
     apiKey?: string;      // --api-key from CLI; else ANTHROPIC_API_KEY env
     apiBase?: string;     // --api-base from CLI; else ANTHROPIC_BASE_URL env
     // Which wire protocol the endpoint speaks. Set per model, because a
@@ -120,11 +121,21 @@ export interface ModelTarget {
     protocol?: Protocol;
     auth?: AuthScheme;
     contextWindow?: number;
+    /**
+     * What to call this target in the UI — the preset's name, when the switch
+     * came from one. Two presets may serve the same model string through
+     * different endpoints, so the model id alone does not identify the route
+     * the session is actually on.
+     */
+    label?: string;
 }
 
 export class Agent {
     private provider: ModelProvider;
     private model: string;
+    // Empty when the model was chosen by id rather than by preset, in which
+    // case the id is the best label there is.
+    private modelLabel = "";
     private protocol: Protocol;
     private auth: AuthScheme;
     private apiBase: string;
@@ -177,6 +188,7 @@ export class Agent {
 
     constructor(options?: AgentOptions) {
         this.model = options?.model || envModel("claude-sonnet-4-20250514");
+        this.modelLabel = options?.modelLabel || "";
         this.protocol = options?.protocol ?? "anthropic";
         this.apiBase = options?.apiBase || process.env.ANTHROPIC_BASE_URL || "";
         this.apiKey = options?.apiKey || process.env.ANTHROPIC_API_KEY || "";
@@ -262,6 +274,12 @@ export class Agent {
         if (target.contextWindow && target.contextWindow > 0) {
             this.contextWindow = Math.floor(target.contextWindow);
         }
+        // A caller that names the target owns the label, including by passing
+        // an empty one. Switching by raw model id clears it — the id is then
+        // the only honest description of what is being served. A retarget that
+        // leaves the model alone (an endpoint override) keeps it.
+        if (target.label !== undefined) this.modelLabel = target.label;
+        else if (target.model !== undefined) this.modelLabel = "";
 
         const protocol = target.protocol ?? this.protocol;
         const authChanged = target.auth !== undefined && target.auth !== this.auth;
@@ -287,6 +305,11 @@ export class Agent {
         return this.model;
     }
 
+    /** The preset name the session is on, or "" when it was picked by id. */
+    getModelLabel(): string {
+        return this.modelLabel;
+    }
+
     getProtocol(): Protocol {
         return this.protocol;
     }
@@ -303,7 +326,10 @@ export class Agent {
             dontAsk: "dont-ask",
         };
         return {
-            model: this.model,
+            // The preset name when there is one: it identifies the endpoint as
+            // well as the model, which the bare model id cannot when two
+            // presets serve the same model through different gateways.
+            model: this.modelLabel || this.model,
             effort: this.effort ?? "",
             contextPercent: this.contextUtilization * 100,
             mode: modeLabels[this.permissionMode],
