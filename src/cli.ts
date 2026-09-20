@@ -10,7 +10,7 @@ import {
     printWelcome, printUserPrompt, printInfo, printError,
     printInterrupted, printHelp, printCostReport, printBlock, printTurnStart, endStatus,
     printConfigReport, printQuestion, printSessionStatus, renderPickList, printDeprecations,
-    printSessionResumed,
+    printSessionResumed, printQuestionHead, printAnswer,
 } from "./ui.js";
 import { ensureConfig, describeSource, parseSizeTokens, getModelPresets, type ModelPreset } from "./config.js";
 import { parseEffort, EFFORT_LEVELS, type EffortLevel } from "./thinking.js";
@@ -391,12 +391,21 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
      * Needs a TTY (raw mode); resolves null without one so the caller can
      * fall back to a plain numbered prompt.
      *
+     * `hint` replaces the key legend. The redraw moves the cursor up by the
+     * line count, so any line that wraps desynchronizes it: the hint is clipped
+     * here, and callers must keep their options to one row (see
+     * formatSessionOption).
+     *
      * The main readline interface is CLOSED for the duration, not paused:
      * a paused interface stops stdin's data flow, and keypress events are
      * fed by that flow — the picker would freeze with no way to receive
      * keys. Afterwards a fresh interface takes over.
      */
-    const stripPick = (options: readonly string[], initial: number): Promise<number | null> => {
+    const stripPick = (
+        options: readonly string[],
+        initial: number,
+        hint = "   ^/v move, Enter confirm, Esc cancel",
+    ): Promise<number | null> => {
         return new Promise((resolve) => {
             if (!process.stdin.isTTY) {
                 resolve(null);
@@ -405,7 +414,8 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
             let idx = initial;
             let done = false;
             const draw = () => {
-                const instruction = "   ^/v move, Enter confirm, Esc cancel";
+                const cols = process.stdout.columns || 80;
+                const instruction = hint.length <= cols ? hint : hint.slice(0, Math.max(0, cols - 1));
                 const lines = [...renderPickList(options, idx), chalk.dim(instruction)];
                 const moveUp = lines.length > 1 ? `\x1b[${lines.length - 1}A` : "";
                 process.stdout.write(moveUp + lines.map((line, i) =>
@@ -415,6 +425,11 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
             const finish = (result: number | null) => {
                 if (done) return;
                 done = true;
+                // Disarm the SIGINT hook. It is consulted ahead of every other
+                // branch of the handler, so leaving it set would make Ctrl+C a
+                // silent no-op for the rest of the process — no interrupt, no
+                // exit — once any picker had been shown.
+                activePickerCancel = null;
                 process.stdin.removeListener("keypress", onKeypress);
                 process.stdin.setRawMode?.(false);
                 process.stdout.write("\n");
@@ -903,9 +918,35 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
     // Wire up ask_user after readline and its line handler are ready. The
     // handler is installed by the question callback itself, because the
     // normal task prompt has already consumed its line by then.
-    agent.setAskUserCallback((question, options) => {
+    //
+    // A question with options gets the arrow-key picker; an open-ended one
+    // gets the line prompt. Which key skips differs between the two, so the
+    // hint on screen always states it: Enter confirms a highlighted option,
+    // while a bare Enter on the line prompt skips.
+    agent.setAskUserCallback(async (question, options) => {
+        endStatus();
+        if (options && options.length > 0 && process.stdin.isTTY) {
+            printQuestionHead(question);
+            // One row per option: a long choice would wrap and smear the
+            // redraw. Only the display is clipped — the full text is returned.
+            const width = Math.max(16, (process.stdout.columns || 80) - 6);
+            const picked = await stripPick(
+                options.map((option) => clip(option, width)),
+                0,
+                "   ^/v move, Enter confirm, Esc skip",
+            );
+            if (picked === null) {
+                printInfo("skipped");
+                return "";
+            }
+            // The option's text, not its index: the callers that parse an
+            // answer (plan approval, destructive-action confirmation) match on
+            // words, and a number would read as neither.
+            const chosen = options[picked];
+            printAnswer(chosen);
+            return chosen;
+        }
         return new Promise<string>((resolve) => {
-            endStatus();
             printQuestion(question, options);
             process.stdout.write(chalk.cyan("  Your answer: "));
             pendingAskUser = resolve;

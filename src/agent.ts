@@ -717,7 +717,12 @@ export class Agent {
                 permissionPolicy: this.permissionPolicy,
                 confirmPermission: async (message) => {
                     if (!this.onAskUser) return false;
-                    const answer = await this.onAskUser(`Allow this potentially destructive action?\n  ${message}`, ["y", "n"]);
+                    // The refusal comes first because the CLI picker starts on
+                    // the first option: Enter must not mean "allow" for an
+                    // action flagged as destructive. It also keeps Enter on
+                    // the default a refusal, which is what it was before the
+                    // picker existed (Enter used to skip, i.e. not allow).
+                    const answer = await this.onAskUser(`Allow this potentially destructive action?\n  ${message}`, ["n", "y"]);
                     return answer.trim().toLowerCase().startsWith("y");
                 },
                 enterPlanMode: () => this.enterPlanModeFromTool(),

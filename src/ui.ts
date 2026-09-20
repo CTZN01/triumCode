@@ -558,17 +558,35 @@ export function printToolError(name: string, error: string): void {
 // ── Interactive question ──────────────────────────────────
 // Displayed when the agent calls ask_user to get input mid-turn.
 
-export function printQuestion(question: string, options?: string[]): void {
+/**
+ * The question line alone, for a caller that renders its own option list — the
+ * arrow-key picker draws the choices and its own key hint, so numbering them
+ * here as well would show the same list twice.
+ */
+export function printQuestionHead(question: string): void {
     ensureLineBreak();
     // Inquirer-style "?" — an emoji here renders double-width in zh-CN
     // terminals and visually dwarfs the text around it.
     console.log(`\n  ${OK("?")} ${chalk.bold(ACCENT(question))}`);
+}
+
+export function printQuestion(question: string, options?: string[]): void {
+    printQuestionHead(question);
     if (options && options.length > 0) {
         for (let i = 0; i < options.length; i++) {
             console.log(ACCENT(`    ${i + 1}. ${options[i]}`));
         }
     }
     console.log(chalk.dim("    Press Enter to skip without answering."));
+}
+
+/**
+ * Echo a choice made with the arrow keys. Selecting with a picker leaves no
+ * trace of what was chosen once the highlight is gone, so without this the
+ * answer is invisible in the transcript.
+ */
+export function printAnswer(answer: string): void {
+    logLine(`  ${OK("✓")} ${answer}`);
 }
 
 // One line of a Codex-style strip picker: `low  [high]  xhigh`. The selection

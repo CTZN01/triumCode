@@ -5,6 +5,7 @@ import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Agent } from "./agent.js";
+import type { PermissionMode } from "./permissions.js";
 
 // ═══════════════════════════════════════════════════════════════
 // Agent loop behaviour, driven by a scripted SSE endpoint
@@ -78,14 +79,26 @@ async function fakeApi(turns: Turn[]): Promise<FakeApi> {
 /** Run a chat against a scripted endpoint, capturing all UI output. */
 async function runChat(
     turns: Turn[],
-    options: { maxTurns?: number; maxTokens?: number } = {},
+    options: {
+        maxTurns?: number;
+        maxTokens?: number;
+        permissionMode?: PermissionMode;
+        askUser?: (question: string, options?: string[]) => Promise<string>;
+    } = {},
 ): Promise<{ agent: Agent; api: FakeApi; output: string; error: any }> {
     const api = await fakeApi(turns);
     const agent = new Agent({
-        model: "test-model", apiKey: "k", apiBase: api.url, planMode: true,
+        model: "test-model", apiKey: "k", apiBase: api.url,
+        // Plan mode is the default sandbox: it denies everything that writes,
+        // so a test that did not ask for a mode cannot touch the workspace.
+        // A test that needs a tool to reach the confirmation prompt passes its
+        // own mode instead.
+        planMode: options.permissionMode === undefined,
+        permissionMode: options.permissionMode,
         maxTurns: options.maxTurns ?? 5,
         maxTokens: options.maxTokens,
     });
+    if (options.askUser) agent.setAskUserCallback(options.askUser);
 
     // Stub console.log, NOT process.stdout.write. node:test's own reporter
     // writes TAP to process.stdout, and it runs top-level tests concurrently —
@@ -237,6 +250,45 @@ test("a tool call with truncated JSON is refused, not run on garbage", async () 
     ]);
 
     assert.match(output, /not valid JSON/, output);
+});
+
+// ── Permission confirmation ─────────────────────────────────
+
+test("a destructive-action confirmation offers the refusal first", async () => {
+    // The CLI picker starts on the first option, so if "y" leads, a reflexive
+    // Enter allows a destructive command. Refusal first keeps Enter on the
+    // default a refusal — which is what Enter did before the picker existed
+    // (it skipped, and a skip is not a yes).
+    const asked: Array<string[] | undefined> = [];
+    const { agent } = await runChat([
+        (w) => {
+            w(start(0, { type: "tool_use", id: "t1", name: "run_command", input: {} }));
+            w(jsonDelta(0, '{"command":"sudo","args":[]}'));
+            w(stop(0));
+            w(finish("tool_use"));
+        },
+        (w) => {
+            w(start(0, { type: "text", text: "" }));
+            w(textDelta(0, "ok"));
+            w(stop(0));
+            w(finish("end_turn"));
+        },
+    ], {
+        permissionMode: "default",
+        askUser: async (_question, options) => {
+            asked.push(options);
+            return "n";   // what the picker returns for the highlighted refusal
+        },
+    });
+
+    assert.equal(asked.length, 1, "the command was confirmed exactly once");
+    assert.deepEqual(asked[0], ["n", "y"], "the refusal is the default choice");
+
+    // Returning the option's own text must deny: the parser matches on the
+    // word, so a refused confirmation cannot be read as consent.
+    const toolResult = agent.history().flatMap((m) => Array.isArray(m.content) ? m.content : [])
+        .find((b: any) => b.type === "tool_result");
+    assert.match(String((toolResult as any).content), /denied/i);
 });
 
 // ── Loop bounds and request shape ───────────────────────────
