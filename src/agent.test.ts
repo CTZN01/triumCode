@@ -131,7 +131,7 @@ async function runChat(
     const originalLog = console.log;
     let output = "";
     console.log = (...args: any[]) => {
-        output += args.map((a) => String(a)).join(" ") + "\n";
+        output += stripAnsi(args.map((a) => String(a)).join(" ")) + "\n";
     };
 
     let error: any = null;
@@ -148,6 +148,7 @@ async function runChat(
 }
 
 const assistantTurns = (agent: Agent) => agent.history().filter((m) => m.role === "assistant");
+const stripAnsi = (text: string): string => text.replace(/\x1B\[[0-?]*[ -\/]*[@-~]/g, "");
 
 // ── Empty / truncated turns ─────────────────────────────────
 

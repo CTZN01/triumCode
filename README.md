@@ -235,7 +235,7 @@ Every tool call is evaluated against a mode and, optionally, a set of rules.
 |------|------|----------|
 | `default` | _(none)_ | Read-only tools and memory operations are permitted; dangerous commands prompt |
 | `plan` | `--plan` / `/plan` | Read-only. Only the plan file may be written |
-| `acceptEdits` | `--accept-edits` | `write_file` and `edit_file` are permitted without prompting |
+| `acceptEdits` | `--accept-edits` | `write_file`, `edit_file` and `multi_edit` are permitted without prompting |
 | `bypassPermissions` | `--yolo`, `-y` | All actions are permitted, except those matched by a `deny` rule |
 | `dontAsk` | `--dont-ask` | Any action that would have prompted is automatically denied |
 
@@ -410,7 +410,8 @@ returns to the prompt. **Ctrl+C** twice while idle exits.
 |------|-------------|
 | `read_file` | Read a text file with line numbers. 2000 lines by default; use `offset`/`limit` to page (maximum 5000). Rejects binary files and files larger than 20 MB |
 | `write_file` | Write a file atomically (temporary file, then rename) |
-| `edit_file` | Replace an exact, unique string in a file (requires a prior read) |
+| `edit_file` | Replace an exact, unique string in a file (requires a prior read). Returns the edited region with line numbers, or `replace_all: true` to change every occurrence |
+| `multi_edit` | Apply several edits to one file in a single call; validated together and written once, so a failing edit discards the whole batch |
 | `list_files` | List a directory recursively, skipping `node_modules`/`.git`/`dist`-style directories; capped at 200 entries |
 | `grep_search` | Regex search across files (uses the system `grep` when available, otherwise an in-process chunked scanner) |
 | `run_command` | Run a program directly (no shell — pipes and redirects are unsupported); 30-second timeout |
@@ -430,11 +431,18 @@ inexpensive; the schemas are not.
 
 ### Tool safety
 
-- **Read-before-write**: `edit_file` and `write_file` require a prior read of
-  the file. A write is rejected if the file was modified externally since that
-  read. Re-reading a line range already present in the conversation returns a
-  short notice rather than the content again, unless compression has evicted it,
-  in which case the claim is dropped.
+- **Read-before-write**: `edit_file`, `multi_edit` and `write_file` require a
+  prior read of the file. A write is rejected if the file was modified
+  externally since that read. Re-reading a line range already present in the
+  conversation returns a short notice rather than the content again, unless
+  compression has evicted it, in which case the claim is dropped.
+- **Edits that do not need a re-read**: a successful `edit_file` returns the
+  region it changed, numbered the way `read_file` numbers it, so the next edit
+  can be anchored on text the model has actually seen. A miss quotes the file's
+  real lines back instead of reporting "not found", and a match that differs
+  only in trailing whitespace is applied rather than rejected. Indentation
+  differences are reported, never applied — re-indenting would change code the
+  model did not ask to change.
 - **Concurrency**: Read-only tools (`read_file`, `list_files`, `grep_search`,
   `git_diff`) run in parallel, up to ten at a time. Write tools require
   exclusive access; safe tools queued behind one wait only while it actually

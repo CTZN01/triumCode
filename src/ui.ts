@@ -375,6 +375,7 @@ const TOOL_VERBS: Record<string, string> = {
     read_file: "Read",
     write_file: "Write",
     edit_file: "Edit",
+    multi_edit: "Edit",
     list_files: "List",
     grep_search: "Search",
     run_command: "Run",
@@ -404,6 +405,7 @@ function formatCallTarget(name: string, input: Record<string, any>): string {
         case "read_file":
         case "write_file":
         case "edit_file":
+        case "multi_edit":
             return input.file_path ? displayPath(String(input.file_path)) : "";
         case "list_files":
             return input.directory_path ? displayPath(String(input.directory_path)) : "";
@@ -494,9 +496,13 @@ export function classifyResult(name: string, result: string): ResultView {
         case "write_file":
             return { text: firstLine, ok: true };
 
-        case "edit_file": {
-            const m = /^Edited .* at line (\d+)(?: \(([^)]+)\))?$/.exec(firstLine);
-            return { text: m ? `Edited at line ${m[1]}${m[2] ? ` ${m[2]}` : ""}` : firstLine, ok: true };
+        case "edit_file":
+        case "multi_edit": {
+            const single = /^Edited .* at line (\d+)(?: \(([^)]+)\))?/.exec(firstLine);
+            if (single) return { text: `Edited at line ${single[1]}${single[2] ? ` ${single[2]}` : ""}`, ok: true };
+            const many = /^Edited (\d+) \w+ in .*\(([^)]+)\)/.exec(firstLine);
+            if (many) return { text: `Edited ${many[1]} places ${many[2]}`, ok: true };
+            return { text: firstLine, ok: true };
         }
 
         case "list_files": {
