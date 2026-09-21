@@ -1,29 +1,38 @@
 # TriumCode
 
-A terminal-native coding agent powered by the Anthropic SDK. Reads files, edits code, searches your codebase, and runs commands — all through natural conversation in your terminal.
+A terminal-based coding agent built on the Anthropic SDK. It reads files, edits code, searches a repository, and runs commands through natural-language conversation.
 
-## Quick Start
+TriumCode supports three API protocols, so it can connect to Anthropic directly or through a model gateway that serves `/messages`, `/chat/completions`, or `/responses`.
+
+## Features
+
+- **Parallel tool execution during streaming** — a tool begins executing as soon as its `tool_use` block is complete, without waiting for the response to finish.
+- **Three API protocols** — `anthropic`, `openai-chat`, and `openai-responses`, selected per model.
+- **Prompt cache–aware context management** — a single cacheable system block, volatile context moved to a per-turn reminder, and a tool-output budget that trims in one pass so the cached prefix stays stable.
+- **Persistent memory** — file-based, with project and user layers, semantic recall, and keyword fallback.
+- **Permission modes** — `default`, `plan`, `acceptEdits`, `yolo`, and `dontAsk`, plus `allow`/`deny` rules in `settings.json`.
+- **Per-project session storage** — the same session list is visible from any subdirectory of a project.
+- **Streaming Markdown rendering** — headings, lists, and inline bold or code render as they arrive.
+
+## Requirements
+
+- Node.js 20 or later
+- An API key for Anthropic, or for a compatible gateway
+
+## Installation
 
 ```bash
-# 1. Install dependencies
 npm install
-
-# 2. Build
 npm run build
-
-# 3. Run (first time will prompt for API key)
-node dist/cli.js
 ```
-
-That's it. On first launch, TriumCode asks for your API key and saves it to `~/.triumcode/config.json`. No `.env` files or environment variables to set up manually.
 
 ## Usage
 
 ```bash
-# Interactive REPL (starts a new session)
+# Start an interactive session
 node dist/cli.js
 
-# Single-shot (run and exit)
+# Run a single prompt and exit
 node dist/cli.js "read src/agent.ts and summarize what it does"
 
 # Continue the most recent session in this project
@@ -32,121 +41,241 @@ node dist/cli.js --continue
 # Resume a specific session by ID prefix
 node dist/cli.js --resume a3f8
 
-# Force a new session even when a saved one exists (the default)
+# Force a new session, leaving saved sessions untouched
 node dist/cli.js --new
 
 # List all saved sessions
 node dist/cli.js --sessions
 ```
 
+On first launch, TriumCode prompts for an API key, base URL, model, and protocol, then writes them to `~/.triumcode/config.json`. Environment variables and `.env` files are not required.
+
+### Session selection
+
+At most one of `--continue`, `--resume`, and `--new` may be specified per
+invocation. Supplying two or more is rejected rather than resolved by
+precedence.
+
 ## Configuration
 
-Config is resolved from highest to lowest priority:
+### Precedence
+
+Configuration is resolved per field, from the following sources in descending
+priority:
 
 | Priority | Source | Example |
 |----------|--------|---------|
-| 1 | CLI flags | `--api-key sk-ant-xxx --model claude-sonnet-4` |
+| 1 | Command-line flags | `--api-key sk-ant-xxx --model claude-sonnet-4` |
 | 2 | `~/.triumcode/config.json` | Written by first-run setup |
-| 3 | Environment variables | `export ANTHROPIC_API_KEY=sk-ant-xxx` |
+| 3 | Environment variables | `ANTHROPIC_API_KEY=sk-ant-xxx` |
 | 4 | Built-in defaults | `https://api.anthropic.com` |
 
-Resolution is per-field, so a config file holding only the API key still picks
-up `ANTHROPIC_BASE_URL` from the environment. The saved config deliberately
-outranks environment variables — an endpoint you typed in during setup should
-not be silently redirected by a stray export. Use the CLI flags to override for
-a single run, or in CI.
+Because resolution is per field, a config file that sets only the API key still
+picks up `ANTHROPIC_BASE_URL` from the environment.
 
-### CLI Flags
+The saved configuration deliberately outranks environment variables: an
+endpoint entered during first-run setup should not be silently redirected by a
+leftover export. Use command-line flags to override for a single run or in CI.
+
+If a lower-priority source holds a different value than the winner, startup
+prints an **Overridden** report identifying it. The `/config` command displays
+the same table together with the origin of each field.
+
+### Command-line options
 
 ```
---api-key KEY     API key
---api-base URL    API base URL. Defaults to https://api.anthropic.com, which
-                  only makes sense for the anthropic protocol — an OpenAI
-                  protocol needs the gateway's own URL
---model, -m       Model name (default: claude-sonnet-4-20250514)
---protocol NAME   Wire protocol: anthropic | openai-chat | openai-responses
---auth SCHEME     Key transport: api-key (x-api-key) | bearer (Authorization)
---thinking        Enable Extended Thinking mode
---resume [id]     Resume a saved session: the most recent one, or a specific
-                  one by ID prefix
---continue        Resume the most recent session in this project (same as a
-                  bare --resume)
---new             Start a new session, leaving saved ones untouched. This is
-                  the default; --continue and --resume override it
---sessions        List all sessions and exit
---yolo, -y        Bypass all permission prompts
---plan            Plan mode: read-only, no edits
---max-cost N      Stop after $N spent
---max-turns N     Stop after N conversation turns
---context-window N  Context window size in tokens (use 1000000 for 1M models)
---help, -h        Show help
+--api-key KEY       API key
+--api-base URL      API base URL. Defaults to https://api.anthropic.com, which
+                    is valid only for the anthropic protocol; the OpenAI
+                    protocols require the gateway's own URL
+--model, -m         Model name (default: claude-sonnet-4-20250514)
+--protocol NAME     Protocol: anthropic | openai-chat | openai-responses
+--auth SCHEME       Key transport: api-key (x-api-key) | bearer (Authorization)
+--thinking          Enable extended thinking (enabled by default)
+--no-thinking       Disable extended thinking for this session
+--effort LEVEL      Thinking depth: low | medium | high | xhigh | max
+                    (default: high; also adjustable with /effort)
+--resume [id]       Resume the most recent session, or a specific one by ID prefix
+--continue          Resume the most recent session in this project (equivalent
+                    to a bare --resume)
+--new               Start a new session, leaving saved sessions untouched. This
+                    is the default; --continue and --resume override it
+--sessions          List all sessions and exit
+--yolo, -y          Skip ordinary confirmation prompts (configured deny rules
+                    still apply)
+--plan              Plan mode: read-only, no edits
+--accept-edits      Auto-approve file writes and edits; other actions still prompt
+--dont-ask          Auto-deny any action that would have prompted
+--max-turns N       Stop after N agent-loop turns
+--max-tokens N      Maximum output tokens per request (default: 32000).
+                    Thinking counts towards this limit
+--context-window N  Context window size in tokens; k/M suffixes are accepted
+                    (200k, 1M)
+--help, -h          Show help
 ```
 
-### Environment Variables
+### Environment variables
 
 | Variable | Purpose | Default |
 |----------|---------|---------|
 | `ANTHROPIC_API_KEY` | API key | _(none — required)_ |
 | `ANTHROPIC_BASE_URL` | API endpoint | `https://api.anthropic.com` |
 | `TRIUMCODE_MODEL` | Default model | `claude-sonnet-4-20250514` |
-| `TRIUMCODE_PROTOCOL` | Wire protocol | `anthropic` |
+| `TRIUMCODE_PROTOCOL` | Protocol | `anthropic` |
 | `TRIUMCODE_AUTH` | Key transport | derived from the protocol |
 | `TRIUMCODE_EFFORT` | Thinking depth | `high` |
 | `TRIUMCODE_CONTEXT_WINDOW` | Context window size in tokens | `200000` |
 
-`MINI_MODEL` and `MINI_CONTEXT_WINDOW` are the older names for the last two.
-They still resolve, as a second choice behind the `TRIUMCODE_*` spelling, and
-are deprecated — rename them now. A dropped variable is silent: losing the
-context window only shows up as history compressed earlier than the model needs.
+`MINI_MODEL` and `MINI_CONTEXT_WINDOW` are deprecated aliases for the last two.
+They still resolve, as a second choice behind the `TRIUMCODE_*` spelling. A
+variable that fails to resolve does so silently: a lost context window only
+manifests as history being compressed earlier than the model requires. A
+deprecated variable that wins its field is reported once at startup.
 
-### Model Protocols
+The auxiliary model used for memory recall reads `TRIUMCODE_MODEL` as well, so
+pointing it at a smaller model reduces recall cost.
 
-TriumCode speaks three wire protocols, because a model gateway serves each of
-its models through whichever API that model's upstream actually exposes. One
-base URL is not enough — you also pick a protocol:
+### Configuration file
 
-| Protocol | Endpoint appended | Typical models behind a gateway |
-|----------|-------------------|---------------------------------|
+```json
+{
+  "apiKey": "sk-ant-...",
+  "apiBase": "https://api.anthropic.com",
+  "model": "claude-sonnet-4-20250514",
+  "protocol": "anthropic",
+  "thinking": true,
+  "effort": "high",
+  "contextWindow": "200k",
+  "models": {
+    "deep":  { "model": "deepseek-v4", "apiBase": "https://gateway.example/v1", "protocol": "openai-chat", "contextWindow": "128k" },
+    "gpt":   { "model": "gpt-5-luna",  "apiBase": "https://gateway.example/v1", "protocol": "openai-responses", "contextWindow": "200k" },
+    "mimin": { "model": "minimax-m3",  "apiBase": "https://gateway.example/v1", "protocol": "anthropic", "auth": "api-key" }
+  }
+}
+```
+
+`contextWindow` accepts either a plain token count or a size suffix (`200k`,
+`1M`). Every field except `models` can be overridden by a command-line flag.
+
+## Model protocols
+
+TriumCode supports three protocols because a model gateway routes each of its
+models through whichever API that model's upstream exposes. A base URL alone is
+insufficient; the protocol must also be specified.
+
+| Protocol | Path appended | Typical models behind a gateway |
+|----------|---------------|---------------------------------|
 | `anthropic` | `/v1/messages` | Claude, MiniMax, Qwen |
 | `openai-chat` | `/v1/chat/completions` | DeepSeek, GLM, Kimi, MiMo |
 | `openai-responses` | `/v1/responses` | GPT, Grok |
 
-Conversation history stays in Anthropic's message shape internally, so sessions,
-context compression and memory recall behave the same on every protocol. A
-gateway that rejects an optional parameter (`thinking`, `effort`,
-`stream_options`, `reasoning`) is detected on the first 400 and stops being sent
-that parameter for the rest of the session.
+Conversation history is stored internally in Anthropic's message format, so
+session persistence, context compression, and memory recall behave identically
+on every protocol. If a gateway rejects an optional parameter (`thinking`,
+`effort`, `stream_options`, `reasoning`), it is detected on the first HTTP 400
+and omitted for the remainder of the session.
 
 ```bash
-# One-off run against a gateway
+# Run against a gateway
 triumcode --api-base https://gateway.example/v1 \
           --protocol openai-chat --model deepseek-v4 "refactor src/tools.ts"
 ```
 
 Named presets in `~/.triumcode/config.json` carry the protocol, so `/model`
-switches backend and protocol in one step:
+switches backend and protocol in a single step.
+
+`--api-base` accepts the URL as printed in vendor documentation, including the
+`/v1` suffix: the version segment is normalized away and each protocol appends
+its own path. The `https://api.anthropic.com` default belongs to the anthropic
+protocol; the OpenAI protocols have no sensible default and require the
+gateway's URL. The `auth` field is needed only when a gateway expects the key
+in a different form than its protocol implies — `bearer` sends
+`Authorization: Bearer`, and `api-key` sends `x-api-key`.
+
+Switching by preset name retains that name as the session's route identity, so
+two presets serving the same model string through different gateways remain
+distinguishable. Switching by raw model ID clears it, since the ID is then the
+only accurate description of what is being served.
+
+## Reasoning
+
+Extended thinking is enabled by default, and depth is controlled by `effort`
+(`low` through `max`, default `high`). Both can be changed mid-session:
+
+```
+/effort            # arrow-key picker over low..max
+/effort xhigh
+/thinking off
+```
+
+Two request forms exist upstream, and selecting the wrong one produces an HTTP
+400:
+
+- `{ thinking: { type: "adaptive" } }` — current models. No token budget; depth
+  is controlled by `output_config.effort`.
+- `{ thinking: { type: "enabled", budget_tokens: N } }` — models prior to 4.6
+  (Haiku 4.5 and earlier), where `budget_tokens` is required.
+
+The required form cannot be derived reliably from a model name, so an
+unrecognized model is never rejected outright: the built-in model lists only
+determine whether thinking is enabled automatically. `--thinking` always forces
+it on. If an endpoint rejects the parameters, the agent omits them for the
+remainder of the session rather than failing the turn.
+
+Thinking blocks are the model's private reasoning and are not retained. Their
+duration is measured so the interface can report it, and they are discarded
+before the turn is written to history.
+
+## Permissions
+
+Every tool call is evaluated against a mode and, optionally, a set of rules.
+
+| Mode | Flag | Behavior |
+|------|------|----------|
+| `default` | _(none)_ | Read-only tools and memory operations are permitted; dangerous commands prompt |
+| `plan` | `--plan` / `/plan` | Read-only. Only the plan file may be written |
+| `acceptEdits` | `--accept-edits` | `write_file` and `edit_file` are permitted without prompting |
+| `bypassPermissions` | `--yolo`, `-y` | All actions are permitted, except those matched by a `deny` rule |
+| `dontAsk` | `--dont-ask` | Any action that would have prompted is automatically denied |
+
+Rules are read from `~/.triumcode/settings.json`, `~/.claude/settings.json`,
+`<cwd>/.triumcode/settings.json`, and `<cwd>/.claude/settings.json`:
 
 ```json
 {
-  "apiBase": "https://api.anthropic.com",
-  "model": "claude-sonnet-4-20250514",
-  "models": {
-    "deep":  { "model": "deepseek-v4",   "apiBase": "https://gateway.example/v1", "protocol": "openai-chat",     "contextWindow": "128k" },
-    "gpt":   { "model": "gpt-5-luna",    "apiBase": "https://gateway.example/v1", "protocol": "openai-responses", "contextWindow": "200k" },
-    "mimin": { "model": "minimax-m3",    "apiBase": "https://gateway.example/v1", "protocol": "anthropic",        "auth": "api-key" }
+  "permissions": {
+    "allow": ["run_command(git status)", "read_file(src/*)"],
+    "deny": ["run_command(rm -rf *)"]
   }
 }
 ```
 
-`--api-base` accepts the URL exactly as vendor docs print it, `/v1` included:
-the version segment is normalized away and each protocol appends its own path.
-The `https://api.anthropic.com` default is the Anthropic protocol's own; the
-OpenAI protocols have no sensible default, so give them the gateway's URL.
-`auth` is only needed when a gateway wants the key spelled differently from what
-its protocol implies — `bearer` sends `Authorization: Bearer`, `api-key` sends
-`x-api-key`.
+`tool(pattern)` matches a single tool; a trailing `*` performs a prefix match;
+a bare `tool` matches every call to it. **Deny rules always take precedence** —
+they are evaluated before the mode, so `--yolo` cannot override them.
 
-### Skills
+Commands matching a dangerous pattern (`rm -rf /`, `git push`, `git reset
+--hard`, `sudo`, `mkfs`, `dd if=`, writes to `/dev/`, `kill`, `shutdown`,
+`del`, `format`, `taskkill`) require explicit `y` / `n` confirmation. The
+refusal is presented first, so an accidental Enter never approves a destructive
+action.
+
+## Plan mode
+
+`--plan`, `/plan`, or the model calling `enter_plan_mode` switches to a
+read-only phase. The agent writes its plan to
+`~/.claude/plans/plan-<timestamp>.md` and calls `exit_plan_mode`, which
+displays the plan and prompts for how to proceed:
+
+1. Clear context and execute
+2. Execute with current context
+3. Execute with manual edit confirmations
+4. Keep planning
+
+Option 3 returns to `default` mode, so edits prompt again; the others move to
+`acceptEdits`.
+
+## Skills
 
 Skills are reusable Markdown prompts stored in `.claude/skills/`.
 
@@ -165,154 +294,299 @@ The skill directory is ${CLAUDE_SKILL_DIR}.
 ```
 
 User skills are loaded from `~/.claude/skills/`; project skills are loaded from
-`.claude/skills/` and override a user skill with the same name. Use `/commit
-message` for a user-invocable skill, or let the model load one with the
-`skill` tool. `user-invocable: false` hides a skill from slash commands.
+`.claude/skills/` and override a user skill of the same name. Invoke a
+user-invocable skill with `/commit message`, or let the model load one through
+the `skill` tool. Setting `user-invocable: false` removes a skill from the
+slash-command surface and lists it as model-invocable only.
 
 `allowed-tools` accepts either a comma-separated list or a JSON array. The
 supported template variables are `$ARGUMENTS`, `${ARGUMENTS}`, and
 `${CLAUDE_SKILL_DIR}`. `mode: fork` marks the prompt as isolated sub-agent
-work; the current runtime returns that isolation contract to the agent while
-keeping tool execution in the same process.
+work; the current runtime passes that isolation contract to the agent while
+tool execution remains in the same process.
 
-## REPL Commands
+## Memory
 
-Once inside the interactive REPL:
+A persistent, file-based memory in two layers:
+
+```
+.triumcode/memory/            ← project memories (higher priority on filename collision)
+~/.triumcode/memory/          ← user-global memories
+  feedback_keep-diffs-small.md
+  user_prefers-concise-output.md
+  MEMORY.md                   ← human-readable index, rebuilt on save
+```
+
+Each memory is a Markdown file with `name`, `description`, and `type`
+frontmatter. The type taxonomy is closed — `user`, `feedback`, `project`, and
+`reference` — because free-form tags degrade recall as they accumulate. The
+agent writes memories through the `memory` tool; they can be edited or removed
+with any editor.
+
+Recall runs before each turn. A small auxiliary model call selects the few
+memories relevant to the current message from a manifest of filenames and
+descriptions, and they are injected as a `<system-reminder>` message. The
+prefetch runs concurrently with the first model call, so recall normally adds
+no latency. Any failure — a missing key, an offline endpoint, an unparsable
+reply — falls back to word-overlap scoring, so recall never blocks or interrupts
+the main loop.
+
+Budgets prevent a single turn from exhausting the context window: 4 KB per
+memory file, 5 memories recalled per turn, and 60 KB of memory content per
+session. A memory older than one day carries a freshness notice instructing the
+model to verify claims about code before asserting them. `/memory` lists the
+saved memories.
+
+## Context management
+
+The prompt is divided deliberately:
+
+- **System prompt** — persona, tool guidance, skills, environment, `CLAUDE.md`,
+  and the memory index. One cacheable block, containing nothing volatile.
+- **Per-turn reminder** — git branch and status, today's date, and which
+  deferred tools remain unloaded. Prepended to the user's message, which is new
+  every turn and therefore invalidates nothing behind it.
+
+This division is functional rather than cosmetic. Prompt caching matches on a
+byte-exact prefix, and git status changes whenever the agent writes a file.
+Placed in the system prompt, it would cause the entire conversation to be
+reprocessed at full price on nearly every write.
+
+Tool output is governed by a budget rather than a single size limit:
+
+- Each tool declares its own `maxResultSizeChars`. A 100 KB file read is
+  acceptable; a 100 KB grep output is not. A result exceeding its limit retains
+  its head and tail, while the full text is written to
+  `~/.mini-claude/tool-results/` and a file path is returned in its place.
+- Once utilization exceeds 60% of the usable window, tool results are trimmed in
+  a single pass down to approximately 45%, retaining the most recent results.
+  The gap between the trigger and the target is the point: a boundary
+  re-derived on every request shifts by however much the previous turn added,
+  and a shifting boundary invalidates the cache for the entire conversation
+  behind it.
+- Redundant older results are removed. A `read_file` result is superseded only
+  by a later read that actually covers its line range, so paged reads are
+  retained, and only the three most recent searches are kept in full.
+- Once the cache has expired (more than five minutes idle), all but the three
+  most recent tool results are discarded.
+- At 85% of `contextWindow - 20000`, history is automatically compacted into a
+  local summary. `/compact` performs the same operation on demand.
+
+`/cost` reports the prompt cache hit rate alongside token usage and estimated
+cost.
+
+## Interactive commands
 
 | Command | Description |
 |---------|-------------|
 | `/clear` | Clear the current conversation (empties this session) |
-| `/new` | Start a new conversation; the previous session is kept |
+| `/new` | Start a new conversation; the previous session is retained |
 | `/resume [id]` | Resume a saved session; a bare `/resume` opens a picker |
-| `/cost` | Show token usage, prompt-cache hit rate and estimated cost |
+| `/config` | Show the active endpoint, model, and key, with the origin of each |
+| `/cost` | Show token usage, cache hit rate, and estimated cost |
+| `/compact` | Compact conversation history into a local summary |
+| `/plan` | Toggle plan mode |
+| `/effort [level]` | Show or change reasoning effort; a bare `/effort` opens a picker |
+| `/thinking [on\|off]` | Show or toggle extended thinking |
+| `/model [name]` | Switch model; a bare `/model` selects from configured presets |
+| `/memory` | List saved long-term memories |
 | `/sessions` | List all saved sessions |
 | `/delete <id>` | Delete a saved session |
 | `/help` | Show all commands |
-| `exit` / `quit` | Exit |
+| `/‹skill›` | Run any user-invocable skill by name |
+| `exit`, `quit` | Exit |
 
-**Ctrl+C** while the agent is working → interrupt and return to prompt.
-**Ctrl+C** twice while idle → exit.
+When stdin is a TTY, `/resume`, `/effort`, `/model`, and `ask_user` with
+options render an arrow-key picker. Otherwise they fall back to a numbered
+prompt.
 
-## Built-in Tools
+**Ctrl+C** while the agent is working interrupts the current operation and
+returns to the prompt. **Ctrl+C** twice while idle exits.
 
-The agent has access to these tools during conversation:
+## Tools
 
-| Tool | What it does |
+| Tool | Description |
 |------|-------------|
-| `read_file` | Read a file with line numbers |
-| `write_file` | Write content to a file (atomic) |
-| `edit_file` | Replace an exact string in a file (requires prior read) |
-| `list_files` | List directory contents recursively, skipping `node_modules`/`.git`/`dist` |
-| `grep_search` | Regex search across files (uses system `grep` when available, falls back to in-process) |
-| `run_command` | Run a program directly (no shell — pipes/redirects don't work) |
+| `read_file` | Read a text file with line numbers. 2000 lines by default; use `offset`/`limit` to page (maximum 5000). Rejects binary files and files larger than 20 MB |
+| `write_file` | Write a file atomically (temporary file, then rename) |
+| `edit_file` | Replace an exact, unique string in a file (requires a prior read) |
+| `list_files` | List a directory recursively, skipping `node_modules`/`.git`/`dist`-style directories; capped at 200 entries |
+| `grep_search` | Regex search across files (uses the system `grep` when available, otherwise an in-process chunked scanner) |
+| `run_command` | Run a program directly (no shell — pipes and redirects are unsupported); 30-second timeout |
+| `git_diff` | Show the working-tree or staged diff, optionally limited to a path |
+| `ask_user` | Ask the user a question mid-task, with optional arrow-key choices |
+| `todo` | Maintain a task list that the agent updates as it works |
+| `memory` | Save or list persistent memories |
+| `skill` | Load a reusable skill by name |
+| `enter_plan_mode`, `exit_plan_mode` | Deferred; enter and exit the planning phase |
 | `tool_search` | Activate deferred tools on demand |
 
-### Tool Safety
+Deferred tools withhold their schema until the model requests them by name,
+keeping the default tool list small. Activation is retained for the remainder
+of the session. The system prompt advertises only the tool names, which are
+inexpensive; the schemas are not.
 
-- **Read-before-write guard**: `edit_file` and `write_file` require reading the file first. Stale writes (file modified externally since last read) are rejected.
-- **Concurrency**: Read-only tools (`read_file`, `list_files`, `grep_search`) run in parallel. Write tools get exclusive access.
-- **Classification**: `run_command` classifies commands as read-only (`git status`, `ls`, `tsc`), mutating (`npm install`), or destructive (`rm`) and applies appropriate safety rules.
+### Tool safety
 
-## Architecture
+- **Read-before-write**: `edit_file` and `write_file` require a prior read of
+  the file. A write is rejected if the file was modified externally since that
+  read. Re-reading a line range already present in the conversation returns a
+  short notice rather than the content again, unless compression has evicted it,
+  in which case the claim is dropped.
+- **Concurrency**: Read-only tools (`read_file`, `list_files`, `grep_search`,
+  `git_diff`) run in parallel, up to ten at a time. Write tools require
+  exclusive access; safe tools queued behind one wait only while it actually
+  holds the slot.
+- **Classification**: `run_command` classifies each call by its arguments as
+  read-only (`git status`, `ls`, `tsc`), mutating (`npm install`), or
+  destructive (`rm`), and applies the corresponding rules.
+- **Argument validation**: A call missing a declared required argument is
+  rejected with an error rather than executed, and a `tool_use` block that
+  arrived with truncated JSON is reported rather than run with an empty object.
 
-```
-src/
-  cli.ts           Entry point, argument parsing, REPL loop, SIGINT handling
-  config.ts        Config resolution + first-run interactive setup
-  agent.ts         Core agent: conversation loop with streaming + parallel tools
-  tools.ts         Tool registry + all tool implementations
-  tool-executor.ts Concurrency-controlled parallel tool dispatcher
-  prompt.ts        System prompt assembly (persona, CLAUDE.md, git context)
-  session.ts       Session persistence (atomic JSON writes, latest-pointer)
-  retry.ts         Exponential backoff retry for API errors
-  thinking.ts      Extended Thinking mode support
-  ui.ts            Terminal UI layer (chalk colors, tool call display)
-```
+## Session storage
 
-### How It Works
-
-```
-User types message
-       │
-       ▼
-  Agent.chat()
-       │
-       ▼
-  ┌─ API call (withRetry + streaming) ─────────────────┐
-  │                                                     │
-  │  text delta ──→ writeStream() ──→ terminal output   │
-  │                                                     │
-  │  tool_use block completes ──→ ToolExecutor.enqueue() │
-  │        │                                            │
-  │        ▼                                            │
-  │  Safe tool? ──→ execute NOW (parallel with stream)  │
-  │  Unsafe tool? ──→ wait for exclusive access         │
-  │                                                     │
-  └─────────────────────────────────────────────────────┘
-       │
-       ▼
-  Stream ends, drain() waits for remaining tools
-       │
-       ▼
-  Push assistant message + tool results to history
-       │
-       ▼
-  Model called again if tools were used (loop continues)
-       │
-       ▼
-  No tools → response complete, auto-save session
-```
-
-### Key Design Decisions
-
-**Streaming parallel tools**: Tools start executing as soon as their `tool_use` block is fully received during streaming, not after the entire API response ends. File reads (< 100ms) are typically done before the stream finishes.
-
-**Abort via AbortController**: `SIGINT` aborts the HTTP request and stops the tool loop. No orphaned API calls.
-
-**`rl.once` not `rl.on`**: Each input line is processed completely before the next is accepted. Prevents concurrent `chat()` calls from corrupting message history.
-
-**Session as atomic JSON**: Written to temp file then renamed. A crash mid-write never corrupts the session file.
-
-**Thinking blocks filtered**: Extended Thinking output (the model's private scratchpad) is discarded before storing in history. Keeps context window focused on useful content.
-
-## Session Storage
-
-Sessions are stored globally, one directory per project, keyed by the project
-root (the nearest ancestor holding `.git` or `.triumcode`):
+Sessions are stored globally, one directory per project, keyed by the hash of
+the project root — the nearest ancestor containing `.git` or `.triumcode`. The
+home directory is never accepted as a project root.
 
 ```
 ~/.triumcode/
+  config.json          ← resolved configuration, written by first-run setup
+  memory/              ← user-global memories
   sessions/
     <project-hash>/
-      a3f8b2c1.json    ← session data (messages + metadata)
+      a3f8b2c1.json    ← session data (messages and metadata)
       7e0d4f9a.json
       ...
       session-latest   ← pointer to the active session
 ```
 
-- Keying on the project root rather than the cwd means the same session list is
-  visible no matter which subdirectory the CLI is started from
-- Different projects never share sessions
-- Max 50 sessions per project (oldest auto-pruned)
-- Sessions from the old project-local `.triumcode/sessions/` are migrated on
-  first use
-- Starting the CLI begins a **new** session; `--continue`/`--resume` restore one
-- `--resume` with no argument resumes the most recent session
-- `--resume <prefix>` matches by ID prefix (e.g. `--resume a3f`)
+- Keying on the project root rather than the working directory means the same
+  session list is visible from any subdirectory of the project.
+- Sessions are never shared between projects.
+- At most 50 sessions are retained per project; the oldest are pruned
+  automatically.
+- Sessions in the legacy project-local `.triumcode/sessions/` directory are
+  migrated on first use.
+- Starting the CLI begins a **new** session; `--continue` and `--resume` restore
+  an existing one.
+- `--resume` without an argument resumes the most recent session.
+- `--resume <prefix>` matches by ID prefix, for example `--resume a3f`.
+- `/clear` empties the session in place; `/new` clears the pointer and leaves
+  the previous conversation on disk.
+
+## Architecture
+
+```
+src/
+  cli.ts                  Entry point, argument parsing, REPL loop, pickers, SIGINT handling
+  config.ts               Configuration resolution, first-run setup, model presets
+  agent.ts                Core agent: streaming loop, tools, permissions, plan mode, memory recall
+  tools.ts                Tool registry and all tool implementations
+  tool-executor.ts        Concurrency-controlled parallel tool dispatcher
+  prompt.ts               System prompt assembly (persona, tools, skills, CLAUDE.md, memory)
+  session.ts              Session persistence (atomic JSON writes, project-keyed store)
+  context-compression.ts  Context budgeting, result trimming, prompt cache breakpoints
+  memory.ts               Persistent file-based memory (save, list, recall, injection)
+  permissions.ts          Permission modes, allow/deny rules, dangerous-command detection
+  skills.ts               Skill discovery and prompt expansion
+  thinking.ts             Extended thinking and effort resolution, and degradation
+  markdown.ts             Streaming Markdown renderer for terminal output
+  ui.ts                   Terminal UI layer (Chalk palette, status line, pickers, reports)
+  retry.ts                Exponential backoff retry for API errors
+  providers/
+    index.ts              Protocol to provider lookup
+    types.ts              Protocol and auth vocabulary, SSE reader, shared translation helpers
+    anthropic.ts          Anthropic Messages
+    openai-chat.ts        OpenAI Chat Completions
+    openai-responses.ts   OpenAI Responses
+```
+
+### Execution flow
+
+```
+User submits a message
+       │
+       ▼
+  chat() appends the per-turn reminder and the message text
+       │
+       ├── memory prefetch starts (auxiliary model, concurrent with the first call)
+       ▼
+  ┌─ per iteration ────────────────────────────────────────┐
+  │  consume prefetch → inject <system-reminder> memories  │
+  │  compressHistory()  → budget / trim / light compaction │
+  │  withCacheBreakpoints() → 1 system block + tail block  │
+  │                                                        │
+  │  API call (withRetry + streaming)                      │
+  │                                                        │
+  │  text delta ──→ MarkdownStream ──→ terminal output     │
+  │                                                        │
+  │  tool_use block complete ──→ ToolExecutor.enqueue()    │
+  │        │                                               │
+  │        ▼                                               │
+  │  permission check → allow / deny / confirm             │
+  │  Safe tool? ──→ execute immediately (parallel with     │
+  │                the stream)                             │
+  │  Unsafe tool? ──→ wait for exclusive access            │
+  └────────────────────────────────────────────────────────┘
+       │
+       ▼
+  drain() waits for remaining tools; results are printed
+       │
+       ▼
+  Push the assistant message and tool results to history
+       │
+       ▼
+  No tool calls → response complete, session saved automatically
+```
+
+### Design notes
+
+**Parallel tool execution during streaming.** A tool begins executing as soon
+as its `tool_use` block is fully received, rather than after the response ends.
+File reads, which complete in under 100 ms, are typically finished before the
+stream does.
+
+**Abort via AbortController.** `SIGINT` aborts the HTTP request and stops the
+tool loop. No requests are left orphaned, and no partial assistant turn is
+written to history.
+
+**`rl.once` rather than `rl.on`.** Each input line is processed to completion
+before the next is accepted, preventing concurrent `chat()` calls from
+corrupting message history.
+
+**Sessions as atomic JSON.** The file is written to a temporary path and then
+renamed, so a crash mid-write cannot corrupt it.
+
+**Thinking blocks are discarded.** Extended thinking output is timed and then
+discarded before being stored, keeping the context window focused on useful
+content.
+
+**Protocol translation rather than a second loop.** The agent loop is written
+against the Anthropic Messages format, and the OpenAI providers translate on
+each side of the HTTP call. History, compression, and memory therefore behave
+identically across all three protocols.
+
+**Markdown rendering is deliberately partial.** Bold, inline code, headings,
+and unordered and ordered lists are handled. Italics are not, because
+`snake_case_names` are pervasive in this domain. Content inside a fenced code
+block is never modified.
 
 ## Development
 
 ```bash
-# Build
-npm run build
-
-# Build + run
-npm run dev
-
-# Type check without emitting
-npx tsc --noEmit
+npm run build        # Compile TypeScript to dist/
+npm run dev          # Build and run
+npx tsc --noEmit     # Type check without emitting
+npm test             # Build and run the test suite (node:test over dist/)
 ```
+
+## Contributing
+
+Issues and pull requests are welcome. Run `npm test` before opening a pull
+request.
 
 ## License
 
-MIT
+[MIT](LICENSE) © CTZN01
