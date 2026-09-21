@@ -1068,7 +1068,7 @@ const gitDiffTool = register({
 
 const askUserTool = register({
     name: "ask_user",
-    description: "Ask the user a question and wait for their response. Use this when you need clarification, want to confirm an approach, or need the user to choose between options. The user can also skip by pressing Enter without typing anything.",
+    description: "Ask the user a question and wait for their response. Use this when you need clarification, want to confirm an approach, or need the user to choose between options. The user may skip instead of answering — respect that and continue with your best judgment.",
     inputSchema: {
         type: "object",
         properties: {
@@ -1076,7 +1076,7 @@ const askUserTool = register({
             options: {
                 type: "array",
                 items: { type: "string" },
-                description: "Optional list of choices for the user to pick from (numbered). If omitted, the user types a free-text response."
+                description: "Optional list of choices for the user to pick from. With a terminal, the user selects one with the arrow keys and Enter. If omitted, the user types a free-text response."
             },
         },
         required: ["question"],

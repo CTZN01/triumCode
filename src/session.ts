@@ -1,24 +1,110 @@
 import {
     readFileSync, writeFileSync, existsSync, readdirSync,
-    unlinkSync, mkdirSync, statSync, renameSync,
+    unlinkSync, mkdirSync, statSync, renameSync, copyFileSync,
 } from "node:fs";
 import { join, resolve, dirname, basename } from "node:path";
+import { createHash } from "node:crypto";
+import * as os from "node:os";
 
 // ═══════════════════════════════════════════════════════════════
 // Session persistence — one JSON file per conversation
 // ═══════════════════════════════════════════════════════════════
 //
-// Storage layout:
-//   .triumcode/sessions/<8-char-hex>.json  — full session data
-//   .triumcode/session-latest              — plain-text pointer to last active ID
+// Storage layout (global, one directory per project — as Claude Code does):
+//   ~/.triumcode/sessions/<project-hash>/<8-char-hex>.json  — session data
+//   ~/.triumcode/sessions/<project-hash>/session-latest     — active-session pointer
+//
+// Keying on the project root rather than the cwd keeps one project's
+// conversations together no matter which subdirectory the CLI is started
+// from; a per-cwd store would scatter them across every directory entered.
 //
 // Atomically written via temp + rename so a crash mid-write never
 // corrupts the session file.
 
-const TRIUMCODE_DIR = resolve(".triumcode");
-const SESSIONS_DIR = join(TRIUMCODE_DIR, "sessions");
-const LATEST_FILE = join(TRIUMCODE_DIR, "session-latest");
+const SESSIONS_ROOT = join(os.homedir(), ".triumcode", "sessions");
 const MAX_SESSIONS = 50;
+
+// ── Project-scoped storage ───────────────────────────────────
+
+/**
+ * Nearest ancestor holding a project marker, or the cwd when there is none.
+ * The home directory is never accepted as a root: a stray ~/.git (a dotfiles
+ * repo) would otherwise fold every project on the machine into one store.
+ *
+ * Home is tested *before* the markers, and that order is the whole point:
+ * ~/.triumcode is the global config directory this CLI creates, so it is
+ * itself a marker. Checking markers first made the home guard unreachable —
+ * every directory under home with no project of its own resolved to home and
+ * shared one session store.
+ */
+export function projectRoot(): string {
+    const start = resolve(process.cwd());
+    const home = os.homedir();
+    // homedir() comes from the environment and the cwd from the OS, so their
+    // casing can differ on Windows.
+    const isHome = (dir: string): boolean =>
+        process.platform === "win32"
+            ? dir.toLowerCase() === home.toLowerCase()
+            : dir === home;
+    let dir = start;
+    while (true) {
+        const parent = dirname(dir);
+        if (isHome(dir) || parent === dir) return start;
+        if (existsSync(join(dir, ".git")) || existsSync(join(dir, ".triumcode"))) return dir;
+        dir = parent;
+    }
+}
+
+function projectHash(): string {
+    return createHash("sha256")
+        .update(projectRoot().toLowerCase())
+        .digest("hex")
+        .slice(0, 12);
+}
+
+function sessionsDir(): string {
+    return join(SESSIONS_ROOT, projectHash());
+}
+
+function latestFile(): string {
+    return join(sessionsDir(), "session-latest");
+}
+
+/**
+ * Pull a project's pre-global sessions into the global store, once.
+ *
+ * Copies rather than renames: the project and the home directory are often on
+ * different volumes (the norm on Windows), where rename fails outright. A
+ * marker in the target records that the move happened, so a session the user
+ * later deletes is not resurrected from the legacy copy on the next startup.
+ */
+const MIGRATION_MARKER = ".migrated-from-local";
+
+function migrateLegacySessions(): void {
+    const legacyBase = join(projectRoot(), ".triumcode");
+    const legacyDir = join(legacyBase, "sessions");
+    const legacyLatest = join(legacyBase, "session-latest");
+    if (!existsSync(legacyDir) && !existsSync(legacyLatest)) return;
+
+    const target = sessionsDir();
+    if (existsSync(join(target, MIGRATION_MARKER))) return;
+
+    try {
+        mkdirSync(target, { recursive: true });
+        const files = existsSync(legacyDir)
+            ? readdirSync(legacyDir).filter((f) => f.endsWith(".json"))
+            : [];
+        for (const file of files) {
+            const dest = join(target, file);
+            if (!existsSync(dest)) copyFileSync(join(legacyDir, file), dest);
+        }
+        const latestDest = latestFile();
+        if (existsSync(legacyLatest) && !existsSync(latestDest)) {
+            copyFileSync(legacyLatest, latestDest);
+        }
+        writeFileSync(join(target, MIGRATION_MARKER), new Date().toISOString(), "utf-8");
+    } catch { /* migration is best-effort */ }
+}
 
 // ── Types ──────────────────────────────────────────────────────
 
@@ -45,7 +131,8 @@ export interface SessionIndex {
 // ── Helpers ────────────────────────────────────────────────────
 
 function ensureSessionDir(): void {
-    mkdirSync(SESSIONS_DIR, { recursive: true });
+    migrateLegacySessions();
+    mkdirSync(sessionsDir(), { recursive: true });
 }
 
 function randomId(): string {
@@ -56,39 +143,47 @@ function randomId(): string {
 }
 
 function sessionPath(id: string): string {
-    return join(SESSIONS_DIR, `${id}.json`);
+    return join(sessionsDir(), `${id}.json`);
 }
 
 /** Read the latest-pointer. Returns null if missing or dangling. */
 function readLatest(): string | null {
-    if (!existsSync(LATEST_FILE)) return null;
+    if (!existsSync(latestFile())) return null;
     try {
-        const id = readFileSync(LATEST_FILE, "utf-8").trim();
+        const id = readFileSync(latestFile(), "utf-8").trim();
         if (id && existsSync(sessionPath(id))) return id;
     } catch { /* ignore */ }
     return null;
 }
 
 function writeLatest(id: string): void {
-    try { writeFileSync(LATEST_FILE, id, "utf-8"); } catch { /* best effort */ }
+    try { writeFileSync(latestFile(), id, "utf-8"); } catch { /* best effort */ }
 }
 
-/** Extract a human-readable title from the first user message. */
+// The per-turn reminder is prepended to the user's text as a <system-reminder>
+// block (see prompt.ts). It is machine context, not what the user asked, so it
+// must not become the session title.
+const REMINDER_BLOCK = /<system-reminder>[\s\S]*?<\/system-reminder>/g;
+
+function titleText(text: string): string {
+    return text.replace(REMINDER_BLOCK, " ").replace(/\s+/g, " ").trim();
+}
+
+/** Extract a human-readable title from the first real user message. */
 function extractTitle(messages: unknown[]): string {
     for (const msg of messages) {
-        if (msg && typeof msg === "object" && (msg as any).role === "user") {
-            const content = (msg as any).content;
-            if (typeof content === "string") {
-                return content.length <= 80 ? content : content.slice(0, 77) + "…";
-            }
-            if (Array.isArray(content)) {
-                for (const block of content) {
-                    if (block && typeof block === "object" && block.type === "text" && typeof block.text === "string") {
-                        const text = block.text.replace(/\n/g, " ").trim();
-                        return text.length <= 80 ? text : text.slice(0, 77) + "…";
-                    }
-                }
-            }
+        if (!msg || typeof msg !== "object" || (msg as any).role !== "user") continue;
+        const content = (msg as any).content;
+        const texts = typeof content === "string"
+            ? [content]
+            : Array.isArray(content)
+                ? content
+                    .filter((b: any) => b && typeof b === "object" && b.type === "text" && typeof b.text === "string")
+                    .map((b: any) => b.text as string)
+                : [];
+        for (const text of texts) {
+            const cleaned = titleText(text);
+            if (cleaned) return cleaned.length <= 80 ? cleaned : cleaned.slice(0, 77) + "…";
         }
     }
     return "untitled";
@@ -113,11 +208,11 @@ function atomicWrite(filePath: string, data: string): void {
 
 function pruneOldest(): void {
     try {
-        const entries = readdirSync(SESSIONS_DIR)
+        const entries = readdirSync(sessionsDir())
             .filter((f) => f.endsWith(".json"))
             .map((f) => {
                 try {
-                    const stat = statSync(join(SESSIONS_DIR, f));
+                    const stat = statSync(join(sessionsDir(), f));
                     return { file: f, mtime: stat.mtimeMs };
                 } catch {
                     return { file: f, mtime: 0 };
@@ -127,7 +222,7 @@ function pruneOldest(): void {
 
         while (entries.length >= MAX_SESSIONS) {
             const old = entries.shift()!;
-            try { unlinkSync(join(SESSIONS_DIR, old.file)); } catch { /* best effort */ }
+            try { unlinkSync(join(sessionsDir(), old.file)); } catch { /* best effort */ }
         }
     } catch { /* listing failed — non-fatal */ }
 }
@@ -195,7 +290,7 @@ export function loadSession(identifier?: string): SessionData | null {
             id = identifier;
         } else {
             // Prefix match: must be unambiguous.
-            const matches = readdirSync(SESSIONS_DIR)
+            const matches = readdirSync(sessionsDir())
                 .filter((f) => f.endsWith(".json") && f.startsWith(identifier));
             if (matches.length === 1) {
                 id = matches[0].replace(".json", "");
@@ -224,7 +319,7 @@ export function listSessions(): SessionIndex[] {
 
     let files: string[];
     try {
-        files = readdirSync(SESSIONS_DIR).filter((f) => f.endsWith(".json"));
+        files = readdirSync(sessionsDir()).filter((f) => f.endsWith(".json"));
     } catch {
         return [];
     }
@@ -232,7 +327,7 @@ export function listSessions(): SessionIndex[] {
     const sessions: SessionIndex[] = [];
     for (const file of files) {
         try {
-            const raw = JSON.parse(readFileSync(join(SESSIONS_DIR, file), "utf-8"));
+            const raw = JSON.parse(readFileSync(join(sessionsDir(), file), "utf-8"));
             if (raw && Array.isArray(raw.messages)) {
                 sessions.push({
                     id: raw.id ?? file.replace(".json", ""),
@@ -251,13 +346,14 @@ export function listSessions(): SessionIndex[] {
 
 /** Delete a session by ID. Returns true if something was removed. */
 export function deleteSession(id: string): boolean {
+    ensureSessionDir();
     const p = sessionPath(id);
     if (!existsSync(p)) return false;
     try {
         unlinkSync(p);
-        if (readLatest() === id) {
-            try { unlinkSync(LATEST_FILE); } catch { /* ignore */ }
-        }
+        // The pointer must not be left dangling, or the next save would target
+        // a file that no longer exists and silently resurrect it.
+        if (readLatest() === id) startNewSession();
         return true;
     } catch {
         return false;
@@ -267,4 +363,52 @@ export function deleteSession(id: string): boolean {
 /** ID of the session that would resume next (for display). */
 export function latestSessionId(): string | null {
     return readLatest();
+}
+
+/**
+ * Make `id` the session later saves append to. Called after an explicit
+ * resume: without it, saveSession would keep writing to whichever session the
+ * pointer already named, appending the resumed conversation to the wrong file.
+ */
+export function setActiveSession(id: string): void {
+    ensureSessionDir();
+    writeLatest(id);
+}
+
+/**
+ * Retire the active pointer so the next save mints a new session. The file it
+ * named stays on disk — this is what separates /new (keep the old conversation)
+ * from /clear (empty it in place).
+ *
+ * The store is initialized first: a pending legacy migration copies the old
+ * pointer in, and deleting it afterwards is exactly the point — otherwise the
+ * very run that meant to start fresh would adopt the migrated session.
+ */
+export function startNewSession(): void {
+    ensureSessionDir();
+    try {
+        if (existsSync(latestFile())) unlinkSync(latestFile());
+    } catch { /* best effort */ }
+}
+
+/**
+ * Empty the active session in place, keeping its ID and creation time, so the
+ * wipe survives a restart. Returns false when nothing is active yet.
+ */
+export function clearActiveSession(): boolean {
+    const id = readLatest();
+    if (!id) return false;
+    try {
+        const existing = JSON.parse(readFileSync(sessionPath(id), "utf-8")) as SessionData;
+        const data: SessionData = {
+            ...existing,
+            updated: new Date().toISOString(),
+            title: "untitled",
+            messages: [],
+        };
+        atomicWrite(sessionPath(id), JSON.stringify(data, null, 2));
+        return true;
+    } catch {
+        return false;
+    }
 }

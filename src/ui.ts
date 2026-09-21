@@ -4,6 +4,7 @@ import {
     describeSource, maskSecret,
     type ConfigDeprecation, type ResolvedConfigBundle, type ConfigSource,
 } from "./config.js";
+import { MarkdownStream } from "./markdown.js";
 
 // ═══════════════════════════════════════════════════════════════
 // Terminal UI — all user-visible output goes through here
@@ -17,6 +18,9 @@ const MUTED  = chalk.hex("#7D8796");   // bullets, targets, metadata
 const OK     = chalk.hex("#7BCFA3");   // success
 const WARN   = chalk.hex("#E3B86B");   // warning
 const ERR    = chalk.hex("#F08088");   // failure
+// Inline code in model output. A hue of its own on purpose: every colour above
+// carries a meaning (success, warning, failure), and code is not one of them.
+const CODE   = chalk.hex("#C792EA");
 
 // ── Welcome banner ──────────────────────────────────────────
 
@@ -348,6 +352,21 @@ export function printInterrupted(): void {
     console.log(WARN("\n  (interrupted)"));
 }
 
+/**
+ * One-line notice that a saved conversation was restored — at startup via
+ * --continue/--resume, or mid-session via /resume. The date is formatted by the
+ * caller; everything else here is display only.
+ */
+export function printSessionResumed(id: string, messageCount: number, title: string, when: string): void {
+    const name = title.length <= 50 ? title : title.slice(0, 47) + "...";
+    const detail = [
+        `${messageCount} message${messageCount === 1 ? "" : "s"}`,
+        `"${name}"`,
+        when,
+    ].filter(Boolean).join(" - ");
+    logLine(`  ${OK("✓")} resumed session ${ACCENT(id.slice(0, 8))} ${MUTED(`- ${detail}`)}`);
+}
+
 // ── Tool call display ───────────────────────────────────────
 // Human-readable verbs and result summaries — the model calls tools,
 // the UI translates into Claude Code–style action narration.
@@ -543,17 +562,35 @@ export function printToolError(name: string, error: string): void {
 // ── Interactive question ──────────────────────────────────
 // Displayed when the agent calls ask_user to get input mid-turn.
 
-export function printQuestion(question: string, options?: string[]): void {
+/**
+ * The question line alone, for a caller that renders its own option list — the
+ * arrow-key picker draws the choices and its own key hint, so numbering them
+ * here as well would show the same list twice.
+ */
+export function printQuestionHead(question: string): void {
     ensureLineBreak();
     // Inquirer-style "?" — an emoji here renders double-width in zh-CN
     // terminals and visually dwarfs the text around it.
     console.log(`\n  ${OK("?")} ${chalk.bold(ACCENT(question))}`);
+}
+
+export function printQuestion(question: string, options?: string[]): void {
+    printQuestionHead(question);
     if (options && options.length > 0) {
         for (let i = 0; i < options.length; i++) {
             console.log(ACCENT(`    ${i + 1}. ${options[i]}`));
         }
     }
     console.log(chalk.dim("    Press Enter to skip without answering."));
+}
+
+/**
+ * Echo a choice made with the arrow keys. Selecting with a picker leaves no
+ * trace of what was chosen once the highlight is gone, so without this the
+ * answer is invisible in the transcript.
+ */
+export function printAnswer(answer: string): void {
+    logLine(`  ${OK("✓")} ${answer}`);
 }
 
 // One line of a Codex-style strip picker: `low  [high]  xhigh`. The selection
@@ -589,7 +626,14 @@ export function printTurnEnd(reason: string): void {
 
 // ── Streaming output ────────────────────────────────────────
 
-export function writeStream(text: string): void {
+// Model output is markdown, and it is printed as such: `**bold**` losing its
+// asterisks is the difference between reading a reply and reading its source.
+// The renderer holds back only undecided characters, so text still appears as
+// it arrives (see markdown.ts).
+const markdown = new MarkdownStream({ bold: chalk.bold, muted: MUTED, accent: ACCENT, code: CODE });
+
+/** Print already-rendered stream text, opening an indented line if needed. */
+function emitStream(rendered: string): void {
     // Ends the status, and does so *before* the write: a frame left on screen
     // would occupy the same row as the first chunk of model text, and the
     // erase would take the text with it.
@@ -598,21 +642,53 @@ export function writeStream(text: string): void {
         process.stdout.write("\n");
         afterToolOutput = false;
     }
-    if (!lineOpen) process.stdout.write("  ");
-    process.stdout.write(text);
-    lineOpen = !text.endsWith("\n");
+
+    // Indent the margin on every line, not just the one the chunk happens to
+    // start on. A chunk is whatever the API sent, so "\n\nnext paragraph"
+    // arrives glued to the end of one — indenting only the chunk's first line
+    // left the rest of the reply flush against the terminal edge, at a
+    // different column from the line above it. Blank lines get no margin, or
+    // the terminal shows trailing whitespace on them.
+    const parts = rendered.split("\n");
+    let out = "";
+    for (let i = 0; i < parts.length; i++) {
+        if (i > 0) out += "\n";
+        const atLineStart = i > 0 || !lineOpen;
+        if (atLineStart && parts[i] !== "") out += "  ";
+        out += parts[i];
+    }
+
+    process.stdout.write(out);
+    lineOpen = !rendered.endsWith("\n");
+}
+
+export function writeStream(text: string): void {
+    const rendered = markdown.write(text);
+    // A chunk that was entirely held back prints nothing at all — including no
+    // indentation, and without stopping the spinner a beat early.
+    if (rendered) emitStream(rendered);
 }
 
 // Terminate the streamed line, but only if one is actually open — a turn that
 // emitted no text (tool calls only) must not gain a stray blank line.
 export function endStream(): void {
+    // Release whatever the renderer was still holding: a trailing `*`, or a
+    // line start that never resolved into a list or heading. It is real model
+    // output, so it gets printed rather than dropped.
+    const held = markdown.flush();
+    if (held) emitStream(held);
     ensureLineBreak();
+    // A message boundary is a document boundary. Without this, a message that
+    // ended on an unclosed `**` or fence would leave bold or code switched on,
+    // and the next message would be rendered inside it.
+    markdown.reset();
 }
 
 /** Reset streaming state. Exported for tests: each fake terminal starts clean. */
 export function resetStreamState(): void {
     lineOpen = false;
     afterToolOutput = false;
+    markdown.reset();
 }
 
 // ── Cost report ─────────────────────────────────────────────
@@ -760,7 +836,13 @@ Options:
   --no-thinking    Disable extended thinking for this session
   --effort LEVEL   Thinking depth: low | medium | high | xhigh | max
                    (default: high; also adjustable mid-session via /effort)
-  --resume [id]    Resume a saved session (latest, or by ID prefix)
+  --resume [id]    Resume a saved session: the most recent one, or by ID
+                   prefix. Each project's sessions are stored separately, keyed
+                   by its root directory
+  --continue       Resume the most recent session in this project (the same as
+                   a bare --resume)
+  --new            Start a new session, leaving saved ones untouched. This is
+                   the default; --continue and --resume override it
   --sessions       List all sessions and exit
     --yolo, -y       Bypass ordinary prompts (configured deny rules still apply)
   --plan           Plan mode: read-only, no edits
@@ -783,14 +865,18 @@ Configuration (in order of priority):
   4. Built-in defaults
 
 REPL Commands:
-  /clear           Clear conversation history
+  /clear           Clear the current conversation (empties this session)
+  /new             Start a new conversation; the previous session is kept and
+                   stays visible under /sessions
+  /resume [id]     Resume a saved session. A bare /resume opens a picker over
+                   this project's sessions
   /config          Show the active endpoint, model and API key, and which
                    source each one came from
   /cost            Show token usage and estimated cost
   /compact         Compress conversation history (future)
   /plan            Toggle plan mode
   /effort [level]  Show or change reasoning effort (low..max); a bare /effort
-                   opens a strip picker (left/right arrows, Enter confirms).
+                   opens a picker (up/down arrows, Enter confirms).
                    Thinking turns on with it
   /thinking [on|off]  Show or toggle extended thinking
   /model [name]    Switch model; a bare /model opens a picker over the
