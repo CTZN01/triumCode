@@ -239,7 +239,10 @@ Use the dedicated tools — they have structured I/O, fine-grained permissions, 
 - When multiple small changes are needed in the same file, batch them into one edit_file call rather than making several sequential edits.
 - When the task is simple (one file, one edit), respond with just the tool call and a one-line confirmation. No preamble.`;
 
-const PLAN_MODE = `
+// Exported because a sub-agent spawned under plan mode needs the same notice:
+// it runs with the plan-mode permission mode, so without this it would spend
+// its turn attempting writes the permission layer then refuses.
+export const PLAN_MODE = `
 
 # Plan mode (strict)
 
@@ -307,7 +310,11 @@ function probeWindowsToolsUncached(): string {
 
 // Where the session is running. Constant for the whole session, so it belongs
 // in the cached system prompt rather than in the per-turn reminder.
-function buildEnvironmentContext(): string {
+//
+// Sub-agents carry this and nothing else of the main prompt: cwd and platform
+// are what a tool call needs, and every byte of persona that came with them
+// would be re-sent on every sub-agent request.
+export function buildEnvironmentContext(): string {
     const platform = `${os.platform()} ${os.arch()}`;
     const shell = process.platform === "win32"
         ? (process.env.ComSpec || "cmd.exe")

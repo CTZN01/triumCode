@@ -5,6 +5,7 @@ import { dirname, join, basename, resolve } from "node:path";
 import type Anthropic from "@anthropic-ai/sdk";
 import { getSkill, resolveSkillPrompt } from "./skills.js";
 import { saveMemory, listMemories, MEMORY_TYPES, type MemoryType } from "./memory.js";
+import { describeCustomAgents } from "./subagent.js";
 
 // ═══════════════════════════════════════════════════════════════
 // Tool Interface — each tool's complete behavior contract
@@ -1326,6 +1327,56 @@ register({
         + "Do not save code details, git history, or anything already written in CLAUDE.md.",
 });
 
+// ─── agent ───────────────────────────────────────────────────
+//
+// A sub-agent is not dispatched here. Its call() never runs: the Agent
+// intercepts this name in executeToolCall, because spawning one needs the
+// parent's model, endpoint, permission mode and token counters — none of which
+// a stateless ToolContext carries. The registration exists for the schema the
+// model is given, and for the prompt block that tells it when to delegate.
+
+export const AGENT_TOOL_NAME = "agent";
+
+register({
+    name: AGENT_TOOL_NAME,
+    description: "Delegate a self-contained task to a sub-agent with its own isolated context. The sub-agent runs its own tool loop and returns only its final summary — the intermediate tool calls never reach this conversation, which is what makes this worth using on a search or a survey that would otherwise fill your context with file contents. Types: explore (read-only reconnaissance), plan (read-only implementation design), general (full tools).",
+    inputSchema: {
+        type: "object",
+        properties: {
+            description: { type: "string", description: "A 3-5 word phrase describing the task, shown in the UI" },
+            prompt: {
+                type: "string",
+                description: "The task, in full. The sub-agent sees none of this conversation, so the prompt must be self-contained: what to find or do, where to look, and what the answer should contain.",
+            },
+            type: {
+                type: "string",
+                description: "explore: read-only reconnaissance. plan: read-only implementation design. general: full tools, excluding agent. Defaults to general. Any custom agent defined in .claude/agents/ may be named here instead.",
+            },
+        },
+        required: ["description", "prompt"],
+    },
+    isConcurrencySafe: () => false,
+    isReadOnly: () => true,
+    isDestructive: () => false,
+    maxResultSizeChars: 50_000,
+
+    // Unreachable by design — see above.
+    async call() {
+        return "Error: the agent tool is dispatched by the agent loop, not by the tool executor.";
+    },
+
+    prompt: () => {
+        const block = [
+            "Use the agent tool to delegate a task that would otherwise flood this conversation: a broad search, a survey of several files, or an implementation you want designed before you commit to it. The sub-agent works in its own context and returns only its final summary — the tool calls it makes never enter this conversation.",
+            "Its context is isolated in both directions: it cannot see this conversation, so the prompt must be self-contained (what to find, where to look, what to return).",
+            "Types: explore and plan are read-only and have no shell — use them for anything that only needs to look. general has the full tool set and can change files.",
+            "Do not delegate a task you can finish in one or two tool calls; the round trip costs more than it saves.",
+        ].join("\n");
+        const custom = describeCustomAgents();
+        return custom ? `${block}\n${custom}` : block;
+    },
+});
+
 // ─── tool_search ─────────────────────────────────────────────
 
 const activatedTools = new Set<string>();
@@ -1341,20 +1392,36 @@ export function getDeferredToolNames(): string[] {
         .map((t) => t.name);
 }
 
-// The array that actually goes to the API: un-activated deferred tools dropped,
-// internal fields stripped.
-export function getActiveToolDefinitions(): Anthropic.Tool[] {
-    const all = [...toolRegistry.values()];
+// The tools that may be sent on a request: deferred ones only once tool_search
+// has bought them, and tool_search itself only while something is still behind
+// it. `from` narrows the registry to a caller's own list — a sub-agent's
+// read-only set — so a sub-agent is never handed a tool it must not call.
+function activeTools(from?: Tool[]): Tool[] {
+    const all = from ?? [...toolRegistry.values()];
     const anyDeferred = all.some((t) => t.deferred);
 
     return all
         .filter((t) => t.name !== "tool_search" || anyDeferred)
-        .filter((t) => !t.deferred || activatedTools.has(t.name))
-        .map((t): Anthropic.Tool => ({
-            name: t.name,
-            description: t.description,
-            input_schema: t.inputSchema,
-        }));
+        .filter((t) => !t.deferred || activatedTools.has(t.name));
+}
+
+// Internal fields stripped: what actually goes on the wire.
+function toToolDefinitions(tools: Tool[]): Anthropic.Tool[] {
+    return tools.map((t): Anthropic.Tool => ({
+        name: t.name,
+        description: t.description,
+        input_schema: t.inputSchema,
+    }));
+}
+
+/** The tool array for a main-agent request. */
+export function getActiveToolDefinitions(): Anthropic.Tool[] {
+    return toToolDefinitions(activeTools());
+}
+
+/** The same, for an explicit tool list — a sub-agent's own set. */
+export function getToolDefinitionsFor(tools: Tool[]): Anthropic.Tool[] {
+    return toToolDefinitions(activeTools(tools));
 }
 
 function toolSearchImpl(query: string): string {
@@ -1406,14 +1473,12 @@ const toolSearchTool = register({
 // System prompt assembly
 // ═══════════════════════════════════════════════════════════════
 
-// Collect prompt() from all active tools and join into a single block.
-export function buildToolPromptBlock(): string {
-    const all = [...toolRegistry.values()];
-    const anyDeferred = all.some((t) => t.deferred);
-
-    const fragments = all
-        .filter((t) => t.name !== "tool_search" || anyDeferred)
-        .filter((t) => !t.deferred || activatedTools.has(t.name))
+// Collect prompt() from the active tools and join into a single block.
+//
+// `from` mirrors getToolDefinitionsFor: a sub-agent's prompt block describes
+// its own tools, not the whole registry it has no access to.
+export function buildToolPromptBlock(from?: Tool[]): string {
+    const fragments = activeTools(from)
         .map((t) => t.prompt())
         .filter((p) => p.length > 0);
 

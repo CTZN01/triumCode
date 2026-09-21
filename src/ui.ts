@@ -559,6 +559,38 @@ export function printToolError(name: string, error: string): void {
     logLine(chalk.dim("    ↳ ") + ERR(`✗ Error: ${error}`));
 }
 
+// ── Sub-agent activity ──────────────────────────────────────
+// A sub-agent's own output is captured into a buffer (agent.ts), so these two
+// lines are the whole trace a delegation leaves on screen. They replace the
+// usual tool-call/tool-result pair rather than joining it: the description is
+// already the tool call's target, and a one-line "✓ done" for a task that ran
+// for a minute says less than the token count does.
+
+export function printSubAgentStart(type: string, description: string): void {
+    afterToolOutput = true;
+    const label = description ? `${type} · ${description}` : type;
+    logLine(`  ${MUTED("•")} ${ACCENT("Agent")} ${MUTED(label)}`);
+}
+
+export function printSubAgentEnd(type: string, description: string, tokens: number): void {
+    afterToolOutput = true;
+    logLine(
+        chalk.dim("    ↳ ") + `${OK("✓")} ${chalk.dim(subAgentLabel(type, description))}`
+        + chalk.dim(` (${tokens.toLocaleString("en-US")} tokens)`),
+    );
+}
+
+/** The delegation failed. The parent continues; the user should still see why. */
+export function printSubAgentError(type: string, description: string, error: string): void {
+    afterToolOutput = true;
+    const first = error.split("\n")[0];
+    logLine(chalk.dim("    ↳ ") + `${ERR("✗")} ${ERR(subAgentLabel(type, description))} ${chalk.dim(`— ${first}`)}`);
+}
+
+function subAgentLabel(type: string, description: string): string {
+    return description ? `${type} · ${description}` : type;
+}
+
 // ── Interactive question ──────────────────────────────────
 // Displayed when the agent calls ask_user to get input mid-turn.
 
@@ -667,6 +699,18 @@ export function writeStream(text: string): void {
     // A chunk that was entirely held back prints nothing at all — including no
     // indentation, and without stopping the spinner a beat early.
     if (rendered) emitStream(rendered);
+}
+
+/**
+ * Print a whole chunk of model text, markdown and all.
+ *
+ * The same rendering path as writeStream — this is not a second renderer — for
+ * callers that hold text rather than stream it. A sub-agent accumulates its
+ * output and emits it in one piece, so its markdown has to resolve here too:
+ * printing it raw would show the asterisks.
+ */
+export function printAssistantText(text: string): void {
+    writeStream(text);
 }
 
 // Terminate the streamed line, but only if one is actually open — a turn that

@@ -21,7 +21,11 @@ export interface PermissionDecision {
     key?: string;
 }
 
-const READ_TOOLS = new Set(["read_file", "list_files", "grep_search", "tool_search", "ask_user", "todo"]);
+// `agent` is here because a delegation is reconnaissance by construction: the
+// parent hands work to a context it cannot see, and the sub-agent inherits
+// whatever mode the parent is in. A deny rule on it still wins — checkRules
+// runs first — which is the switch for "no sub-agents in this project".
+const READ_TOOLS = new Set(["read_file", "list_files", "grep_search", "tool_search", "ask_user", "todo", "agent"]);
 const EDIT_TOOLS = new Set(["write_file", "edit_file"]);
 // The memory tool writes only into its own memory directories, never the
 // workspace — allowed like a read tool, plan mode included.

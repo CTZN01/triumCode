@@ -7,6 +7,7 @@ TriumCode supports three API protocols, so it can connect to Anthropic directly 
 ## Features
 
 - **Parallel tool execution during streaming** — a tool begins executing as soon as its `tool_use` block is complete, without waiting for the response to finish.
+- **Sub-agents** — delegate a broad search or a whole side task to an agent with its own isolated context, and get back only its summary.
 - **Three API protocols** — `anthropic`, `openai-chat`, and `openai-responses`, selected per model.
 - **Prompt cache–aware context management** — a single cacheable system block, volatile context moved to a per-turn reminder, and a tool-output budget that trims in one pass so the cached prefix stays stable.
 - **Persistent memory** — file-based, with project and user layers, semantic recall, and keyword fallback.
@@ -418,6 +419,7 @@ returns to the prompt. **Ctrl+C** twice while idle exits.
 | `todo` | Maintain a task list that the agent updates as it works |
 | `memory` | Save or list persistent memories |
 | `skill` | Load a reusable skill by name |
+| `agent` | Delegate a self-contained task to a sub-agent with its own context (see [Sub-agents](#sub-agents)) |
 | `enter_plan_mode`, `exit_plan_mode` | Deferred; enter and exit the planning phase |
 | `tool_search` | Activate deferred tools on demand |
 
@@ -443,6 +445,72 @@ inexpensive; the schemas are not.
 - **Argument validation**: A call missing a declared required argument is
   rejected with an error rather than executed, and a `tool_use` block that
   arrived with truncated JSON is reported rather than run with an empty object.
+
+## Sub-agents
+
+A large task pushed through one agent loop saturates the context window: the
+intermediate `tool_use` / `tool_result` traffic crowds out the reasoning the
+conversation is actually about. The `agent` tool splits the work instead. The
+main agent delegates a self-contained task, the sub-agent runs its own tool
+loop in a **separate message history**, and only its final text comes back. The
+files it read and the commands it ran never enter the main conversation.
+
+```
+main agent ──agent(explore, "where is auth handled?")──► sub-agent
+                                                            │ read_file, grep_search …
+                                                            │ (own history, discarded)
+       ◄──────── "Auth is in src/auth.ts:42, called from src/cli.ts:10" ────┘
+```
+
+| Type | Tools | Use |
+|------|-------|-----|
+| `explore` | `read_file`, `list_files`, `grep_search` | Reconnaissance — where something lives, how it connects |
+| `plan` | same | Design an implementation before committing to it |
+| `general` | everything except `agent` | A whole task: read, change, verify |
+
+An unknown or omitted `type` falls back to `general`.
+
+- **Read-only is enforced by the tool list**, not by the prompt. `explore` and
+  `plan` are never handed a tool that writes or runs anything, so a
+  misbehaving model has nothing to misuse. Their contracts restate the
+  restriction so they do not spend turns asking for a tool that is not there.
+- **Plan mode is inherited.** A sub-agent spawned while the session is in plan
+  mode runs in plan mode too; everywhere else it runs with permissions already
+  granted to the parent. Dropping the mode instead would let a delegation
+  become the way around a read-only session.
+- **No recursion.** A `general` sub-agent's tool list excludes `agent`, and so
+  does a custom agent's. Nesting multiplies token use per level, and one level
+  covers the real cases.
+- **Errors are isolated.** A sub-agent that throws returns
+  `Sub-agent error: …` as its tool result. The parent continues and decides
+  whether to retry, narrow the prompt, or do the work itself.
+- **The budget is smaller** (4096 output tokens against the main agent's
+  32000), and the prompt asks for a summary with `path:line` references rather
+  than pasted file contents.
+- **Ctrl+C propagates one way**: interrupting the parent interrupts the
+  sub-agent, never the reverse.
+- Sub-agent tokens are folded into the parent's counters, so `/cost` reports
+  the true total for the session.
+
+### Custom agents
+
+A sub-agent type can be defined in Markdown, in the same places skills live:
+
+```markdown
+---
+name: reviewer
+description: Review a diff and report findings
+allowed-tools: read_file, grep_search, git_diff
+---
+
+Review the change for correctness and report findings as a list.
+```
+
+Project-level `.claude/agents/` overrides user-level `~/.claude/agents/` of the
+same name, and either overrides a built-in type — a file named `explore.md`
+replaces the built-in `explore` contract and tool set. Omitting `allowed-tools`
+grants the general set. The tool list is still filtered: `agent`,
+`enter_plan_mode` and `exit_plan_mode` are never handed to a sub-agent.
 
 ## Session storage
 
@@ -491,6 +559,7 @@ src/
   memory.ts               Persistent file-based memory (save, list, recall, injection)
   permissions.ts          Permission modes, allow/deny rules, dangerous-command detection
   skills.ts               Skill discovery and prompt expansion
+  subagent.ts             Sub-agent types, read-only tool sets, .claude/agents discovery
   thinking.ts             Extended thinking and effort resolution, and degradation
   markdown.ts             Streaming Markdown renderer for terminal output
   ui.ts                   Terminal UI layer (Chalk palette, status line, pickers, reports)
