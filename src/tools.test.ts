@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getTool, toolResultLimit, type ReadFileState, type TodoItem, type ToolContext } from "./tools.js";
@@ -260,4 +260,168 @@ test("todo normalizes invalid status to pending", async () => {
     }, ctx);
 
     assert.equal(ctx.todos![0].status, "pending");
+});
+
+// ─── edit_file / multi_edit ──────────────────────────────────
+//
+// Every edit that misses costs a round trip: the model re-reads the file,
+// re-derives its anchor, and re-sends the whole conversation prefix. These
+// tests pin the two things that stop that — the tool hands back the region it
+// changed, and a miss comes back with the real lines quoted.
+
+test("edit_file returns the edited region, numbered like read_file", async () => {
+    const tool = getTool("edit_file")!;
+    const path = tempFile("echo.ts", "const a = 1;\nconst b = 2;\nconst c = 3;\n");
+
+    const result = await tool.call({ file_path: path, old_string: "const b = 2;", new_string: "const b = 22;" }, {});
+
+    assert.match(result, /^Edited .* at line 2 \(\+1\/-1 lines\)/);
+    // Context on both sides, so the next anchor can be quoted from the result
+    // instead of from a second read.
+    assert.match(result, /^\s*1 \| const a = 1;$/m);
+    assert.match(result, /^\s*2 \| const b = 22;$/m);
+    assert.match(result, /^\s*3 \| const c = 3;$/m);
+});
+
+test("edit_file quotes the closest real lines when old_string is missing", async () => {
+    const tool = getTool("edit_file")!;
+    const path = tempFile("miss.ts", "function alpha() {\n    return 1;\n}\n");
+
+    const result = await tool.call({
+        file_path: path,
+        old_string: "function alpha() {\n    return 2;\n}",
+        new_string: "function alpha() {\n    return 3;\n}",
+    }, {});
+
+    assert.match(result, /Error: old_string not found/);
+    assert.match(result, /closest match is at lines 1-3/);
+    // The point of the diagnostic: these are the file's actual bytes, so the
+    // retry is a copy rather than another guess.
+    assert.match(result, /1 \| function alpha\(\) \{/);
+    assert.match(result, /2 \|     return 1;/);
+});
+
+test("edit_file matches past invisible trailing whitespace and says so", async () => {
+    const tool = getTool("edit_file")!;
+    const path = tempFile("trail.ts", "const a = 1;   \nconst b = 2;\n");
+
+    const result = await tool.call({
+        file_path: path,
+        old_string: "const a = 1;\nconst b = 2;",
+        new_string: "const a = 11;\nconst b = 22;",
+    }, {});
+
+    assert.doesNotMatch(result, /^Error/);
+    assert.match(result, /Note: matched ignoring trailing whitespace/);
+    assert.equal(readFileSync(path, "utf-8"), "const a = 11;\nconst b = 22;\n");
+});
+
+test("edit_file reports an indentation mismatch without rewriting the file", async () => {
+    const tool = getTool("edit_file")!;
+    const original = "function f() {\n\treturn 1;\n}\n";
+    const path = tempFile("indent.ts", original);
+
+    const result = await tool.call({
+        file_path: path,
+        old_string: "function f() {\n    return 1;\n}",
+        new_string: "function f() {\n    return 2;\n}",
+    }, {});
+
+    assert.match(result, /ignoring indentation/);
+    assert.match(result, /2 \| \treturn 1;/);
+    // Deliberately not applied: re-indenting the replacement would change code
+    // the model did not ask to change.
+    assert.equal(readFileSync(path, "utf-8"), original);
+});
+
+test("edit_file replace_all changes every occurrence", async () => {
+    const tool = getTool("edit_file")!;
+    const path = tempFile("many.ts", "a\nb\na\nb\n");
+
+    const result = await tool.call({ file_path: path, old_string: "a", new_string: "z", replace_all: true }, {});
+
+    assert.match(result, /Edited 2 occurrences/);
+    assert.equal(readFileSync(path, "utf-8"), "z\nb\nz\nb\n");
+});
+
+test("edit_file replace_all reports the full occurrence count", async () => {
+    const tool = getTool("edit_file")!;
+    const path = tempFile("many-more.ts", `${"a\n".repeat(205)}`);
+
+    const result = await tool.call({ file_path: path, old_string: "a", new_string: "z", replace_all: true }, {});
+
+    assert.match(result, /Edited 205 occurrences/);
+    assert.equal(readFileSync(path, "utf-8"), "z\n".repeat(205));
+});
+
+test("edit_file refuses an ambiguous anchor and offers replace_all", async () => {
+    const tool = getTool("edit_file")!;
+    const path = tempFile("dup.ts", "a\nb\na\n");
+
+    const result = await tool.call({ file_path: path, old_string: "a", new_string: "z" }, {});
+
+    assert.match(result, /occurs 2 times/);
+    assert.match(result, /lines 1, 3/);
+    assert.match(result, /replace_all: true/);
+});
+
+test("multi_edit applies several edits to one file in one call", async () => {
+    const tool = getTool("multi_edit")!;
+    const path = tempFile("batch.ts", "const a = 1;\nconst b = 2;\nconst c = 3;\n");
+
+    const result = await tool.call({
+        file_path: path,
+        edits: [
+            { old_string: "const a = 1;", new_string: "const a = 10;" },
+            { old_string: "const c = 3;", new_string: "const c = 30;" },
+        ],
+    }, {});
+
+    assert.match(result, /Edited 2 regions/);
+    assert.equal(readFileSync(path, "utf-8"), "const a = 10;\nconst b = 2;\nconst c = 30;\n");
+    assert.match(result, /1 \| const a = 10;/);
+    assert.match(result, /3 \| const c = 30;/);
+});
+
+test("multi_edit keeps returned regions correct when edits are out of order", async () => {
+    const tool = getTool("multi_edit")!;
+    const path = tempFile("reverse.ts", "a\nb\nc\n");
+
+    const result = await tool.call({
+        file_path: path,
+        edits: [
+            { old_string: "c", new_string: "c\nnew-c" },
+            { old_string: "a", new_string: "a\nnew-a" },
+        ],
+    }, {});
+
+    assert.match(result, /4 \| c$/m);
+    assert.match(result, /5 \| new-c$/m);
+    assert.match(result, /1 \| a$/m);
+    assert.match(result, /2 \| new-a$/m);
+    assert.equal(readFileSync(path, "utf-8"), "a\nnew-a\nb\nc\nnew-c\n");
+});
+
+test("multi_edit writes nothing when one edit in the batch fails", async () => {
+    const tool = getTool("multi_edit")!;
+    const original = "const a = 1;\nconst b = 2;\n";
+    const path = tempFile("atomic.ts", original);
+
+    const result = await tool.call({
+        file_path: path,
+        edits: [
+            { old_string: "const a = 1;", new_string: "const a = 10;" },
+            { old_string: "not in the file", new_string: "nope" },
+        ],
+    }, {});
+
+    assert.match(result, /edit 2 of 2 failed/);
+    assert.match(result, /whole batch was discarded/);
+    assert.equal(readFileSync(path, "utf-8"), original);
+});
+
+test("multi_edit rejects an empty batch", async () => {
+    const tool = getTool("multi_edit")!;
+    const result = await tool.call({ file_path: tempFile("empty.ts", "a\n"), edits: [] }, {});
+    assert.match(result, /non-empty array/);
 });

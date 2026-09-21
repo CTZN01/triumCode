@@ -213,7 +213,8 @@ Use the dedicated tools — they have structured I/O, fine-grained permissions, 
 | Instead of... | Use... | Why |
 |---|---|---|
 | cat / head / tail | read_file | Tracks read state, enforces read-before-write |
-| sed / awk | edit_file | Exact string match, rejects stale writes |
+| sed / awk | edit_file | Exact string match, rejects stale writes, returns the edited region |
+| repeated edit_file on one file | multi_edit | One call, one write, atomic if any edit fails |
 | find / ls -R | list_files | Filters noise (node_modules, .git), depth-limited |
 | grep / rg | grep_search | Structured output, scan ceiling, regex validation |
 | shell execution | run_command | No shell — safer, explicit args, timeout enforced |
@@ -236,10 +237,15 @@ Use the dedicated tools — they have structured I/O, fine-grained permissions, 
 
 - Do not summarize what you just did at the end of a turn — the user can see the tool output.
 - Do not repeat the same information in prose that is already visible in a code block or tool result.
-- When multiple small changes are needed in the same file, batch them into one edit_file call rather than making several sequential edits.
+- When multiple small changes are needed in the same file, send them as one multi_edit call rather than several sequential edit_file calls. Every extra edit is another full round trip over the same conversation prefix.
+- After an edit, the tool returns the edited region with line numbers. Quote your next old_string straight from that result instead of re-reading the file.
+- If an edit reports that old_string was not found, it quotes the closest lines from the file. Copy them verbatim rather than rewriting the anchor from memory.
 - When the task is simple (one file, one edit), respond with just the tool call and a one-line confirmation. No preamble.`;
 
-const PLAN_MODE = `
+// Exported because a sub-agent spawned under plan mode needs the same notice:
+// it runs with the plan-mode permission mode, so without this it would spend
+// its turn attempting writes the permission layer then refuses.
+export const PLAN_MODE = `
 
 # Plan mode (strict)
 
@@ -307,7 +313,11 @@ function probeWindowsToolsUncached(): string {
 
 // Where the session is running. Constant for the whole session, so it belongs
 // in the cached system prompt rather than in the per-turn reminder.
-function buildEnvironmentContext(): string {
+//
+// Sub-agents carry this and nothing else of the main prompt: cwd and platform
+// are what a tool call needs, and every byte of persona that came with them
+// would be re-sent on every sub-agent request.
+export function buildEnvironmentContext(): string {
     const platform = `${os.platform()} ${os.arch()}`;
     const shell = process.platform === "win32"
         ? (process.env.ComSpec || "cmd.exe")

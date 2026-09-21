@@ -5,6 +5,7 @@ import { dirname, join, basename, resolve } from "node:path";
 import type Anthropic from "@anthropic-ai/sdk";
 import { getSkill, resolveSkillPrompt } from "./skills.js";
 import { saveMemory, listMemories, MEMORY_TYPES, type MemoryType } from "./memory.js";
+import { describeCustomAgents } from "./subagent.js";
 
 // ═══════════════════════════════════════════════════════════════
 // Tool Interface — each tool's complete behavior contract
@@ -368,16 +369,281 @@ const writeFileTool = register({
 
 // ─── edit_file ───────────────────────────────────────────────
 
-function matchLines(content: string, needle: string): number[] {
-    const lines: number[] = [];
-    for (let i = content.indexOf(needle); i !== -1 && lines.length < 5; i = content.indexOf(needle, i + needle.length)) {
-        lines.push(content.slice(0, i).split("\n").length);
-    }
-    return lines;
+// A failed edit costs a whole round trip: the model re-reads the file,
+// re-derives its anchor, and pays for the conversation prefix all over again.
+// Two things cut that rate. The tool hands back the region it changed, so the
+// next anchor is written from text the model has actually seen rather than
+// from memory of a file that no longer exists. And a miss comes back with the
+// offending lines quoted verbatim, so the retry is a copy instead of a guess.
+
+const EDIT_CONTEXT_LINES = 3;
+const EDIT_SNIPPET_MAX_LINES = 40;
+const EDIT_SNIPPET_MAX_LINE_CHARS = 240;
+const EDIT_DIAGNOSTIC_MAX_LINES = 20;
+
+function clipLine(line: string): string {
+    if (line.length <= EDIT_SNIPPET_MAX_LINE_CHARS) return line;
+    return `${line.slice(0, EDIT_SNIPPET_MAX_LINE_CHARS)} ...[+${line.length - EDIT_SNIPPET_MAX_LINE_CHARS} chars]`;
 }
 
-function editFileImpl(input: { file_path: string; old_string: string; new_string: string }): string {
-    if (input.old_string === "") return "Error: old_string must not be empty.";
+// Numbered the way read_file numbers them, so a model reading one tool's
+// output can quote line numbers straight into the other.
+function renderRegion(lines: string[], start: number, end: number): string {
+    const lo = Math.max(1, start);
+    const hi = Math.min(lines.length, end);
+    if (hi < lo) return "";
+    const width = String(hi).length;
+    const out: string[] = [];
+    for (let i = lo; i <= hi; i++) out.push(`${String(i).padStart(width)} | ${clipLine(lines[i - 1])}`);
+    return out.join("\n");
+}
+
+function snippetAround(lines: string[], start: number, end: number): string {
+    let lo = Math.max(1, start - EDIT_CONTEXT_LINES);
+    let hi = Math.min(lines.length, end + EDIT_CONTEXT_LINES);
+    if (hi - lo + 1 > EDIT_SNIPPET_MAX_LINES) {
+        if (end - start + 1 >= EDIT_SNIPPET_MAX_LINES) {
+            lo = start;
+            hi = start + EDIT_SNIPPET_MAX_LINES - 1;
+        } else {
+            hi = lo + EDIT_SNIPPET_MAX_LINES - 1;
+        }
+    }
+    return renderRegion(lines, lo, hi);
+}
+
+function occurrences(haystack: string, needle: string, limit: number): { positions: number[]; count: number } {
+    const positions: number[] = [];
+    if (needle === "") return { positions, count: 0 };
+    let count = 0;
+    for (let i = haystack.indexOf(needle); i !== -1; i = haystack.indexOf(needle, i + needle.length)) {
+        count++;
+        if (positions.length < limit) positions.push(i);
+    }
+    return { positions, count };
+}
+
+function lineOfIndex(content: string, index: number): number {
+    return content.slice(0, index).split("\n").length;
+}
+
+type LineWindow = { startLine: number; endLine: number };
+
+// Compares whole lines, so a hit maps back to exact line numbers instead of a
+// character offset that whitespace normalization has already invalidated.
+function findWindows(
+    fileLines: string[],
+    needleLines: string[],
+    cmp: (a: string, b: string) => boolean,
+    limit: number,
+): LineWindow[] {
+    const out: LineWindow[] = [];
+    if (needleLines.length === 0 || needleLines.length > fileLines.length) return out;
+    const lastStart = fileLines.length - needleLines.length;
+    for (let s = 0; s <= lastStart; s++) {
+        let ok = true;
+        for (let j = 0; j < needleLines.length; j++) {
+            if (!cmp(fileLines[s + j], needleLines[j])) { ok = false; break; }
+        }
+        if (ok) {
+            out.push({ startLine: s + 1, endLine: s + needleLines.length });
+            if (out.length > limit) break;
+        }
+    }
+    return out;
+}
+
+const sameIgnoringTrailing = (a: string, b: string) => a.replace(/\s+$/, "") === b.replace(/\s+$/, "");
+const sameIgnoringIndent = (a: string, b: string) => a.trim() === b.trim();
+
+// Where the model probably aimed. Only has to be good enough to quote back at
+// it — a verbatim quote turns the retry from a guess into a copy.
+function closestWindow(fileLines: string[], needleLines: string[]): LineWindow | null {
+    const anchors = needleLines.filter((l) => l.trim() !== "");
+    if (anchors.length === 0 || fileLines.length === 0) return null;
+    for (const anchor of anchors) {
+        const idx = fileLines.findIndex((l) => l.trim() === anchor.trim());
+        if (idx !== -1) return { startLine: idx + 1, endLine: Math.min(fileLines.length, idx + needleLines.length) };
+    }
+    const head = anchors[0].trim().slice(0, 12);
+    const idx = fileLines.findIndex((l) => l.trim().startsWith(head));
+    return idx === -1 ? null : { startLine: idx + 1, endLine: Math.min(fileLines.length, idx + needleLines.length) };
+}
+
+type EditResult =
+    | { ok: true; content: string; startLine: number; endLine: number; replaced: number; relaxed: string | null }
+    | { ok: false; message: string };
+
+function applyEdit(content: string, oldString: string, newString: string, replaceAll: boolean): EditResult {
+    if (oldString === "") return { ok: false, message: "Error: old_string must not be empty." };
+
+    // The file on disk may be CRLF while the model wrote LF; without this,
+    // every multi-line edit against a Windows checkout reports "not found".
+    let needle = oldString;
+    let replacement = newString;
+    if (!needle.includes("\r\n") && content.includes("\r\n")) {
+        needle = needle.replace(/\r?\n/g, "\r\n");
+        replacement = replacement.replace(/\r?\n/g, "\r\n");
+    }
+
+    if (needle === replacement) {
+        return { ok: false, message: "No change: old_string and new_string are identical." };
+    }
+
+    const hits = occurrences(content, needle, 200);
+    if (hits.count === 1 || (hits.count > 1 && replaceAll)) {
+        const index = hits.positions[0];
+        const next = hits.count > 1
+            ? content.split(needle).join(replacement)
+            : content.slice(0, index) + replacement + content.slice(index + needle.length);
+        const startLine = lineOfIndex(content, index);
+        return {
+            ok: true,
+            content: next,
+            startLine,
+            endLine: startLine + replacement.split("\n").length - 1,
+            replaced: hits.count,
+            relaxed: null,
+        };
+    }
+    if (hits.count > 1) {
+        const where = hits.positions.slice(0, 5).map((i) => lineOfIndex(content, i)).join(", ");
+        const howMany = String(hits.count);
+        return {
+            ok: false,
+            message: `Error: old_string occurs ${howMany} times in the file (lines ${where}). Include more surrounding context to make it unique, or pass replace_all: true to change every occurrence.`,
+        };
+    }
+
+    // ── Relaxed matching ────────────────────────────────────────
+    // A miss costs a round trip, so before giving up: match again ignoring
+    // trailing whitespace, which is invisible to the model and is the usual
+    // culprit. Indentation is reported but never applied — silently
+    // re-indenting the replacement would change code it did not ask to change.
+    const fileLines = content.split("\n");
+    const needleLines = needle.split("\n");
+
+    const trailing = findWindows(fileLines, needleLines, sameIgnoringTrailing, 5);
+    if (trailing.length === 1) {
+        const { startLine, endLine } = trailing[0];
+        const inserted = replacement.split("\n");
+        const next = [
+            ...fileLines.slice(0, startLine - 1),
+            ...inserted,
+            ...fileLines.slice(endLine),
+        ].join("\n");
+        return {
+            ok: true,
+            content: next,
+            startLine,
+            endLine: startLine + inserted.length - 1,
+            replaced: 1,
+            relaxed: "ignoring trailing whitespace",
+        };
+    }
+
+    const indented = findWindows(fileLines, needleLines, sameIgnoringIndent, 5);
+    if (indented.length >= 1) {
+        const { startLine, endLine } = indented[0];
+        const quoted = renderRegion(fileLines, startLine, Math.min(endLine, startLine + EDIT_DIAGNOSTIC_MAX_LINES - 1));
+        return {
+            ok: false,
+            message: `Error: old_string is not present verbatim, but lines ${startLine}-${endLine} match it ignoring indentation:\n\n${quoted}\n\nRe-send the edit with those exact lines as old_string.`,
+        };
+    }
+
+    const near = closestWindow(fileLines, needleLines);
+    if (near) {
+        const quoted = renderRegion(fileLines, near.startLine, Math.min(near.endLine, near.startLine + EDIT_DIAGNOSTIC_MAX_LINES - 1));
+        return {
+            ok: false,
+            message: `Error: old_string not found in the file. The closest match is at lines ${near.startLine}-${near.endLine}:\n\n${quoted}\n\nCopy those lines verbatim as old_string, or re-read the file with read_file to see its current contents.`,
+        };
+    }
+    return {
+        ok: false,
+        message: "Error: old_string not found in the file, and no line in it comes close. Re-read the file with read_file and quote its current contents.",
+    };
+}
+
+function editFileImpl(input: { file_path: string; old_string: string; new_string: string; replace_all?: boolean }): string {
+    let content: string;
+    try {
+        content = readFileSync(input.file_path, "utf-8");
+    } catch (e: any) {
+        return `Error reading file: ${e.message}`;
+    }
+
+    const applied = applyEdit(content, input.old_string, input.new_string, input.replace_all === true);
+    if (!applied.ok) return applied.message;
+
+    const written = writeFileImpl({ file_path: input.file_path, content: applied.content });
+    if (written.startsWith("Error")) return written;
+
+    const removed = input.old_string.split("\n").length * applied.replaced;
+    const added = input.new_string.split("\n").length * applied.replaced;
+    const where = applied.replaced > 1
+        ? `Edited ${applied.replaced} occurrences in ${input.file_path}`
+        : `Edited ${input.file_path} at line ${applied.startLine}`;
+    const note = applied.relaxed === null ? "" : `\nNote: matched ${applied.relaxed}.`;
+    const snippet = snippetAround(applied.content.split("\n"), applied.startLine, applied.endLine);
+    return `${where} (+${added}/-${removed} lines)${note}\n\n${snippet}`;
+}
+
+const editFileTool = register({
+    name: "edit_file",
+    description: "Edit a file by replacing an exact string. old_string must occur exactly once in the file unless replace_all is true — include enough surrounding context to make it unique. Returns the line that changed plus the edited region, so you can chain further edits without re-reading.",
+    inputSchema: {
+        type: "object",
+        properties: {
+            file_path: { type: "string", description: "The path to the file to edit" },
+            old_string: { type: "string", description: "The exact string to find. Must be unique in the file." },
+            new_string: { type: "string", description: "The string to replace it with" },
+            replace_all: { type: "boolean", description: "Replace every occurrence instead of requiring a unique match. Default false." },
+        },
+        required: ["file_path", "old_string", "new_string"],
+    },
+    isConcurrencySafe: () => false,
+    isReadOnly: () => false,
+    isDestructive: () => false,
+    // Bigger than a one-line confirmation on purpose: the edited region is the
+    // cheapest context the model can get, and paying ~2 KB to avoid a re-read
+    // that costs the whole file is the trade this tool exists to make.
+    maxResultSizeChars: 4_000,
+
+    async call(input, ctx) {
+        const absPath = resolve(input.file_path);
+        if (ctx.readFileState) {
+            const blocked = staleWrite(absPath, "editing", ctx.readFileState);
+            if (blocked !== null) return blocked;
+        }
+        const result = editFileImpl(input as { file_path: string; old_string: string; new_string: string; replace_all?: boolean });
+        if (ctx.readFileState && !result.startsWith("Error")) {
+            recordRead(absPath, ctx.readFileState);
+        }
+        return result;
+    },
+
+    prompt: () =>
+        "edit_file replaces an exact, unique substring and returns the edited region with line " +
+        "numbers — quote straight from that result for your next edit instead of re-reading the " +
+        "file. Read the file first; the edit is rejected if it has not been read or was modified " +
+        "since. If old_string is not unique, either widen it or pass replace_all: true.",
+});
+
+// ─── multi_edit ─────────────────────────────────────────────
+
+// Several changes to one file, one round trip. Sequential edits to the same
+// file are the single largest source of wasted turns in this agent: each one
+// re-sends the conversation prefix, and each one after a miss re-reads the
+// file as well. Batching them removes the turns in between, and validating
+// every edit before writing anything keeps the batch atomic.
+type MultiEditInput = { old_string: string; new_string: string; replace_all?: boolean };
+
+function multiEditImpl(input: { file_path: string; edits: MultiEditInput[] }): string {
+    if (!Array.isArray(input.edits) || input.edits.length === 0) {
+        return "Error: edits must be a non-empty array of { old_string, new_string } objects.";
+    }
 
     let content: string;
     try {
@@ -386,50 +652,79 @@ function editFileImpl(input: { file_path: string; old_string: string; new_string
         return `Error reading file: ${e.message}`;
     }
 
-    let oldString = input.old_string;
-    let newString = input.new_string;
+    const regions: Array<{ startLine: number; endLine: number }> = [];
+    let added = 0;
+    let removed = 0;
+    let current = content;
 
-    // The file on disk may be CRLF while the model wrote LF; without this, every
-    // multi-line edit against a Windows checkout reports "not found".
-    if (!oldString.includes("\r\n") && content.includes("\r\n")) {
-        oldString = oldString.replace(/\r?\n/g, "\r\n");
-        newString = newString.replace(/\r?\n/g, "\r\n");
+    for (let i = 0; i < input.edits.length; i++) {
+        const edit = input.edits[i] as MultiEditInput | undefined;
+        const oldString = typeof edit?.old_string === "string" ? edit.old_string : "";
+        const newString = typeof edit?.new_string === "string" ? edit.new_string : "";
+        const result = applyEdit(current, oldString, newString, edit?.replace_all === true);
+        if (!result.ok) {
+            const detail = result.message.replace(/^Error: /, "");
+            return `Error: edit ${i + 1} of ${input.edits.length} failed — ${detail}\n\nNothing was written: the whole batch was discarded.`;
+        }
+        // Keep earlier regions in final-file coordinates. A later edit may be
+        // anchored above one of them, so its line delta shifts that region.
+        const oldLineCount = oldString.split("\n").length;
+        const newLineCount = newString.split("\n").length;
+        const delta = (newLineCount - oldLineCount) * result.replaced;
+        const oldEndLine = result.startLine + oldLineCount - 1;
+        for (const region of regions) {
+            if (region.startLine > oldEndLine) {
+                region.startLine += delta;
+                region.endLine += delta;
+            }
+        }
+        regions.push({ startLine: result.startLine, endLine: result.endLine });
+        added += newString.split("\n").length * result.replaced;
+        removed += oldString.split("\n").length * result.replaced;
+        current = result.content;
     }
 
-    if (oldString === newString) return "No change: old_string and new_string are identical.";
-
-    const count = content.split(oldString).length - 1;
-    if (count === 0) return `Error: old_string not found in ${input.file_path}.`;
-    if (count > 1) {
-        const lines = matchLines(content, oldString).join(", ");
-        return `Error: old_string occurs ${count} times in ${input.file_path} (lines ${lines}). Include more surrounding context.`;
-    }
-
-    const line = content.slice(0, content.indexOf(oldString)).split("\n").length;
-    const replacement = content.split(oldString).join(newString);
-    const removedLines = oldString.split("\n").length;
-    const addedLines = newString.split("\n").length;
-    const written = writeFileImpl({ file_path: input.file_path, content: replacement });
+    const written = writeFileImpl({ file_path: input.file_path, content: current });
     if (written.startsWith("Error")) return written;
-    return `Edited ${input.file_path} at line ${line} (+${addedLines}/-${removedLines} lines)`;
+
+    const lines = current.split("\n");
+    const shown = Math.min(regions.length, 3);
+    const parts: string[] = [];
+    for (let i = 0; i < shown; i++) {
+        parts.push(snippetAround(lines, regions[i].startLine, regions[i].endLine));
+    }
+    const more = regions.length > shown ? ` (showing ${shown} of ${regions.length} regions)` : "";
+    const body = parts.length > 0 ? `\n\n${parts.join("\n...\n")}` : "";
+    return `Edited ${regions.length} region${regions.length === 1 ? "" : "s"} in ${input.file_path} (+${added}/-${removed} lines)${more}${body}`;
 }
 
-const editFileTool = register({
-    name: "edit_file",
-    description: "Edit a file by replacing an exact string. old_string must occur exactly once in the file — include enough surrounding context to make it unique. Returns the line that changed.",
+const multiEditTool = register({
+    name: "multi_edit",
+    description: "Apply several edits to one file in a single call. Each edit is an exact old_string/new_string pair applied in order; every edit is validated before anything is written, so a failing edit discards the whole batch. Use this instead of repeated edit_file calls on the same file.",
     inputSchema: {
         type: "object",
         properties: {
             file_path: { type: "string", description: "The path to the file to edit" },
-            old_string: { type: "string", description: "The exact string to find. Must be unique in the file." },
-            new_string: { type: "string", description: "The string to replace it with" },
+            edits: {
+                type: "array",
+                description: "Edits to apply in order, each anchored on the file as it stands after the previous ones.",
+                items: {
+                    type: "object",
+                    properties: {
+                        old_string: { type: "string", description: "The exact string to find. Must be unique in the file." },
+                        new_string: { type: "string", description: "The string to replace it with" },
+                        replace_all: { type: "boolean", description: "Replace every occurrence instead of requiring a unique match. Default false." },
+                    },
+                    required: ["old_string", "new_string"],
+                },
+            },
         },
-        required: ["file_path", "old_string", "new_string"],
+        required: ["file_path", "edits"],
     },
     isConcurrencySafe: () => false,
     isReadOnly: () => false,
     isDestructive: () => false,
-    maxResultSizeChars: 2_000,
+    maxResultSizeChars: 6_000,
 
     async call(input, ctx) {
         const absPath = resolve(input.file_path);
@@ -437,7 +732,7 @@ const editFileTool = register({
             const blocked = staleWrite(absPath, "editing", ctx.readFileState);
             if (blocked !== null) return blocked;
         }
-        const result = editFileImpl(input as { file_path: string; old_string: string; new_string: string });
+        const result = multiEditImpl(input as { file_path: string; edits: MultiEditInput[] });
         if (ctx.readFileState && !result.startsWith("Error")) {
             recordRead(absPath, ctx.readFileState);
         }
@@ -445,9 +740,9 @@ const editFileTool = register({
     },
 
     prompt: () =>
-        "edit_file replaces an exact, unique substring. Include enough surrounding context " +
-        "to make old_string occur exactly once. Read the file first — the edit will be rejected " +
-        "if the file has not been read or was modified since the last read.",
+        "multi_edit applies a batch of edits to one file in one call — prefer it over several " +
+        "sequential edit_file calls on the same file. Read the file first, and anchor each edit " +
+        "on the text as it stands after the earlier ones in the batch.",
 });
 
 // ─── list_files ──────────────────────────────────────────────
@@ -1326,6 +1621,56 @@ register({
         + "Do not save code details, git history, or anything already written in CLAUDE.md.",
 });
 
+// ─── agent ───────────────────────────────────────────────────
+//
+// A sub-agent is not dispatched here. Its call() never runs: the Agent
+// intercepts this name in executeToolCall, because spawning one needs the
+// parent's model, endpoint, permission mode and token counters — none of which
+// a stateless ToolContext carries. The registration exists for the schema the
+// model is given, and for the prompt block that tells it when to delegate.
+
+export const AGENT_TOOL_NAME = "agent";
+
+register({
+    name: AGENT_TOOL_NAME,
+    description: "Delegate a self-contained task to a sub-agent with its own isolated context. The sub-agent runs its own tool loop and returns only its final summary — the intermediate tool calls never reach this conversation, which is what makes this worth using on a search or a survey that would otherwise fill your context with file contents. Types: explore (read-only reconnaissance), plan (read-only implementation design), general (full tools).",
+    inputSchema: {
+        type: "object",
+        properties: {
+            description: { type: "string", description: "A 3-5 word phrase describing the task, shown in the UI" },
+            prompt: {
+                type: "string",
+                description: "The task, in full. The sub-agent sees none of this conversation, so the prompt must be self-contained: what to find or do, where to look, and what the answer should contain.",
+            },
+            type: {
+                type: "string",
+                description: "explore: read-only reconnaissance. plan: read-only implementation design. general: full tools, excluding agent. Defaults to general. Any custom agent defined in .claude/agents/ may be named here instead.",
+            },
+        },
+        required: ["description", "prompt"],
+    },
+    isConcurrencySafe: () => false,
+    isReadOnly: () => true,
+    isDestructive: () => false,
+    maxResultSizeChars: 50_000,
+
+    // Unreachable by design — see above.
+    async call() {
+        return "Error: the agent tool is dispatched by the agent loop, not by the tool executor.";
+    },
+
+    prompt: () => {
+        const block = [
+            "Use the agent tool to delegate a task that would otherwise flood this conversation: a broad search, a survey of several files, or an implementation you want designed before you commit to it. The sub-agent works in its own context and returns only its final summary — the tool calls it makes never enter this conversation.",
+            "Its context is isolated in both directions: it cannot see this conversation, so the prompt must be self-contained (what to find, where to look, what to return).",
+            "Types: explore and plan are read-only and have no shell — use them for anything that only needs to look. general has the full tool set and can change files.",
+            "Do not delegate a task you can finish in one or two tool calls; the round trip costs more than it saves.",
+        ].join("\n");
+        const custom = describeCustomAgents();
+        return custom ? `${block}\n${custom}` : block;
+    },
+});
+
 // ─── tool_search ─────────────────────────────────────────────
 
 const activatedTools = new Set<string>();
@@ -1341,20 +1686,36 @@ export function getDeferredToolNames(): string[] {
         .map((t) => t.name);
 }
 
-// The array that actually goes to the API: un-activated deferred tools dropped,
-// internal fields stripped.
-export function getActiveToolDefinitions(): Anthropic.Tool[] {
-    const all = [...toolRegistry.values()];
+// The tools that may be sent on a request: deferred ones only once tool_search
+// has bought them, and tool_search itself only while something is still behind
+// it. `from` narrows the registry to a caller's own list — a sub-agent's
+// read-only set — so a sub-agent is never handed a tool it must not call.
+function activeTools(from?: Tool[]): Tool[] {
+    const all = from ?? [...toolRegistry.values()];
     const anyDeferred = all.some((t) => t.deferred);
 
     return all
         .filter((t) => t.name !== "tool_search" || anyDeferred)
-        .filter((t) => !t.deferred || activatedTools.has(t.name))
-        .map((t): Anthropic.Tool => ({
-            name: t.name,
-            description: t.description,
-            input_schema: t.inputSchema,
-        }));
+        .filter((t) => !t.deferred || activatedTools.has(t.name));
+}
+
+// Internal fields stripped: what actually goes on the wire.
+function toToolDefinitions(tools: Tool[]): Anthropic.Tool[] {
+    return tools.map((t): Anthropic.Tool => ({
+        name: t.name,
+        description: t.description,
+        input_schema: t.inputSchema,
+    }));
+}
+
+/** The tool array for a main-agent request. */
+export function getActiveToolDefinitions(): Anthropic.Tool[] {
+    return toToolDefinitions(activeTools());
+}
+
+/** The same, for an explicit tool list — a sub-agent's own set. */
+export function getToolDefinitionsFor(tools: Tool[]): Anthropic.Tool[] {
+    return toToolDefinitions(activeTools(tools));
 }
 
 function toolSearchImpl(query: string): string {
@@ -1406,14 +1767,12 @@ const toolSearchTool = register({
 // System prompt assembly
 // ═══════════════════════════════════════════════════════════════
 
-// Collect prompt() from all active tools and join into a single block.
-export function buildToolPromptBlock(): string {
-    const all = [...toolRegistry.values()];
-    const anyDeferred = all.some((t) => t.deferred);
-
-    const fragments = all
-        .filter((t) => t.name !== "tool_search" || anyDeferred)
-        .filter((t) => !t.deferred || activatedTools.has(t.name))
+// Collect prompt() from the active tools and join into a single block.
+//
+// `from` mirrors getToolDefinitionsFor: a sub-agent's prompt block describes
+// its own tools, not the whole registry it has no access to.
+export function buildToolPromptBlock(from?: Tool[]): string {
+    const fragments = activeTools(from)
         .map((t) => t.prompt())
         .filter((p) => p.length > 0);
 

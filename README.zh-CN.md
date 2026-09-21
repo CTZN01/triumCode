@@ -7,6 +7,7 @@ TriumCode 支持三种 API 协议，可直连 Anthropic，也可通过提供 `/m
 ## 功能特性
 
 - **流式传输期间并行执行工具** —— `tool_use` 块接收完整后工具即开始执行，无需等待整个响应结束。
+- **子 agent** —— 把大范围搜索或整块子任务委派给拥有独立上下文的 agent，只取回它的摘要。
 - **支持三种 API 协议** —— `anthropic`、`openai-chat`、`openai-responses`，按模型选择。
 - **面向提示词缓存的上下文管理** —— 系统提示词仅保留一个可缓存块，易变内容移至每轮提醒；工具输出一次性裁剪到位，使缓存前缀保持稳定。
 - **持久记忆** —— 基于文件，分项目层与用户层，支持语义召回与关键词回退。
@@ -310,7 +311,8 @@ The skill directory is ${CLAUDE_SKILL_DIR}.
 |------|------|
 | `read_file` | 带行号读取文本文件。默认 2000 行；可用 `offset`/`limit` 分页（上限 5000）。拒绝二进制文件及超过 20 MB 的文件 |
 | `write_file` | 原子写入文件（先写临时文件，再重命名） |
-| `edit_file` | 替换文件中精确且唯一的字符串（需先读取该文件） |
+| `edit_file` | 替换文件中精确且唯一的字符串（需先读取该文件）。成功后回显带行号的改动区域；传 `replace_all: true` 可替换全部匹配 |
+| `multi_edit` | 一次调用对同一文件应用多处修改；统一校验、单次写入，任一项失败则整批丢弃 |
 | `list_files` | 递归列出目录，跳过 `node_modules`/`.git`/`dist` 一类目录；上限 200 条 |
 | `grep_search` | 跨文件正则搜索（优先使用系统 `grep`，否则使用进程内分块扫描器） |
 | `run_command` | 直接运行程序（不使用 shell —— 不支持管道与重定向）；超时 30 秒 |
@@ -319,6 +321,7 @@ The skill directory is ${CLAUDE_SKILL_DIR}.
 | `todo` | 维护任务清单，agent 随进度更新 |
 | `memory` | 保存或列出持久记忆 |
 | `skill` | 按名称加载可复用技能 |
+| `agent` | 将独立任务委派给拥有独立上下文的子 agent（见[子 agent](#子-agent)） |
 | `enter_plan_mode`、`exit_plan_mode` | 延迟加载；进入与退出规划阶段 |
 | `tool_search` | 按需激活延迟加载的工具 |
 
@@ -326,10 +329,54 @@ The skill directory is ${CLAUDE_SKILL_DIR}.
 
 ### 工具安全机制
 
-- **先读后写**：`edit_file` 与 `write_file` 要求先读取文件。若文件自上次读取后被外部修改，写入会被拒绝。重复读取对话中已出现过的行范围，会返回简短提示而非再次返回内容；除非压缩已将其清除，此时该声明会被撤销。
+- **先读后写**：`edit_file`、`multi_edit` 与 `write_file` 要求先读取文件。若文件自上次读取后被外部修改，写入会被拒绝。重复读取对话中已出现过的行范围，会返回简短提示而非再次返回内容；除非压缩已将其清除，此时该声明会被撤销。
+- **改动后无需重读**：`edit_file` 成功后会回显它所改动的那段区域，行号格式与 `read_file` 一致，下一次编辑可直接据此取锚点。未命中时会把文件中最接近的真实行原文回传，而不是只报「not found」；仅尾部空白不同的匹配会被自动应用而非拒绝。缩进差异只做提示、绝不自动改写 —— 自动重排缩进等于改动模型并未要求改动的代码。
 - **并发控制**：只读工具（`read_file`、`list_files`、`grep_search`、`git_diff`）并行执行，最多十个。写入工具需要独占访问；排在其后的安全工具仅在它实际占用时等待。
 - **命令分类**：`run_command` 按参数将每次调用分类为只读（`git status`、`ls`、`tsc`）、变更（`npm install`）或破坏性（`rm`），并应用对应规则。
 - **参数校验**：缺少已声明的必填参数时，调用会被拒绝并返回错误，而不会执行；JSON 被截断的 `tool_use` 块会被报告，而不会以空对象执行。
+
+## 子 agent
+
+大任务塞进单个 agent 循环会迅速撑满上下文窗口：中间的 `tool_use` / `tool_result` 挤占了对话真正需要的推理空间。`agent` 工具改为把工作拆开 —— 主 agent 委派一个自包含的任务，子 agent 在**独立的消息历史**中运行自己的工具循环，只有最终文本回传。它读过的文件、跑过的命令都不会进入主对话。
+
+```
+主 agent ──agent(explore, "认证在哪里处理？")──► 子 agent
+                                                  │ read_file、grep_search ……
+                                                  │ （独立历史，随后丢弃）
+       ◄──────── "认证在 src/auth.ts:42，由 src/cli.ts:10 调用" ────┘
+```
+
+| 类型 | 工具集 | 用途 |
+|------|--------|------|
+| `explore` | `read_file`、`list_files`、`grep_search` | 侦察：某物在哪里、如何连接 |
+| `plan` | 同上 | 在动手前设计实现方案 |
+| `general` | 除 `agent` 外的全部工具 | 完整任务：读、改、验证 |
+
+类型未知或省略时回退为 `general`。
+
+- **只读约束下沉到工具层**，而非依赖提示词。`explore` 与 `plan` 根本拿不到任何写入或执行类工具，模型即使跑偏也无从误用。它们的契约中同时重申该限制，避免浪费回合去索要不存在的工具。
+- **计划模式强制继承。** 会话处于计划模式时，派生出的子 agent 同样运行在计划模式下；其余情况下则沿用主 agent 已获得的授权。若丢弃该模式，委派就会成为绕过只读会话的通道。
+- **禁止递归。** `general` 子 agent 的工具列表排除 `agent`，自定义 agent 亦然。嵌套会让 token 消耗逐层倍增，而单层已覆盖绝大多数场景。
+- **错误隔离。** 子 agent 抛异常时返回 `Sub-agent error: …` 作为工具结果。主 agent 继续运行，并自行决定重试、收窄提示词，还是亲自完成。
+- **输出预算更低**（4096 output tokens，主 agent 为 32000），提示词要求给出带 `path:line` 引用的摘要，而非粘贴文件内容。
+- **Ctrl+C 单向传播**：中断主 agent 会中断子 agent，反之不成立。
+- 子 agent 的 token 会并入主 agent 计数，因此 `/cost` 报告的是会话真实总量。
+
+### 自定义 agent
+
+子 agent 类型可以用 Markdown 定义，位置与技能相同：
+
+```markdown
+---
+name: reviewer
+description: Review a diff and report findings
+allowed-tools: read_file, grep_search, git_diff
+---
+
+Review the change for correctness and report findings as a list.
+```
+
+项目级 `.claude/agents/` 覆盖用户级 `~/.claude/agents/` 中的同名文件，两者都可覆盖内建类型 —— 名为 `explore.md` 的文件会替换内建 `explore` 的契约与工具集。省略 `allowed-tools` 即授予 general 工具集。工具列表仍会过滤：`agent`、`enter_plan_mode`、`exit_plan_mode` 永远不会下发给子 agent。
 
 ## 会话存储
 
@@ -371,6 +418,7 @@ src/
   memory.ts               基于文件的持久记忆（保存、列出、召回、注入）
   permissions.ts          权限模式、allow/deny 规则、危险命令识别
   skills.ts               技能发现与提示词展开
+  subagent.ts             子 agent 类型、只读工具集、.claude/agents 发现
   thinking.ts             扩展思维与 effort 解析，以及降级处理
   markdown.ts             用于终端输出的流式 Markdown 渲染器
   ui.ts                   终端 UI 层（Chalk 配色、状态行、选择器、报告）

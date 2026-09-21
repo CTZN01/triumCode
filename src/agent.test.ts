@@ -44,7 +44,7 @@ interface FakeApi {
     close(): void;
 }
 
-async function fakeApi(turns: Turn[]): Promise<FakeApi> {
+async function fakeApi(turns: Turn[], failOn: Set<number> = new Set()): Promise<FakeApi> {
     let n = 0;
     const bodies: any[] = [];
     const headers: any[] = [];
@@ -55,12 +55,23 @@ async function fakeApi(turns: Turn[]): Promise<FakeApi> {
         headers.push(req.headers);
         try { bodies.push(JSON.parse(raw)); } catch { bodies.push(null); }
 
+        // Indexed before the reply so a request that fails still consumes its
+        // slot: the turns after it line up with the ones the caller scripted.
+        const index = n++;
+        if (failOn.has(index)) {
+            // 400, not 5xx: the SDK retries 5xx internally, which would spend
+            // the next scripted turn and hide the failure from this test.
+            res.writeHead(400, { "content-type": "application/json" });
+            res.end(JSON.stringify({ error: { message: "scripted failure" } }));
+            return;
+        }
+
         res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
         const write = (event: any) => res.write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
         write(MESSAGE_START);
         // Repeat the last scripted turn forever, so a loop that fails to
         // terminate shows up as a turn-limit hit rather than a hung test.
-        turns[Math.min(n++, turns.length - 1)](write);
+        turns[Math.min(index, turns.length - 1)](write);
         res.end();
     });
 
@@ -84,6 +95,7 @@ async function runChat(
         maxTokens?: number;
         permissionMode?: PermissionMode;
         askUser?: (question: string, options?: string[]) => Promise<string>;
+        failOn?: Set<number>;
     } = {},
 ): Promise<{ agent: Agent; api: FakeApi; output: string; error: any }> {
     // Memory dirs resolve from the cwd (memory.ts), so a memory saved in the
@@ -95,7 +107,7 @@ async function runChat(
     const originalCwd = process.cwd();
     process.chdir(mkdtempSync(join(tmpdir(), "triumcode-agent-cwd-")));
 
-    const api = await fakeApi(turns);
+    const api = await fakeApi(turns, options.failOn);
     const agent = new Agent({
         model: "test-model", apiKey: "k", apiBase: api.url,
         // Plan mode is the default sandbox: it denies everything that writes,
@@ -119,7 +131,7 @@ async function runChat(
     const originalLog = console.log;
     let output = "";
     console.log = (...args: any[]) => {
-        output += args.map((a) => String(a)).join(" ") + "\n";
+        output += stripAnsi(args.map((a) => String(a)).join(" ")) + "\n";
     };
 
     let error: any = null;
@@ -136,6 +148,7 @@ async function runChat(
 }
 
 const assistantTurns = (agent: Agent) => agent.history().filter((m) => m.role === "assistant");
+const stripAnsi = (text: string): string => text.replace(/\x1B\[[0-?]*[ -\/]*[@-~]/g, "");
 
 // ── Empty / truncated turns ─────────────────────────────────
 
@@ -528,4 +541,285 @@ test("a bare model switch keeps an explicitly chosen auth scheme", async () => {
     } finally {
         api.close();
     }
+});
+
+// ═══════════════════════════════════════════════════════════════
+// Sub-agents — the agent tool, end to end
+// ═══════════════════════════════════════════════════════════════
+//
+// Each case scripts the parent's request and the sub-agent's request against
+// the same endpoint. The parent's request is index 0; the sub-agent's is the
+// next one it makes, which is what the assertions on bodies[1] read.
+
+/** The scripted turns for a delegation: parent calls agent, sub-agent answers, parent concludes. */
+function delegation(
+    agentInput: Record<string, any>,
+    subAgentTurns: Turn[],
+): Turn[] {
+    return [
+        (w) => {
+            w(start(0, { type: "tool_use", id: "t1", name: "agent", input: {} }));
+            w(jsonDelta(0, JSON.stringify(agentInput)));
+            w(stop(0));
+            w(finish("tool_use"));
+        },
+        ...subAgentTurns,
+        (w) => { w(start(0, { type: "text", text: "" })); w(textDelta(0, "parent done")); w(stop(0)); w(finish("end_turn")); },
+    ];
+}
+
+const subAgentAnswer = (text: string): Turn => (w) => {
+    w(start(0, { type: "text", text: "" }));
+    w(textDelta(0, text));
+    w(stop(0));
+    w(finish("end_turn"));
+};
+
+/** The text of every tool_result in the parent's history. */
+function parentToolResults(agent: Agent): string[] {
+    return agent.history()
+        .flatMap((m) => Array.isArray(m.content) ? m.content : [])
+        .filter((b: any) => b.type === "tool_result")
+        .map((b: any) => String(b.content));
+}
+
+test("the parent receives the sub-agent's text, and none of its tool calls", async () => {
+    const { agent, output } = await runChat(delegation(
+        { description: "find the auth code", prompt: "Where is auth handled?", type: "explore" },
+        [
+            // The sub-agent's own tool use — read_file, and a search.
+            (w) => {
+                w(start(0, { type: "tool_use", id: "s1", name: "read_file", input: {} }));
+                w(jsonDelta(0, '{"file_path":"src/agent.ts"}'));
+                w(stop(0));
+                w(finish("tool_use"));
+            },
+            subAgentAnswer("Auth is handled in src/auth.ts:42 and called from src/cli.ts:10."),
+        ],
+    ), { permissionMode: "default" });
+
+    // The isolation is the whole point: the file body the sub-agent read is in
+    // the sub-agent's history, not the parent's.
+    const results = parentToolResults(agent);
+    assert.equal(results.length, 1, "the parent got exactly one tool result");
+    assert.match(results[0], /Auth is handled in src\/auth\.ts:42/);
+    assert.doesNotMatch(results[0], /read_file/, "no nested tool call leaked into the parent");
+    assert.doesNotMatch(JSON.stringify(agent.history()), /ReadFileState|You are TriumCode/);
+
+    // And the UI says a delegation happened.
+    assert.match(output, /Agent explore · find the auth code/);
+    assert.match(output, /tokens\)/);
+});
+
+test("the parent's history holds the sub-agent's summary, not its transcript", async () => {
+    const { agent } = await runChat(delegation(
+        { description: "survey", prompt: "Survey the providers.", type: "explore" },
+        [
+            // The sub-agent reads a file, then answers.
+            (w) => {
+                w(start(0, { type: "tool_use", id: "s1", name: "read_file", input: {} }));
+                w(jsonDelta(0, '{"file_path":"src/providers/index.ts"}'));
+                w(stop(0));
+                w(finish("tool_use"));
+            },
+            subAgentAnswer("There are three providers: anthropic, openai-chat, openai-responses."),
+        ],
+    ), { permissionMode: "default" });
+
+    // Four turns, all the parent's: its request, its call, the result, its
+    // reply. The sub-agent's read_file turn and the file body it pulled in are
+    // not among them — that is the saving.
+    assert.equal(agent.history().length, 4);
+
+    const assistant = agent.history()[1].content as any[];
+    assert.equal(assistant[0].name, "agent");
+    assert.equal(assistant[0].input.type, "explore");
+
+    const toolResult = (agent.history()[2].content as any[])[0];
+    assert.match(String(toolResult.content), /three providers/);
+});
+
+test("a sub-agent's system prompt is its contract, not the parent's persona", async () => {
+    const { api } = await runChat(delegation(
+        { description: "recon", prompt: "Find the tool registry.", type: "explore" },
+        [subAgentAnswer("It is in src/tools.ts.")],
+    ), { permissionMode: "default" });
+
+    const parentSystem = api.bodies[0].system[0].text;
+    const subSystem = api.bodies[1].system[0].text;
+    assert.match(parentSystem, /You are TriumCode/);
+    assert.doesNotMatch(subSystem, /You are TriumCode/);
+    assert.match(subSystem, /exploration sub-agent/);
+    // The main agent's own model budget does not apply to a summary.
+    assert.equal(api.bodies[0].max_tokens, 32_000);
+    assert.equal(api.bodies[1].max_tokens, 4096);
+});
+
+test("an explore sub-agent is never offered a write tool", async () => {
+    const { api } = await runChat(delegation(
+        { description: "recon", prompt: "Read something.", type: "explore" },
+        [subAgentAnswer("done")],
+    ), { permissionMode: "default" });
+
+    const subTools = api.bodies[1].tools.map((t: any) => t.name).sort();
+    assert.deepEqual(subTools, ["grep_search", "list_files", "read_file"]);
+    // The parent still has everything, minus nothing.
+    const parentTools = api.bodies[0].tools.map((t: any) => t.name);
+    assert.ok(parentTools.includes("write_file"));
+    assert.ok(parentTools.includes("agent"));
+});
+
+test("plan mode is inherited, so a sub-agent cannot write around it", async () => {
+    // The security property: a plan-mode session may delegate read-only work,
+    // but the delegation must not become the way to write.
+    const { api } = await runChat(delegation(
+        { description: "recon", prompt: "Look around.", type: "explore" },
+        [subAgentAnswer("nothing to report")],
+    ), { permissionMode: "plan" });
+
+    // The plan-mode parent could still delegate: the agent tool is read-only.
+    assert.equal(api.requests, 3, "parent, sub-agent, parent");
+    // And the sub-agent's own tool list has nothing that writes.
+    assert.deepEqual(
+        api.bodies[1].tools.map((t: any) => t.name).sort(),
+        ["grep_search", "list_files", "read_file"],
+    );
+    // It is also told, rather than left to discover it from refused calls.
+    assert.match(api.bodies[1].system[0].text, /strict plan mode/);
+});
+
+test("plan mode reaches a general sub-agent too, whose tools do write", async () => {
+    // The case the inheritance actually protects: a general sub-agent has
+    // write_file, and only the inherited mode stops it from being used.
+    const { api } = await runChat(delegation(
+        { description: "implement", prompt: "Change it.", type: "general" },
+        [subAgentAnswer("changed nothing")],
+    ), { permissionMode: "plan" });
+
+    assert.ok(api.bodies[1].tools.some((t: any) => t.name === "write_file"));
+    assert.match(api.bodies[1].system[0].text, /strict plan mode/);
+});
+
+test("a general sub-agent cannot delegate again", async () => {
+    const { api } = await runChat(delegation(
+        { description: "implement", prompt: "Do the change.", type: "general" },
+        [subAgentAnswer("changed src/thing.ts")],
+    ), { permissionMode: "default" });
+
+    const subTools = api.bodies[1].tools.map((t: any) => t.name);
+    assert.ok(!subTools.includes("agent"), "no recursion");
+    assert.ok(subTools.includes("write_file"), "but it can write");
+});
+
+test("a failing sub-agent returns an error string and the parent keeps going", async () => {
+    // The sub-agent's own request (index 1) is the one that fails.
+    const { agent, output, error, api } = await runChat(delegation(
+        { description: "doomed recon", prompt: "Look.", type: "explore" },
+        [subAgentAnswer("unused")],
+    ), { permissionMode: "default", failOn: new Set([1]) });
+
+    assert.equal(error, null, "the parent must not throw");
+    assert.match(output, /✗ explore · doomed recon/, output);
+    assert.match(output, /scripted failure/, "the API's own message, not the raw body");
+
+    const results = parentToolResults(agent);
+    assert.match(results[0], /^Sub-agent error: /, "the model gets a string it can act on");
+    assert.match(results[0], /scripted failure/);
+
+    // The parent issued its follow-up request, so the loop carried on.
+    assert.equal(api.requests, 3);
+    const last = agent.history().filter((m) => m.role === "assistant").pop() as any;
+    assert.match(JSON.stringify(last.content), /parent done/);
+});
+
+test("an unknown type falls back to general instead of failing", async () => {
+    const { api } = await runChat(delegation(
+        { description: "typo", prompt: "Do it.", type: "generall" },
+        [subAgentAnswer("ok")],
+    ), { permissionMode: "default" });
+
+    const subTools = api.bodies[1].tools.map((t: any) => t.name);
+    assert.ok(subTools.includes("write_file"), "served the general configuration");
+    assert.ok(!subTools.includes("agent"));
+});
+
+test("a missing prompt is refused without spawning anything", async () => {
+    const { output, api } = await runChat(delegation(
+        { description: "empty", prompt: "", type: "explore" },
+        [subAgentAnswer("unused")],
+    ), { permissionMode: "default" });
+
+    assert.match(output, /needs a prompt/);
+    // Two requests: the parent's call and its follow-up. No sub-agent ran.
+    assert.equal(api.requests, 2);
+});
+
+test("sub-agent tokens are added to the parent's total exactly once", async () => {
+    // The fake endpoint reports input_tokens 1 and cache_read 4 per request,
+    // and 5 output tokens per message_delta.
+    const { agent } = await runChat(delegation(
+        { description: "recon", prompt: "Look.", type: "explore" },
+        [subAgentAnswer("done")],
+    ), { permissionMode: "default" });
+
+    // Three requests total: parent, sub-agent, parent. Each contributes its
+    // own usage, and nothing is counted twice.
+    const usage = agent.getUsage();
+    assert.equal(usage.input, 3, "one prompt count per request, no echo");
+    assert.equal(usage.output, 15, "5 output tokens per request");
+    assert.equal(usage.cacheRead, 12, "4 cached prompt tokens per request");
+    assert.equal(usage.cacheHitRate, 12 / 15);
+});
+
+test("the sub-agent's text is buffered, not streamed to the terminal", async () => {
+    // streamed text bypasses console.log (see runChat), so a sub-agent that
+    // printed would show up on the real stdout — and interleave two
+    // conversations on one screen.
+    const chunks: string[] = [];
+    const originalWrite = process.stdout.write.bind(process.stdout);
+    (process.stdout as any).write = (chunk: any) => { chunks.push(String(chunk)); return true; };
+
+    try {
+        const { output } = await runChat(delegation(
+            { description: "recon", prompt: "Look.", type: "explore" },
+            [subAgentAnswer("SECRET SUB-AGENT NARRATION")],
+        ), { permissionMode: "default" });
+
+        assert.doesNotMatch(chunks.join(""), /SECRET SUB-AGENT NARRATION/, "sub-agent text must not reach stdout");
+        // The parent's own reply still prints.
+        assert.match(chunks.join(""), /parent done/);
+        assert.match(output, /Agent explore/, "but the delegation itself is announced");
+    } finally {
+        (process.stdout as any).write = originalWrite;
+    }
+});
+
+test("a sub-agent does not trigger the auto-save callback", async () => {
+    const originalCwd = process.cwd();
+    process.chdir(mkdtempSync(join(tmpdir(), "triumcode-agent-sub-")));
+    const api = await fakeApi(delegation(
+        { description: "recon", prompt: "Look.", type: "explore" },
+        [subAgentAnswer("done")],
+    ));
+
+    let saves = 0;
+    const agent = new Agent({
+        model: "test-model", apiKey: "k", apiBase: api.url,
+        permissionMode: "default", maxTurns: 5,
+    });
+    agent.setOnChatComplete(() => { saves++; });
+
+    const originalLog = console.log;
+    console.log = () => {};
+    try {
+        await agent.chat("delegate the thing");
+    } finally {
+        console.log = originalLog;
+        api.close();
+        process.chdir(originalCwd);
+    }
+
+    // The parent saves once; the sub-agent's own chat() must not save at all,
+    // or it would file a delegated task as this project's session.
+    assert.equal(saves, 1);
 });

@@ -375,6 +375,7 @@ const TOOL_VERBS: Record<string, string> = {
     read_file: "Read",
     write_file: "Write",
     edit_file: "Edit",
+    multi_edit: "Edit",
     list_files: "List",
     grep_search: "Search",
     run_command: "Run",
@@ -404,6 +405,7 @@ function formatCallTarget(name: string, input: Record<string, any>): string {
         case "read_file":
         case "write_file":
         case "edit_file":
+        case "multi_edit":
             return input.file_path ? displayPath(String(input.file_path)) : "";
         case "list_files":
             return input.directory_path ? displayPath(String(input.directory_path)) : "";
@@ -494,9 +496,13 @@ export function classifyResult(name: string, result: string): ResultView {
         case "write_file":
             return { text: firstLine, ok: true };
 
-        case "edit_file": {
-            const m = /^Edited .* at line (\d+)(?: \(([^)]+)\))?$/.exec(firstLine);
-            return { text: m ? `Edited at line ${m[1]}${m[2] ? ` ${m[2]}` : ""}` : firstLine, ok: true };
+        case "edit_file":
+        case "multi_edit": {
+            const single = /^Edited .* at line (\d+)(?: \(([^)]+)\))?/.exec(firstLine);
+            if (single) return { text: `Edited at line ${single[1]}${single[2] ? ` ${single[2]}` : ""}`, ok: true };
+            const many = /^Edited (\d+) \w+ in .*\(([^)]+)\)/.exec(firstLine);
+            if (many) return { text: `Edited ${many[1]} places ${many[2]}`, ok: true };
+            return { text: firstLine, ok: true };
         }
 
         case "list_files": {
@@ -557,6 +563,38 @@ export function printToolResult(name: string, result: string, elapsedMs: number)
 export function printToolError(name: string, error: string): void {
     afterToolOutput = true;
     logLine(chalk.dim("    ↳ ") + ERR(`✗ Error: ${error}`));
+}
+
+// ── Sub-agent activity ──────────────────────────────────────
+// A sub-agent's own output is captured into a buffer (agent.ts), so these two
+// lines are the whole trace a delegation leaves on screen. They replace the
+// usual tool-call/tool-result pair rather than joining it: the description is
+// already the tool call's target, and a one-line "✓ done" for a task that ran
+// for a minute says less than the token count does.
+
+export function printSubAgentStart(type: string, description: string): void {
+    afterToolOutput = true;
+    const label = description ? `${type} · ${description}` : type;
+    logLine(`  ${MUTED("•")} ${ACCENT("Agent")} ${MUTED(label)}`);
+}
+
+export function printSubAgentEnd(type: string, description: string, tokens: number): void {
+    afterToolOutput = true;
+    logLine(
+        chalk.dim("    ↳ ") + `${OK("✓")} ${chalk.dim(subAgentLabel(type, description))}`
+        + chalk.dim(` (${tokens.toLocaleString("en-US")} tokens)`),
+    );
+}
+
+/** The delegation failed. The parent continues; the user should still see why. */
+export function printSubAgentError(type: string, description: string, error: string): void {
+    afterToolOutput = true;
+    const first = error.split("\n")[0];
+    logLine(chalk.dim("    ↳ ") + `${ERR("✗")} ${ERR(subAgentLabel(type, description))} ${chalk.dim(`— ${first}`)}`);
+}
+
+function subAgentLabel(type: string, description: string): string {
+    return description ? `${type} · ${description}` : type;
 }
 
 // ── Interactive question ──────────────────────────────────
@@ -667,6 +705,18 @@ export function writeStream(text: string): void {
     // A chunk that was entirely held back prints nothing at all — including no
     // indentation, and without stopping the spinner a beat early.
     if (rendered) emitStream(rendered);
+}
+
+/**
+ * Print a whole chunk of model text, markdown and all.
+ *
+ * The same rendering path as writeStream — this is not a second renderer — for
+ * callers that hold text rather than stream it. A sub-agent accumulates its
+ * output and emits it in one piece, so its markdown has to resolve here too:
+ * printing it raw would show the asterisks.
+ */
+export function printAssistantText(text: string): void {
+    writeStream(text);
 }
 
 // Terminate the streamed line, but only if one is actually open — a turn that

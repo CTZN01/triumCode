@@ -31,7 +31,9 @@ export function scalar(value: string | undefined): string {
     return text;
 }
 
-function list(value: string | undefined): string[] {
+// Shared with subagent.ts — a comma list or a JSON array, the two spellings
+// the frontmatter in .claude/ uses for allowed-tools.
+export function parseList(value: string | undefined): string[] {
     const text = (value ?? "").trim();
     if (!text) return [];
     if (text.startsWith("[")) {
@@ -74,7 +76,7 @@ function parseSkill(filePath: string, source: Skill["source"]): Skill | null {
             name,
             description: scalar(values.get("description")),
             whenToUse: scalar(values.get("when_to_use") ?? values.get("when-to-use")),
-            allowedTools: list(values.get("allowed-tools")),
+            allowedTools: parseList(values.get("allowed-tools")),
             userInvocable: boolean(values.get("user-invocable"), true),
             mode: scalar(values.get("mode")) === "fork" ? "fork" : "inline",
             directory: dirname(filePath),

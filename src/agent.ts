@@ -2,14 +2,15 @@ import Anthropic from "@anthropic-ai/sdk";
 import { readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import * as os from "node:os";
-import { getActiveToolDefinitions, toolResultLimit, type ReadFileState, type ToolContext } from "./tools.js";
+import { getActiveToolDefinitions, getToolDefinitionsFor, toolResultLimit, type ReadFileState, type Tool, type ToolContext } from "./tools.js";
 import { ToolExecutor } from "./tool-executor.js";
 import { envModel } from "./config.js";
-import { buildStaticSystemPrompt, buildTurnContextReminder } from "./prompt.js";
+import { buildStaticSystemPrompt, buildTurnContextReminder, PLAN_MODE } from "./prompt.js";
 import {
     printToolCall, printToolResult, writeStream, endStream, printCostReport,
     beginStatus, updateStatus, endStatus, printThinkingDuration, pickStatusVerb, printInfo, printTurnEnd,
     printPlanForApproval, printPlanModeEntered, printPlanModeExited,
+    printSubAgentStart, printSubAgentEnd, printSubAgentError, printAssistantText,
 } from "./ui.js";
 import { withRetry } from "./retry.js";
 import {
@@ -33,6 +34,9 @@ import {
     startMemoryPrefetch, formatMemoriesForInjection,
     type MemoryPrefetch, type RelevantMemory, type SideQueryFn,
 } from "./memory.js";
+import {
+    resolveSubAgentName, getSubAgentConfig,
+} from "./subagent.js";
 
 // Extended thinking counts towards max_tokens, and endpoints that think by
 // default (MiMo, for one) will happily spend the whole budget reasoning and
@@ -111,6 +115,19 @@ export interface AgentOptions {
     planMode?: boolean;   // --plan flag from CLI
     permissionMode?: PermissionMode;
     sideQuery?: SideQueryFn; // override for the memory-recall side model (tests)
+    // ── Sub-agent configuration ─────────────────────────────
+    // All three default to the main agent's behaviour, so an Agent built
+    // without them is byte-for-byte the agent it was before these existed.
+    /** Replaces the assembled system prompt entirely. */
+    customSystemPrompt?: string;
+    /** Replaces the registry's active set as this agent's tool list. */
+    customTools?: Tool[];
+    /**
+     * Marks this instance as a sub-agent: it suppresses the terminal
+     * separators, the auto-save and the cost report, none of which make sense
+     * for a one-shot delegated task.
+     */
+    isSubAgent?: boolean;
 }
 
 /** What /model <preset> can retarget in one step. */
@@ -186,6 +203,16 @@ export class Agent {
     private alreadySurfacedMemories = new Set<string>();
     private sessionMemoryBytes = 0;
 
+    // ── Sub-agent state ─────────────────────────────────────────
+    // `null` means this is a main agent: output streams to the terminal.
+    // An array means a sub-agent, and it is where output accumulates instead.
+    // One flag covers all three states — unset, opened and empty, accumulating
+    // — so there is no second "am I a sub-agent" boolean to keep in sync.
+    private outputBuffer: string[] | null = null;
+    private isSubAgent: boolean;
+    private customSystemPrompt?: string;
+    private customTools?: Tool[];
+
     constructor(options?: AgentOptions) {
         this.model = options?.model || envModel("claude-sonnet-4-20250514");
         this.modelLabel = options?.modelLabel || "";
@@ -210,6 +237,9 @@ export class Agent {
         this.permissionMode = permissionMode;
         this.permissionPolicy = new PermissionPolicy(permissionMode);
         this.sideQueryFn = options?.sideQuery ?? null;
+        this.isSubAgent = options?.isSubAgent ?? false;
+        this.customSystemPrompt = options?.customSystemPrompt;
+        this.customTools = options?.customTools;
     }
 
     private buildProvider(): ModelProvider {
@@ -218,6 +248,42 @@ export class Agent {
             apiKey: this.apiKey,
             auth: this.auth,
         });
+    }
+
+    /**
+     * The one exit for model text. A main agent streams it to the terminal; a
+     * sub-agent accumulates it, because its narration is for its own context
+     * and printing it would interleave two conversations on one screen.
+     *
+     * Everything that emits model text goes through here, so the destination is
+     * decided in exactly one place.
+     */
+    private emitText(text: string): void {
+        if (this.outputBuffer) this.outputBuffer.push(text);
+        else printAssistantText(text);
+    }
+
+    /** This agent's tool list: its own set when it has one, else the registry's. */
+    private activeToolDefinitions(): Anthropic.Tool[] {
+        return this.customTools
+            ? getToolDefinitionsFor(this.customTools)
+            : getActiveToolDefinitions();
+    }
+
+    /**
+     * Close the turn's text stream. A sub-agent's output is buffered whole
+     * chunks and rendered nowhere, so there is no line to terminate and no
+     * markdown state to reset.
+     */
+    private endOutput(): void {
+        if (!this.outputBuffer) endStream();
+    }
+
+    /** The system prompt block, cacheable, and stable for the session. */
+    private systemBlocks(): Anthropic.TextBlockParam[] {
+        return this.customSystemPrompt !== undefined
+            ? [{ type: "text", text: this.customSystemPrompt, cache_control: { type: "ephemeral" } }]
+            : buildSystemBlocks(this.planMode);
     }
 
     /** Register a callback invoked after each chat() completes. */
@@ -339,6 +405,152 @@ export class Agent {
     /** Abort the currently-running chat() call. */
     abort(): void {
         this.abortController?.abort();
+    }
+
+    // ── Sub-agent entry point ───────────────────────────────────
+
+    /**
+     * Run one prompt to completion and return its final text, without touching
+     * the terminal or the session file.
+     *
+     * This is chat() with a capture buffer around it: the same loop, the same
+     * tools, the same message history — only the output's destination differs.
+     * A sub-agent is an Agent, not a second implementation of one.
+     *
+     * Token usage is a delta, not a total: the instance counters accumulate
+     * across runs (a sub-agent may be reused), so the caller wants what this
+     * run cost, not what the instance has cost since it was built.
+     */
+    async runOnce(prompt: string): Promise<{ text: string; tokens: number }> {
+        const before = this.getUsage();
+        const buffer: string[] = [];
+        this.outputBuffer = buffer;
+        try {
+            await this.chat(prompt);
+        } finally {
+            // Cleared even on the error path, or a thrown turn would leave the
+            // instance permanently unable to print.
+            this.outputBuffer = null;
+        }
+        const after = this.getUsage();
+        const tokens = (after.input - before.input)
+            + (after.output - before.output)
+            + (after.cacheRead - before.cacheRead)
+            + (after.cacheWrite - before.cacheWrite);
+        return { text: buffer.join("").trim(), tokens };
+    }
+
+    // ── The agent tool ──────────────────────────────────────────
+
+    /**
+     * Spawn a sub-agent for this call, run it, and hand back its summary.
+     *
+     * Never throws: a delegated task that fails is a result the parent can
+     * react to — retry, narrow the prompt, do the work itself. Propagating the
+     * error would abort a turn that has a working answer available.
+     */
+    private async executeAgentTool(input: Record<string, any>): Promise<string> {
+        const type = resolveSubAgentName(input.type);
+        const description = String(input.description ?? "").trim() || type;
+        const prompt = String(input.prompt ?? "").trim();
+        if (!prompt) {
+            // Narrated like a failed delegation, not returned silently: a
+            // refusal the user cannot see looks identical to a hung turn.
+            printSubAgentStart(type, description);
+            const message = "Error: the agent tool needs a prompt. Nothing was delegated.";
+            printSubAgentError(type, description, message);
+            return message;
+        }
+
+        const config = getSubAgentConfig(type);
+        // Plan mode is inherited by the sub-agent, so its prompt has to say so
+        // — the built-in contracts assume they can use their tools.
+        const systemPrompt = this.permissionMode === "plan"
+            ? config.systemPrompt + PLAN_MODE
+            : config.systemPrompt;
+        const subAgent = new Agent({
+            // The parent's model and endpoint: the whole point is a second
+            // context, not a second configuration.
+            model: this.model,
+            modelLabel: this.modelLabel,
+            apiKey: this.apiKey,
+            apiBase: this.apiBase,
+            protocol: this.protocol,
+            auth: this.auth,
+            thinking: this.thinkingEnabled,
+            effort: this.effort ?? undefined,
+            contextWindow: this.contextWindow,
+            maxTokens: config.maxTokens,
+            // The parent's plan mode is inherited, never dropped: a sub-agent
+            // free to write while the session is in plan mode is a permission
+            // escape. Everywhere else the parent has already been authorised,
+            // so asking again inside the sub-agent would be noise.
+            permissionMode: this.permissionMode === "plan" ? "plan" : "bypassPermissions",
+            customSystemPrompt: systemPrompt,
+            customTools: config.tools,
+            isSubAgent: true,
+        });
+        // One-way abort: the parent interrupting this turn interrupts the
+        // sub-agent. The reverse does not hold — a sub-agent failing is not a
+        // reason to cancel the conversation.
+        const signal = this.abortController?.signal;
+        const forwardAbort = () => subAgent.abort();
+        signal?.addEventListener("abort", forwardAbort, { once: true });
+
+        printSubAgentStart(type, description);
+        try {
+            const { text } = await subAgent.runOnce(prompt);
+            const tokens = this.absorbUsage(subAgent);
+            printSubAgentEnd(type, description, tokens);
+            if (!text) {
+                return `${type} sub-agent finished without producing any text. ${tokens} tokens were spent. Re-issue the call with a more specific prompt, or do the task directly.`;
+            }
+            return `${text}\n\n(${type} sub-agent, ${tokens} tokens)`;
+        } catch (e: any) {
+            // Whatever the sub-agent spent before it failed is still on the
+            // bill, so it is absorbed and reported either way.
+            this.absorbUsage(subAgent);
+            // briefApiError, not the raw message: the SDK puts the whole HTTP
+            // body in it, and this string goes into the parent's context.
+            const message = `Sub-agent error: ${briefApiError(e)}`;
+            printSubAgentError(type, description, message);
+            return message;
+        } finally {
+            signal?.removeEventListener("abort", forwardAbort);
+        }
+    }
+
+    /** Fold a finished sub-agent's usage into this agent's counters, and return the total. */
+    private absorbUsage(subAgent: Agent): number {
+        this.totalInputTokens += subAgent.totalInputTokens;
+        this.totalOutputTokens += subAgent.totalOutputTokens;
+        this.totalCacheReadTokens += subAgent.totalCacheReadTokens;
+        this.totalCacheWriteTokens += subAgent.totalCacheWriteTokens;
+        const usage = subAgent.getUsage();
+        return usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
+    }
+
+    /**
+     * Dispatch one tool call, or the agent tool's own handler.
+     *
+     * The agent tool needs instance state — model, endpoint, permission mode,
+     * the abort controller, the token counters — so it cannot go through the
+     * stateless executor. Handling it here is also what keeps plan mode from
+     * denying a read-only delegation: the tool is marked read-only, and a
+     * plan-mode session may still explore.
+     *
+     * The call runs alongside the executor's queue rather than inside it, so
+     * two delegations in one turn overlap. They share nothing but the model
+     * client, and each has its own message history.
+     */
+    private executeToolCall(
+        executor: ToolExecutor,
+        id: string,
+        name: string,
+        input: Record<string, any>,
+    ): Promise<string> {
+        if (name === "agent") return this.executeAgentTool(input);
+        return executor.enqueue(id, name, input);
     }
 
     /**
@@ -585,8 +797,10 @@ export class Agent {
             endStatus();
             this.isProcessing = false;
             this.abortController = null;
-            // Auto-save after each chat() completes.
-            this.onChatComplete?.();
+            // Auto-save after each chat() completes. A sub-agent skips it: its
+            // conversation is one delegated task, saving it would file it as
+            // this project's session, and the next save would overwrite it.
+            if (!this.isSubAgent) this.onChatComplete?.();
         }
     }
 
@@ -658,14 +872,14 @@ export class Agent {
             endStatus();
             beginStatus(pickStatusVerb());
 
-            const tools = getActiveToolDefinitions();
+            const tools = this.activeToolDefinitions();
             const compressed = compressHistory(this.messages, {
                 contextWindow: this.contextWindow,
                 cacheHot: this.lastRequestAt > 0 && Date.now() - this.lastRequestAt < 5 * 60_000,
                 idleMs: this.lastRequestAt > 0 ? Date.now() - this.lastRequestAt : 0,
             });
             this.forgetEvictedReads(compressed.stats.evictedReadPaths);
-            const cached = withCacheBreakpoints(compressed.messages, buildSystemBlocks(this.planMode));
+            const cached = withCacheBreakpoints(compressed.messages, this.systemBlocks());
             this.contextUtilization = estimateTokens({
                 system: cached.system,
                 messages: cached.messages,
@@ -741,7 +955,7 @@ export class Agent {
                         // fall through to drain() and push an assistant turn
                         // plus a tool_result turn for tools the user just
                         // cancelled — then issue one more doomed API call.
-                        endStream();
+                        this.endOutput();
                         return;
                     }
 
@@ -775,7 +989,7 @@ export class Agent {
                             const idx = event.index;
                             const delta = event.delta;
                             if (delta.type === "text_delta") {
-                                writeStream(delta.text);
+                                this.emitText(delta.text);
                                 currentText += delta.text;
                             } else if (delta.type === "input_json_delta") {
                                 blocks.get(idx)?.jsonChunks.push(delta.partial_json);
@@ -827,7 +1041,10 @@ export class Agent {
                                     input,
                                 });
 
-                                printToolCall(state.name, input);
+                                // The agent tool narrates itself — start line,
+                                // end line, token count — so the generic call
+                                // line would say the same thing twice.
+                                if (state.name !== "agent") printToolCall(state.name, input);
                                 toolStartTimes.set(state.id, Date.now());
 
                                 if (inputError) {
@@ -837,7 +1054,7 @@ export class Agent {
                                         `Error: ${inputError}. Re-issue the call with the full arguments.`,
                                     ));
                                 } else {
-                                    toolResults.set(state.id, executor.enqueue(state.id, state.name, input));
+                                    toolResults.set(state.id, this.executeToolCall(executor, state.id, state.name, input));
                                 }
                             }
                             break;
@@ -870,13 +1087,13 @@ export class Agent {
                 }
             } catch (e: any) {
                 if (e.name === "AbortError" || this.abortController?.signal.aborted) {
-                    endStream();
+                    this.endOutput();
                     return;
                 }
                 throw e;
             }
 
-            endStream();
+            this.endOutput();
             endStatus();
 
             // Wait for all in-flight tools to finish.
@@ -955,7 +1172,7 @@ export class Agent {
                     toolResultLimit(block.name),
                 );
                 const elapsed = Date.now() - (toolStartTimes.get(block.id) ?? Date.now());
-                printToolResult(block.name, output, elapsed);
+                if (block.name !== "agent") printToolResult(block.name, output, elapsed);
                 resultBlocks.push({
                     type: "tool_result",
                     tool_use_id: block.id,
