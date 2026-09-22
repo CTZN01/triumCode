@@ -481,11 +481,15 @@ export class Agent {
             effort: this.effort ?? undefined,
             contextWindow: this.contextWindow,
             maxTokens: config.maxTokens,
-            // The parent's plan mode is inherited, never dropped: a sub-agent
-            // free to write while the session is in plan mode is a permission
-            // escape. Everywhere else the parent has already been authorised,
-            // so asking again inside the sub-agent would be noise.
-            permissionMode: this.permissionMode === "plan" ? "plan" : "bypassPermissions",
+            // The parent's permission mode is inherited verbatim. Dropping
+            // plan mode would be a permission escape, and blanket
+            // bypassPermissions was the same escape one level down: a
+            // dangerous command behind a delegation was auto-approved where
+            // the parent itself would have asked (default) or refused
+            // (dontAsk). With inheritance the modes mean here exactly what
+            // they mean there — and a confirmation with no user to ask
+            // resolves as a denial, so the parent runs the command itself.
+            permissionMode: this.permissionMode,
             customSystemPrompt: systemPrompt,
             customTools: config.tools,
             isSubAgent: true,
@@ -520,14 +524,23 @@ export class Agent {
         }
     }
 
-    /** Fold a finished sub-agent's usage into this agent's counters, and return the total. */
+    /**
+     * Fold a finished sub-agent's usage into this agent's counters, and return
+     * what was taken. The sub-agent's counters are zeroed as they are taken,
+     * so the fold bills each token exactly once even on a reused instance.
+     */
     private absorbUsage(subAgent: Agent): number {
+        const used = subAgent.totalInputTokens + subAgent.totalOutputTokens
+            + subAgent.totalCacheReadTokens + subAgent.totalCacheWriteTokens;
         this.totalInputTokens += subAgent.totalInputTokens;
         this.totalOutputTokens += subAgent.totalOutputTokens;
         this.totalCacheReadTokens += subAgent.totalCacheReadTokens;
         this.totalCacheWriteTokens += subAgent.totalCacheWriteTokens;
-        const usage = subAgent.getUsage();
-        return usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
+        subAgent.totalInputTokens = 0;
+        subAgent.totalOutputTokens = 0;
+        subAgent.totalCacheReadTokens = 0;
+        subAgent.totalCacheWriteTokens = 0;
+        return used;
     }
 
     /**
@@ -651,6 +664,10 @@ export class Agent {
     // unconsumed prefetch from the previous turn is discarded — it described
     // a question that has already been answered.
     private startTurnMemoryPrefetch(userText: string): void {
+        // A sub-agent never recalls memories: they were saved for the
+        // conversation it cannot see, and the recall costs a side-model call
+        // per delegation to pollute a context that exists to stay small.
+        if (this.isSubAgent) return;
         const sideQuery = this.buildSideQuery();
         if (!sideQuery) return;
         this.memoryPrefetch = startMemoryPrefetch(

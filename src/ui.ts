@@ -500,8 +500,10 @@ export function classifyResult(name: string, result: string): ResultView {
         case "multi_edit": {
             const single = /^Edited .* at line (\d+)(?: \(([^)]+)\))?/.exec(firstLine);
             if (single) return { text: `Edited at line ${single[1]}${single[2] ? ` ${single[2]}` : ""}`, ok: true };
-            const many = /^Edited (\d+) \w+ in .*\(([^)]+)\)/.exec(firstLine);
-            if (many) return { text: `Edited ${many[1]} places ${many[2]}`, ok: true };
+            // Non-greedy: the first parenthetical is the line stats; a later
+            // one ("showing 3 of 4 regions") is a display note, not the summary.
+            const many = /^Edited (\d+) \w+ in .*?\(([^)]+)\)/.exec(firstLine);
+            if (many) return { text: `Edited ${many[1]} place${many[1] === "1" ? "" : "s"} ${many[2]}`, ok: true };
             return { text: firstLine, ok: true };
         }
 

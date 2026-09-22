@@ -183,6 +183,10 @@ test("classifyResult marks failures, warnings and successes", () => {
             "Warning: D:\\x.py was modified externally since you last read it. Read it again before writing it, so you are working from its current contents.", false, true],
         ["edit_file", "Edited src/a.py at line 211", "Edited at line 211", true, false],
         ["edit_file", "No change: old_string and new_string are identical.", "No change: old_string and new_string are identical.", true, false],
+        // The first parenthetical is the line stats; a trailing display note
+        // must not be captured in its place.
+        ["multi_edit", "Edited 1 region in src/a.py (+1/-1 lines)", "Edited 1 place +1/-1 lines", true, false],
+        ["multi_edit", "Edited 4 regions in src/a.py (+5/-4 lines) (showing 3 of 4 regions)", "Edited 4 places +5/-4 lines", true, false],
         ["list_files", "src/a.py\nsrc/b.py", "2 entries", true, false],
         ["list_files", "src/a.py", "1 entry", true, false],
         // Regression: a single-line "No files found" used to count as "1 entries".
