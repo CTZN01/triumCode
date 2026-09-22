@@ -400,9 +400,26 @@ function displayPath(p: string): string {
     return p.replaceAll("\\", "/");
 }
 
+// The window a read asked for, as a suffix: ":100-149" when both ends are
+// known, ":300+" for "from line 300", nothing when no window was requested.
+// Two pages of one file otherwise print as identical call lines.
+function requestedWindow(input: Record<string, any>): string {
+    const num = (v: any) => (v !== undefined && v !== "" && Number.isFinite(Number(v)))
+        ? Math.max(1, Math.trunc(Number(v)))
+        : undefined;
+    const offset = num(input.offset);
+    const limit = num(input.limit);
+    if (offset === undefined && limit === undefined) return "";
+    const start = offset ?? 1;
+    return limit === undefined ? `:${start}+` : `:${start}-${start + limit - 1}`;
+}
+
 function formatCallTarget(name: string, input: Record<string, any>): string {
     switch (name) {
         case "read_file":
+            return input.file_path
+                ? displayPath(String(input.file_path)) + requestedWindow(input)
+                : "";
         case "write_file":
         case "edit_file":
         case "multi_edit":
@@ -478,8 +495,11 @@ export interface ResultView {
  *
  * A non-zero run_command exit is deliberately NOT an error (see the tool
  * description in tools.ts) but is still worth marking as a failure here.
+ *
+ * `input` is the tool call that produced the result, when the caller has it:
+ * read_file uses it to name the file beside the range it delivered.
  */
-export function classifyResult(name: string, result: string): ResultView {
+export function classifyResult(name: string, result: string, input?: Record<string, any>): ResultView {
     const firstLine = result.split("\n")[0];
 
     if (result.startsWith("Error") || result.startsWith("Unknown tool:")) {
@@ -490,8 +510,25 @@ export function classifyResult(name: string, result: string): ResultView {
     }
 
     switch (name) {
-        case "read_file":
-            return { text: `${result.split("\n").length} lines`, ok: true };
+        case "read_file": {
+            // The repeat-read notice names the range it refused to re-send.
+            const notice = /unchanged since you read lines (\d+)-(\d+)/.exec(result);
+            if (notice) {
+                const where = input?.file_path ? `${displayPath(String(input.file_path))}:` : "";
+                return { text: `${where}${notice[1]}-${notice[2]} unchanged`, ok: true };
+            }
+            // The rendered lines carry their numbers: first-to-last is the
+            // range actually delivered, which a bare line count never was.
+            const nums = [...result.matchAll(/^\s*(\d+) \| /gm)].map((m) => Number(m[1]));
+            if (nums.length === 0) {
+                return { text: `${result.split("\n").length} lines`, ok: true };
+            }
+            // The continuation footer, when present, also carries the total.
+            const total = /\[lines \d+-\d+ of (\d+)\./.exec(result)?.[1];
+            const where = input?.file_path ? `${displayPath(String(input.file_path))}:` : "";
+            const range = `${nums[0]}-${nums[nums.length - 1]}`;
+            return { text: `${where}${range}${total ? ` of ${total}` : ""}`, ok: true };
+        }
 
         case "write_file":
             return { text: firstLine, ok: true };
@@ -554,8 +591,8 @@ export function classifyResult(name: string, result: string): ResultView {
     }
 }
 
-export function printToolResult(name: string, result: string, elapsedMs: number): void {
-    const view = classifyResult(name, result);
+export function printToolResult(name: string, result: string, elapsedMs: number, input?: Record<string, any>): void {
+    const view = classifyResult(name, result, input);
     afterToolOutput = true;
     const mark = view.ok ? OK("✓") : view.warn ? WARN("!") : ERR("✗");
     const text = view.ok ? chalk.dim(view.text) : view.warn ? WARN(view.text) : ERR(view.text);

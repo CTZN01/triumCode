@@ -1189,7 +1189,7 @@ export class Agent {
                     toolResultLimit(block.name),
                 );
                 const elapsed = Date.now() - (toolStartTimes.get(block.id) ?? Date.now());
-                if (block.name !== "agent") printToolResult(block.name, output, elapsed);
+                if (block.name !== "agent") printToolResult(block.name, output, elapsed, block.input as Record<string, any>);
                 resultBlocks.push({
                     type: "tool_result",
                     tool_use_id: block.id,
