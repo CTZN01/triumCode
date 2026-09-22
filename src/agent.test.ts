@@ -823,3 +823,64 @@ test("a sub-agent does not trigger the auto-save callback", async () => {
     // or it would file a delegated task as this project's session.
     assert.equal(saves, 1);
 });
+
+test("a dangerous command behind a delegation is not auto-approved", async () => {
+    // The hole inheriting the parent's mode closes: the agent tool is
+    // classified read-only, and the sub-agent used to run in bypassPermissions
+    // whatever the parent was in — so a dangerous command skipped the
+    // confirmation (default) or the refusal (dontAsk) it would have met in the
+    // parent's own hands.
+    const { api } = await runChat(delegation(
+        { description: "kill stale proc", prompt: "Kill the stale process.", type: "general" },
+        [
+            (w) => {
+                w(start(0, { type: "tool_use", id: "s1", name: "run_command", input: {} }));
+                w(jsonDelta(0, '{"command":"kill","args":[]}'));
+                w(stop(0));
+                w(finish("tool_use"));
+            },
+            subAgentAnswer("could not run it"),
+        ],
+    ), { permissionMode: "default" });
+
+    // The refusal reached the sub-agent as its tool result — visible in the
+    // request it made after the call. Nothing was executed.
+    const transcript = JSON.stringify(api.bodies[2]?.messages ?? []);
+    assert.match(transcript, /denied/i);
+});
+
+test("a sub-agent does not spend a side query on memory recall", async () => {
+    // The memories were saved for the conversation, not for the one delegated
+    // task — and the recall costs a side-model call per delegation.
+    const originalCwd = process.cwd();
+    const dir = mkdtempSync(join(tmpdir(), "triumcode-agent-submem-"));
+    mkdirSync(join(dir, ".triumcode", "memory"), { recursive: true });
+    writeFileSync(
+        join(dir, ".triumcode", "memory", "project_deploy.md"),
+        "---\nname: deploy\ndescription: staging deploy target\ntype: project\n---\nDeploy to https://staging.example.com.",
+    );
+    process.chdir(dir);
+
+    const api = await fakeApi([subAgentAnswer("done")]);
+    let sideQueries = 0;
+    const agent = new Agent({
+        model: "test-model", apiKey: "k", apiBase: api.url,
+        permissionMode: "default", maxTurns: 5,
+        isSubAgent: true,
+        sideQuery: async () => { sideQueries++; return '{"selected_memories": ["project_deploy.md"]}'; },
+    });
+
+    const originalLog = console.log;
+    console.log = () => {};
+    try {
+        await agent.runOnce("look around");
+    } finally {
+        console.log = originalLog;
+        api.close();
+        process.chdir(originalCwd);
+    }
+
+    // A memory file is present and the side query is wired up — it is the
+    // sub-agent status that must keep the recall from firing.
+    assert.equal(sideQueries, 0);
+});

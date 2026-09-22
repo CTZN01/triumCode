@@ -425,3 +425,46 @@ test("multi_edit rejects an empty batch", async () => {
     const result = await tool.call({ file_path: tempFile("empty.ts", "a\n"), edits: [] }, {});
     assert.match(result, /non-empty array/);
 });
+
+test("multi_edit shifts an earlier region only by the replace_all hits above it", async () => {
+    const tool = getTool("multi_edit")!;
+    // target sits between two of the three X occurrences: the hit above it
+    // moves its line numbers, the two below must not. The old one-delta-per-
+    // edit math counted every hit and the snippet missed the line it showed.
+    const path = tempFile("drift.ts", [
+        "X",                                    // 1
+        "fill1", "fill2", "fill3", "fill4",     // 2-5
+        "target",                               // 6
+        "fill5", "fill6", "fill7",              // 7-9
+        "X",                                    // 10
+        "fill8", "fill9", "fill10",             // 11-13
+        "X",                                    // 14
+    ].join("\n") + "\n");
+
+    const result = await tool.call({
+        file_path: path,
+        edits: [
+            { old_string: "target", new_string: "target2" },
+            { old_string: "X", new_string: "X\nq\nw", replace_all: true },
+        ],
+    }, {});
+
+    // Each X adds two lines below itself; only the one at line 1 is above the
+    // target region, so target2 lands on line 8 — and the first snippet, the
+    // region report for the target edit, must show exactly that line.
+    const [firstSnippet] = result.split("\n...\n");
+    assert.match(firstSnippet, /8 \| target2/);
+    assert.equal(readFileSync(path, "utf-8").split("\n")[7], "target2");
+});
+
+test("edit_file reports trailing-whitespace ambiguity instead of picking one hit", async () => {
+    const tool = getTool("edit_file")!;
+    const original = "a  \nb\na \nb\n";
+    const path = tempFile("ambig-trail.ts", original);
+
+    const result = await tool.call({ file_path: path, old_string: "a\nb", new_string: "z\nc" }, {});
+
+    assert.match(result, /matches 2 locations ignoring trailing whitespace/);
+    assert.match(result, /lines 1-2, 3-4/);
+    assert.equal(readFileSync(path, "utf-8"), original);
+});

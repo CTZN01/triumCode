@@ -183,6 +183,10 @@ test("classifyResult marks failures, warnings and successes", () => {
             "Warning: D:\\x.py was modified externally since you last read it. Read it again before writing it, so you are working from its current contents.", false, true],
         ["edit_file", "Edited src/a.py at line 211", "Edited at line 211", true, false],
         ["edit_file", "No change: old_string and new_string are identical.", "No change: old_string and new_string are identical.", true, false],
+        // The first parenthetical is the line stats; a trailing display note
+        // must not be captured in its place.
+        ["multi_edit", "Edited 1 region in src/a.py (+1/-1 lines)", "Edited 1 place +1/-1 lines", true, false],
+        ["multi_edit", "Edited 4 regions in src/a.py (+5/-4 lines) (showing 3 of 4 regions)", "Edited 4 places +5/-4 lines", true, false],
         ["list_files", "src/a.py\nsrc/b.py", "2 entries", true, false],
         ["list_files", "src/a.py", "1 entry", true, false],
         // Regression: a single-line "No files found" used to count as "1 entries".
@@ -288,6 +292,53 @@ test("file paths under the cwd display relative to it", () => {
     } finally {
         vt.restore();
     }
+});
+
+test("read_file calls show the window they asked for", () => {
+    const vt = installFakeTty();
+    try {
+        ui.printToolCall("read_file", { file_path: "src/a.ts", offset: 100, limit: 50 });
+        ui.printToolCall("read_file", { file_path: "src/a.ts", offset: 300 });
+        ui.printToolCall("read_file", { file_path: "src/a.ts" });
+        ui.printToolResult("read_file", "  1 | const a = 1;\n  2 | const b = 2;", 74, { file_path: "src/a.ts" });
+
+        // Two pages of one file must not print as identical lines, and the
+        // result names the file because parallel calls batch their results
+        // after the fact.
+        assert.equal(vt.screen(), [
+            "  • Read src/a.ts:100-149",
+            "  • Read src/a.ts:300+",
+            "  • Read src/a.ts",
+            "    ↳ ✓ src/a.ts:1-2 (74ms)",
+        ].join("\n"));
+    } finally {
+        vt.restore();
+    }
+});
+
+test("read_file summaries report the range actually delivered", () => {
+    const numbered = "  1 | const a = 1;\n  2 | const b = 2;";
+    assert.deepEqual(
+        { ...ui.classifyResult("read_file", numbered, { file_path: "src/a.ts" }) },
+        { text: "src/a.ts:1-2", ok: true },
+    );
+
+    // The continuation footer carries the file's total.
+    const paged = "200 | x\n201 | y\n\n[lines 200-201 of 3500. Continue with offset=202.]";
+    assert.equal(
+        ui.classifyResult("read_file", paged, { file_path: "src/big.ts" }).text,
+        "src/big.ts:200-201 of 3500",
+    );
+
+    // The repeat-read notice names the range it refused to re-send.
+    const notice = "src/a.ts is unchanged since you read lines 3-5 of it, and that content is already above in this conversation.";
+    assert.equal(
+        ui.classifyResult("read_file", notice, { file_path: "src/a.ts" }).text,
+        "src/a.ts:3-5 unchanged",
+    );
+
+    // Output with no numbered lines keeps the old line count.
+    assert.equal(ui.classifyResult("read_file", "a\nb").text, "2 lines");
 });
 
 test("a long run_command target is truncated to one row, not wrapped", () => {

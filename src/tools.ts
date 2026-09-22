@@ -427,6 +427,17 @@ function lineOfIndex(content: string, index: number): number {
     return content.slice(0, index).split("\n").length;
 }
 
+// The pre-edit line numbers where each non-overlapping occurrence of `needle`
+// starts — all of them, because a replace_all's line deltas land on both sides
+// of an earlier anchor and each side shifts it differently.
+function matchStartLines(content: string, needle: string): number[] {
+    const starts: number[] = [];
+    for (let i = content.indexOf(needle); i !== -1; i = content.indexOf(needle, i + needle.length)) {
+        starts.push(lineOfIndex(content, i));
+    }
+    return starts;
+}
+
 type LineWindow = { startLine: number; endLine: number };
 
 // Compares whole lines, so a hit maps back to exact line numbers instead of a
@@ -447,7 +458,7 @@ function findWindows(
         }
         if (ok) {
             out.push({ startLine: s + 1, endLine: s + needleLines.length });
-            if (out.length > limit) break;
+            if (out.length >= limit) break;
         }
     }
     return out;
@@ -471,7 +482,16 @@ function closestWindow(fileLines: string[], needleLines: string[]): LineWindow |
 }
 
 type EditResult =
-    | { ok: true; content: string; startLine: number; endLine: number; replaced: number; relaxed: string | null }
+    | {
+        ok: true;
+        content: string;
+        startLine: number;
+        endLine: number;
+        replaced: number;
+        /** Pre-edit line numbers where each replaced occurrence started. */
+        matchStarts: number[];
+        relaxed: string | null;
+    }
     | { ok: false; message: string };
 
 function applyEdit(content: string, oldString: string, newString: string, replaceAll: boolean): EditResult {
@@ -496,13 +516,15 @@ function applyEdit(content: string, oldString: string, newString: string, replac
         const next = hits.count > 1
             ? content.split(needle).join(replacement)
             : content.slice(0, index) + replacement + content.slice(index + needle.length);
-        const startLine = lineOfIndex(content, index);
+        const matchStarts = matchStartLines(content, needle);
+        const startLine = matchStarts[0];
         return {
             ok: true,
             content: next,
             startLine,
             endLine: startLine + replacement.split("\n").length - 1,
             replaced: hits.count,
+            matchStarts,
             relaxed: null,
         };
     }
@@ -538,17 +560,31 @@ function applyEdit(content: string, oldString: string, newString: string, replac
             startLine,
             endLine: startLine + inserted.length - 1,
             replaced: 1,
+            matchStarts: [startLine],
             relaxed: "ignoring trailing whitespace",
+        };
+    }
+
+    if (trailing.length > 1) {
+        // Several hits on the relaxed pass is the same ambiguity as several
+        // exact ones: report it rather than editing a window the model may not
+        // have meant.
+        const where = trailing.map((w) => `${w.startLine}-${w.endLine}`).join(", ");
+        const howMany = String(trailing.length);
+        return {
+            ok: false,
+            message: `Error: old_string matches ${howMany} locations ignoring trailing whitespace (lines ${where}). Include more surrounding context to make it unique${replaceAll ? "" : ", or pass replace_all: true"}.`,
         };
     }
 
     const indented = findWindows(fileLines, needleLines, sameIgnoringIndent, 5);
     if (indented.length >= 1) {
         const { startLine, endLine } = indented[0];
+        const others = indented.length > 1 ? ` (${indented.length - 1} other location${indented.length === 2 ? "" : "es"} match too; the first is quoted)` : "";
         const quoted = renderRegion(fileLines, startLine, Math.min(endLine, startLine + EDIT_DIAGNOSTIC_MAX_LINES - 1));
         return {
             ok: false,
-            message: `Error: old_string is not present verbatim, but lines ${startLine}-${endLine} match it ignoring indentation:\n\n${quoted}\n\nRe-send the edit with those exact lines as old_string.`,
+            message: `Error: old_string is not present verbatim, but lines ${startLine}-${endLine} match it ignoring indentation${others}:\n\n${quoted}\n\nRe-send the edit with those exact lines as old_string.`,
         };
     }
 
@@ -586,8 +622,11 @@ function editFileImpl(input: { file_path: string; old_string: string; new_string
         ? `Edited ${applied.replaced} occurrences in ${input.file_path}`
         : `Edited ${input.file_path} at line ${applied.startLine}`;
     const note = applied.relaxed === null ? "" : `\nNote: matched ${applied.relaxed}.`;
+    // A replace_all's snippet covers its first hit only; say so, or the model
+    // will assume the other occurrences are unchanged.
+    const partial = applied.replaced > 1 ? "\nNote: the snippet shows the first of the replaced occurrences." : "";
     const snippet = snippetAround(applied.content.split("\n"), applied.startLine, applied.endLine);
-    return `${where} (+${added}/-${removed} lines)${note}\n\n${snippet}`;
+    return `${where} (+${added}/-${removed} lines)${note}${partial}\n\n${snippet}`;
 }
 
 const editFileTool = register({
@@ -652,7 +691,7 @@ function multiEditImpl(input: { file_path: string; edits: MultiEditInput[] }): s
         return `Error reading file: ${e.message}`;
     }
 
-    const regions: Array<{ startLine: number; endLine: number }> = [];
+    const regions: Array<{ startLine: number; endLine: number; replaced: number }> = [];
     let added = 0;
     let removed = 0;
     let current = content;
@@ -668,17 +707,22 @@ function multiEditImpl(input: { file_path: string; edits: MultiEditInput[] }): s
         }
         // Keep earlier regions in final-file coordinates. A later edit may be
         // anchored above one of them, so its line delta shifts that region.
+        // The shift is per occurrence, not per edit: a replace_all with hits
+        // both above and below a region must move it only by the hits above
+        // it, and folding every hit into one delta skews the line numbers this
+        // result exists to pin down.
         const oldLineCount = oldString.split("\n").length;
         const newLineCount = newString.split("\n").length;
-        const delta = (newLineCount - oldLineCount) * result.replaced;
-        const oldEndLine = result.startLine + oldLineCount - 1;
+        const delta = newLineCount - oldLineCount;
         for (const region of regions) {
-            if (region.startLine > oldEndLine) {
-                region.startLine += delta;
-                region.endLine += delta;
+            let shift = 0;
+            for (const start of result.matchStarts) {
+                if (region.startLine > start + oldLineCount - 1) shift += delta;
             }
+            region.startLine += shift;
+            region.endLine += shift;
         }
-        regions.push({ startLine: result.startLine, endLine: result.endLine });
+        regions.push({ startLine: result.startLine, endLine: result.endLine, replaced: result.replaced });
         added += newString.split("\n").length * result.replaced;
         removed += oldString.split("\n").length * result.replaced;
         current = result.content;
@@ -693,7 +737,11 @@ function multiEditImpl(input: { file_path: string; edits: MultiEditInput[] }): s
     for (let i = 0; i < shown; i++) {
         parts.push(snippetAround(lines, regions[i].startLine, regions[i].endLine));
     }
-    const more = regions.length > shown ? ` (showing ${shown} of ${regions.length} regions)` : "";
+    const notes: string[] = [];
+    if (regions.length > shown) notes.push(`showing ${shown} of ${regions.length} regions`);
+    const partial = regions.filter((r) => r.replaced > 1).length;
+    if (partial > 0) notes.push(`${partial} replace_all ${partial === 1 ? "region shows" : "regions show"} only the first occurrence`);
+    const more = notes.length > 0 ? ` (${notes.join("; ")})` : "";
     const body = parts.length > 0 ? `\n\n${parts.join("\n...\n")}` : "";
     return `Edited ${regions.length} region${regions.length === 1 ? "" : "s"} in ${input.file_path} (+${added}/-${removed} lines)${more}${body}`;
 }
@@ -1649,7 +1697,11 @@ register({
         },
         required: ["description", "prompt"],
     },
-    isConcurrencySafe: () => false,
+    // The executor never sees this tool (the Agent intercepts it before the
+    // queue), so this flag is documentation: two delegations in one turn DO
+    // run alongside each other. They share no state — hence the warning in
+    // the prompt block below about parallel writes to the same file.
+    isConcurrencySafe: () => true,
     isReadOnly: () => true,
     isDestructive: () => false,
     maxResultSizeChars: 50_000,
@@ -1664,6 +1716,7 @@ register({
             "Use the agent tool to delegate a task that would otherwise flood this conversation: a broad search, a survey of several files, or an implementation you want designed before you commit to it. The sub-agent works in its own context and returns only its final summary — the tool calls it makes never enter this conversation.",
             "Its context is isolated in both directions: it cannot see this conversation, so the prompt must be self-contained (what to find, where to look, what to return).",
             "Types: explore and plan are read-only and have no shell — use them for anything that only needs to look. general has the full tool set and can change files.",
+            "Do not split one task into several delegations that write the same files: parallel sub-agents share no state and will overwrite each other.",
             "Do not delegate a task you can finish in one or two tool calls; the round trip costs more than it saves.",
         ].join("\n");
         const custom = describeCustomAgents();
