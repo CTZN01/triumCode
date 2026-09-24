@@ -474,14 +474,14 @@ main agent ──agent(explore, "where is auth handled?")──► sub-agent
 |------|-------|-----|
 | `explore` | `read_file`, `list_files`, `grep_search` | Reconnaissance — where something lives, how it connects |
 | `plan` | same | Design an implementation before committing to it |
-| `general` | everything except `agent` | A whole task: read, change, verify |
+| `general` | all task tools except `agent`, `ask_user`, and plan-mode controls | A whole task: read, change, verify |
 
 An unknown or omitted `type` falls back to `general`.
 
-- **Read-only is enforced by the tool list**, not by the prompt. `explore` and
-  `plan` are never handed a tool that writes or runs anything, so a
-  misbehaving model has nothing to misuse. Their contracts restate the
-  restriction so they do not spend turns asking for a tool that is not there.
+- **Read-only is enforced by the tool allowlist**, not by the prompt. `explore`
+  and `plan` have no write or shell tools in either the request schema or the
+  execution layer. Their contracts restate the restriction so they do not
+  spend turns asking for a tool that is not there.
 - **Plan mode is inherited.** A sub-agent spawned while the session is in plan
   mode runs in plan mode too; everywhere else it runs with permissions already
   granted to the parent. Dropping the mode instead would let a delegation
@@ -489,6 +489,8 @@ An unknown or omitted `type` falls back to `general`.
 - **No recursion.** A `general` sub-agent's tool list excludes `agent`, and so
   does a custom agent's. Nesting multiplies token use per level, and one level
   covers the real cases.
+- **Bounded parallelism.** Up to three sub-agents run at once; additional
+  delegations wait for a slot.
 - **Errors are isolated.** A sub-agent that throws returns
   `Sub-agent error: …` as its tool result. The parent continues and decides
   whether to retry, narrow the prompt, or do the work itself.
@@ -517,8 +519,9 @@ Review the change for correctness and report findings as a list.
 Project-level `.claude/agents/` overrides user-level `~/.claude/agents/` of the
 same name, and either overrides a built-in type — a file named `explore.md`
 replaces the built-in `explore` contract and tool set. Omitting `allowed-tools`
-grants the general set. The tool list is still filtered: `agent`,
-`enter_plan_mode` and `exit_plan_mode` are never handed to a sub-agent.
+grants the general set. A declared list is a strict allowlist; unknown or
+excluded names do not broaden it. The tool list is filtered to exclude `agent`,
+`ask_user`, `enter_plan_mode` and `exit_plan_mode`.
 
 ## Session storage
 

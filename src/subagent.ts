@@ -121,8 +121,10 @@ const BUILTIN_PROMPTS: Record<SubAgentType, string> = {
 export interface CustomAgent {
     name: string;
     description: string;
-    /** The tools it declared, resolved against the registry; empty = every tool. */
+    /** The tools it declared, resolved against the registry. */
     tools: Tool[];
+    /** Whether a tools field was present in frontmatter. */
+    toolsDeclared: boolean;
     prompt: string;
     source: "user" | "project";
 }
@@ -160,6 +162,7 @@ function parseCustomAgent(filePath: string, source: CustomAgent["source"]): Cust
         name,
         description: scalar(values.get("description")),
         tools: resolveTools(parseList(values.get("allowed-tools") ?? values.get("tools"))),
+        toolsDeclared: values.has("allowed-tools") || values.has("tools"),
         prompt: parsed.prompt,
         source,
     };
@@ -222,16 +225,10 @@ export interface SubAgentConfig {
 }
 
 /**
- * Everything a sub-agent may be handed: the registry minus the two tools that
- * only make sense for a conversation with a user.
- *
- * `agent` is excluded to stop recursion — nested delegation multiplies token
- * use per level, and one level covers the real cases. The plan-mode pair is
- * excluded because plan mode is a property of the session: a sub-agent has no
- * user to approve a plan, and entering it from inside a sub-agent would flip a
- * state the caller owns and print to a terminal the sub-agent does not own.
+ * Tools a delegated task cannot use meaningfully: `agent` would recurse,
+ * `ask_user` has no user callback, and plan mode belongs to the parent session.
  */
-const SUBAGENT_EXCLUDED = new Set(["agent", "enter_plan_mode", "exit_plan_mode"]);
+const SUBAGENT_EXCLUDED = new Set(["agent", "ask_user", "enter_plan_mode", "exit_plan_mode"]);
 
 function getGeneralTools(): Tool[] {
     return getAllTools().filter((tool) => !SUBAGENT_EXCLUDED.has(tool.name));
@@ -250,11 +247,10 @@ export function getSubAgentConfig(type: string): SubAgentConfig {
     const name = type.trim().toLowerCase();
     const custom = discoverCustomAgents().find((agent) => agent.name === name);
     if (custom) {
-        // No allowed-tools is a custom agent asking for the general set — the
-        // same reading as a skill with no allowed-tools. A declared list is
-        // taken literally; an unknown name in it is dropped, not an error, so
-        // one typo cannot leave the agent with no tools at all.
-        const tools = custom.tools.length > 0 ? custom.tools : getGeneralTools();
+        // Omitting allowed-tools opts into the general set. A declared list is
+        // an allowlist: unknown or excluded names are dropped, and an empty
+        // result stays empty instead of silently granting broader access.
+        const tools = custom.toolsDeclared ? custom.tools : getGeneralTools();
         return {
             systemPrompt: buildSubAgentSystemPrompt(custom.prompt, tools),
             tools,
@@ -297,7 +293,7 @@ export function resolveSubAgentName(value: unknown): string {
 function buildSubAgentSystemPrompt(contract: string, tools: Tool[]): string {
     return [
         contract,
-        buildToolPromptBlock(tools),
+        tools.length > 0 ? buildToolPromptBlock(tools) : "No tools are available to this sub-agent.",
         buildEnvironmentContext(),
     ].filter((part) => part.length > 0).join("\n\n");
 }

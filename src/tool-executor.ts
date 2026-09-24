@@ -49,11 +49,13 @@ export class ToolExecutor {
     private pending: PendingItem[] = [];
     private executing = new Map<string, ExecutingItem>();
     private context: ToolContext;
+    private allowedTools?: ReadonlySet<string>;
     // Resolvers for drain() callers, notified when the executor goes idle.
     private idleResolvers: Array<() => void> = [];
 
-    constructor(context: ToolContext) {
+    constructor(context: ToolContext, allowedTools?: ReadonlySet<string>) {
         this.context = context;
+        this.allowedTools = allowedTools;
     }
 
     // Enqueue a completed tool_use block for execution. Returns a promise that
@@ -65,6 +67,10 @@ export class ToolExecutor {
         name: string,
         input: Record<string, any>,
     ): Promise<string> {
+        if (this.allowedTools && !this.allowedTools.has(name)) {
+            return Promise.resolve(`Error: tool ${name} is not available to this agent.`);
+        }
+
         const tool = getTool(name);
 
         // Generic required-argument guard, checked before anything else so a
