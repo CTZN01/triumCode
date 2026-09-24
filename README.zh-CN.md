@@ -223,7 +223,7 @@ triumcode --api-base https://gateway.example/v1 \
 
 ## 技能
 
-技能是存放在 `.claude/skills/` 下的可复用 Markdown 提示词。
+技能是存放在 `.triumcode/skills/` 下的可复用 Markdown 提示词。
 
 ```markdown
 ---
@@ -236,12 +236,12 @@ mode: inline
 ---
 
 Review the current changes, then create a commit for $ARGUMENTS.
-The skill directory is ${CLAUDE_SKILL_DIR}.
+The skill directory is ${TRIUMCODE_SKILL_DIR}.
 ```
 
-用户技能从 `~/.claude/skills/` 加载；项目技能从 `.claude/skills/` 加载，同名时覆盖用户技能。使用 `/commit message` 调用可被用户调用的技能，或由模型通过 `skill` 工具加载。设置 `user-invocable: false` 会将技能从斜杠命令中移除，仅保留模型调用入口。
+用户技能从 `~/.triumcode/skills/` 加载；项目技能从 `.triumcode/skills/` 加载，同名时覆盖用户技能。为兼容旧配置，仍会读取 `~/.claude/skills/` 和项目 `.claude/skills/`。使用 `/commit message` 调用可被用户调用的技能，或由模型通过 `skill` 工具加载。设置 `user-invocable: false` 会将技能从斜杠命令中移除，仅保留模型调用入口。
 
-`allowed-tools` 支持逗号分隔列表或 JSON 数组。支持的模板变量为 `$ARGUMENTS`、`${ARGUMENTS}` 和 `${CLAUDE_SKILL_DIR}`。`mode: fork` 表示该提示词属于隔离子智能体执行；当前实现会将这份隔离约定交给 agent，工具执行仍位于同一进程内。
+`allowed-tools` 支持逗号分隔列表或 JSON 数组。支持的模板变量为 `$ARGUMENTS`、`${ARGUMENTS}` 和 `${TRIUMCODE_SKILL_DIR}`；现有技能仍可使用 `${CLAUDE_SKILL_DIR}`。`mode: fork` 表示该提示词属于隔离子智能体执行；当前实现会将这份隔离约定交给 agent，工具执行仍位于同一进程内。
 
 ## 记忆
 
@@ -350,13 +350,14 @@ The skill directory is ${CLAUDE_SKILL_DIR}.
 |------|--------|------|
 | `explore` | `read_file`、`list_files`、`grep_search` | 侦察：某物在哪里、如何连接 |
 | `plan` | 同上 | 在动手前设计实现方案 |
-| `general` | 除 `agent` 外的全部工具 | 完整任务：读、改、验证 |
+| `general` | 除 `agent`、`ask_user` 和计划模式控制外的任务工具 | 完整任务：读、改、验证 |
 
 类型未知或省略时回退为 `general`。
 
-- **只读约束下沉到工具层**，而非依赖提示词。`explore` 与 `plan` 根本拿不到任何写入或执行类工具，模型即使跑偏也无从误用。它们的契约中同时重申该限制，避免浪费回合去索要不存在的工具。
+- **只读约束由工具白名单执行**，而非依赖提示词。`explore` 与 `plan` 在请求 schema 和执行层都没有写入或 shell 工具。它们的契约中同时重申该限制，避免浪费回合去索要不存在的工具。
 - **计划模式强制继承。** 会话处于计划模式时，派生出的子 agent 同样运行在计划模式下；其余情况下则沿用主 agent 已获得的授权。若丢弃该模式，委派就会成为绕过只读会话的通道。
 - **禁止递归。** `general` 子 agent 的工具列表排除 `agent`，自定义 agent 亦然。嵌套会让 token 消耗逐层倍增，而单层已覆盖绝大多数场景。
+- **并发数量有限。** 最多同时运行 3 个子 agent，其余委派会等待空位。
 - **错误隔离。** 子 agent 抛异常时返回 `Sub-agent error: …` 作为工具结果。主 agent 继续运行，并自行决定重试、收窄提示词，还是亲自完成。
 - **输出预算更低**（4096 output tokens，主 agent 为 32000），提示词要求给出带 `path:line` 引用的摘要，而非粘贴文件内容。
 - **Ctrl+C 单向传播**：中断主 agent 会中断子 agent，反之不成立。
@@ -376,7 +377,7 @@ allowed-tools: read_file, grep_search, git_diff
 Review the change for correctness and report findings as a list.
 ```
 
-项目级 `.claude/agents/` 覆盖用户级 `~/.claude/agents/` 中的同名文件，两者都可覆盖内建类型 —— 名为 `explore.md` 的文件会替换内建 `explore` 的契约与工具集。省略 `allowed-tools` 即授予 general 工具集。工具列表仍会过滤：`agent`、`enter_plan_mode`、`exit_plan_mode` 永远不会下发给子 agent。
+项目级 `.claude/agents/` 覆盖用户级 `~/.claude/agents/` 中的同名文件，两者都可覆盖内建类型 —— 名为 `explore.md` 的文件会替换内建 `explore` 的契约与工具集。省略 `allowed-tools` 即授予 general 工具集；声明后则按严格白名单处理，未知或被排除的名称不会扩大权限。工具列表会过滤：`agent`、`ask_user`、`enter_plan_mode`、`exit_plan_mode` 永远不会下发给子 agent。
 
 ## 会话存储
 

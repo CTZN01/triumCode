@@ -43,6 +43,13 @@ import {
 // then get cut off mid-sentence — or mid-tool-call. 4096 was small enough to
 // trigger that constantly.
 const DEFAULT_MAX_TOKENS = 32_000;
+const MAX_PARALLEL_SUBAGENTS = 3;
+
+interface SubAgentSlotWaiter {
+    signal?: AbortSignal;
+    resolve: (release: (() => void) | null) => void;
+    onAbort?: () => void;
+}
 
 // The system prompt, as one cacheable block.
 //
@@ -120,12 +127,12 @@ export interface AgentOptions {
     // without them is byte-for-byte the agent it was before these existed.
     /** Replaces the assembled system prompt entirely. */
     customSystemPrompt?: string;
-    /** Replaces the registry's active set as this agent's tool list. */
+    /** Replaces the registry's tool definitions and execution allowlist. */
     customTools?: Tool[];
     /**
      * Marks this instance as a sub-agent: it suppresses the terminal
-     * separators, the auto-save and the cost report, none of which make sense
-     * for a one-shot delegated task.
+     * output and status UI, auto-save and cost report, none of which make
+     * sense for a one-shot delegated task.
      */
     isSubAgent?: boolean;
 }
@@ -212,6 +219,9 @@ export class Agent {
     private isSubAgent: boolean;
     private customSystemPrompt?: string;
     private customTools?: Tool[];
+    private customToolNames?: ReadonlySet<string>;
+    private activeSubAgents = 0;
+    private subAgentSlotQueue: SubAgentSlotWaiter[] = [];
 
     constructor(options?: AgentOptions) {
         this.model = options?.model || envModel("claude-sonnet-4-20250514");
@@ -240,6 +250,9 @@ export class Agent {
         this.isSubAgent = options?.isSubAgent ?? false;
         this.customSystemPrompt = options?.customSystemPrompt;
         this.customTools = options?.customTools;
+        this.customToolNames = options?.customTools
+            ? new Set(options.customTools.map((tool) => tool.name))
+            : undefined;
     }
 
     private buildProvider(): ModelProvider {
@@ -251,16 +264,13 @@ export class Agent {
     }
 
     /**
-     * The one exit for model text. A main agent streams it to the terminal; a
-     * sub-agent accumulates it, because its narration is for its own context
-     * and printing it would interleave two conversations on one screen.
-     *
-     * Everything that emits model text goes through here, so the destination is
-     * decided in exactly one place.
+     * Stream assistant text for the main agent. A sub-agent keeps intermediate
+     * narration in its own message history; runAgentLoop captures its final
+     * answer after the tool loop finishes.
      */
     private emitText(text: string): void {
-        if (this.outputBuffer) this.outputBuffer.push(text);
-        else printAssistantText(text);
+        if (this.outputBuffer !== null) return;
+        printAssistantText(text);
     }
 
     /** This agent's tool list: its own set when it has one, else the registry's. */
@@ -410,11 +420,11 @@ export class Agent {
     // ── Sub-agent entry point ───────────────────────────────────
 
     /**
-     * Run one prompt to completion and return its final text, without touching
-     * the terminal or the session file.
+     * Run one prompt to completion and return only its final answer, without
+     * touching the terminal or the session file.
      *
      * This is chat() with a capture buffer around it: the same loop, the same
-     * tools, the same message history — only the output's destination differs.
+     * tools and history, while intermediate narration stays inside the loop.
      * A sub-agent is an Agent, not a second implementation of one.
      *
      * Token usage is a delta, not a total: the instance counters accumulate
@@ -440,6 +450,54 @@ export class Agent {
         return { text: buffer.join("").trim(), tokens };
     }
 
+    private acquireSubAgentSlot(signal?: AbortSignal): Promise<(() => void) | null> {
+        if (signal?.aborted) return Promise.resolve(null);
+        if (this.activeSubAgents < MAX_PARALLEL_SUBAGENTS) {
+            this.activeSubAgents++;
+            return Promise.resolve(this.makeSubAgentSlotRelease());
+        }
+
+        return new Promise((resolve) => {
+            const waiter: SubAgentSlotWaiter = { signal, resolve };
+            if (signal) {
+                waiter.onAbort = () => {
+                    const index = this.subAgentSlotQueue.indexOf(waiter);
+                    if (index === -1) return;
+                    this.subAgentSlotQueue.splice(index, 1);
+                    resolve(null);
+                };
+                signal.addEventListener("abort", waiter.onAbort, { once: true });
+            }
+            this.subAgentSlotQueue.push(waiter);
+        });
+    }
+
+    private makeSubAgentSlotRelease(): () => void {
+        let released = false;
+        return () => {
+            if (released) return;
+            released = true;
+            this.activeSubAgents--;
+            this.startNextSubAgent();
+        };
+    }
+
+    private startNextSubAgent(): void {
+        while (this.subAgentSlotQueue.length > 0) {
+            const waiter = this.subAgentSlotQueue.shift()!;
+            if (waiter.signal && waiter.onAbort) {
+                waiter.signal.removeEventListener("abort", waiter.onAbort);
+            }
+            if (waiter.signal?.aborted) {
+                waiter.resolve(null);
+                continue;
+            }
+            this.activeSubAgents++;
+            waiter.resolve(this.makeSubAgentSlotRelease());
+            return;
+        }
+    }
+
     // ── The agent tool ──────────────────────────────────────────
 
     /**
@@ -450,6 +508,18 @@ export class Agent {
      * error would abort a turn that has a working answer available.
      */
     private async executeAgentTool(input: Record<string, any>): Promise<string> {
+        const signal = this.abortController?.signal;
+        const release = await this.acquireSubAgentSlot(signal);
+        if (!release) return "Sub-agent was cancelled before it started.";
+        try {
+            return await this.runAgentTool(input, signal);
+        } finally {
+            release();
+        }
+    }
+
+    private async runAgentTool(input: Record<string, any>, signal?: AbortSignal): Promise<string> {
+        if (signal?.aborted) return "Sub-agent was cancelled before it started.";
         const type = resolveSubAgentName(input.type);
         const description = String(input.description ?? "").trim() || type;
         const prompt = String(input.prompt ?? "").trim();
@@ -497,7 +567,7 @@ export class Agent {
         // One-way abort: the parent interrupting this turn interrupts the
         // sub-agent. The reverse does not hold — a sub-agent failing is not a
         // reason to cancel the conversation.
-        const signal = this.abortController?.signal;
+        if (signal?.aborted) return "Sub-agent was cancelled before it started.";
         const forwardAbort = () => subAgent.abort();
         signal?.addEventListener("abort", forwardAbort, { once: true });
 
@@ -553,8 +623,8 @@ export class Agent {
      * plan-mode session may still explore.
      *
      * The call runs alongside the executor's queue rather than inside it, so
-     * two delegations in one turn overlap. They share nothing but the model
-     * client, and each has its own message history.
+     * up to three delegations in one turn overlap. Each has its own provider
+     * instance and message history, configured for the parent's model.
      */
     private executeToolCall(
         executor: ToolExecutor,
@@ -562,6 +632,9 @@ export class Agent {
         name: string,
         input: Record<string, any>,
     ): Promise<string> {
+        if (this.customToolNames && !this.customToolNames.has(name)) {
+            return Promise.resolve(`Error: tool ${name} is not available to this agent.`);
+        }
         if (name === "agent") return this.executeAgentTool(input);
         return executor.enqueue(id, name, input);
     }
@@ -602,7 +675,7 @@ export class Agent {
     }
 
     showCost(): void {
-        printCostReport(this.getUsage());
+        if (!this.isSubAgent) printCostReport(this.getUsage());
     }
 
     // ── Session persistence helpers ──────────────────────────────
@@ -811,7 +884,7 @@ export class Agent {
             // Safety net: runAgentLoop can bail from several places (abort,
             // no-tool termination, a thrown API error). None of them may leave
             // a spinner frame on screen or its interval ticking.
-            endStatus();
+            if (!this.isSubAgent) endStatus();
             this.isProcessing = false;
             this.abortController = null;
             // Auto-save after each chat() completes. A sub-agent skips it: its
@@ -856,7 +929,9 @@ export class Agent {
             if (this.optionalParamsRejected || !isUnsupportedParamError(e)) throw e;
 
             this.optionalParamsRejected = true;
-            printInfo(`endpoint does not support thinking/effort (${briefApiError(e)}) — continuing without them`);
+            if (!this.isSubAgent) {
+                printInfo(`endpoint does not support thinking/effort (${briefApiError(e)}) — continuing without them`);
+            }
             return await withRetry(
                 (signal) => this.provider.stream(request(true), signal),
                 this.abortController?.signal,
@@ -874,7 +949,7 @@ export class Agent {
         // Agent loop: keep going as long as the model produces tool calls.
         while (true) {
             if (this.maxTurns > 0 && turns >= this.maxTurns) {
-                printTurnEnd(`stopped after ${this.maxTurns} turns — the task may be unfinished`);
+                if (!this.isSubAgent) printTurnEnd(`stopped after ${this.maxTurns} turns — the task may be unfinished`);
                 return;
             }
             turns++;
@@ -886,8 +961,10 @@ export class Agent {
             // Each iteration is a fresh "model is working" phase, so the
             // elapsed clock restarts. The defensive endStatus() guarantees
             // that even if a phase left the status active.
-            endStatus();
-            beginStatus(pickStatusVerb());
+            if (!this.isSubAgent) {
+                endStatus();
+                beginStatus(pickStatusVerb());
+            }
 
             const tools = this.activeToolDefinitions();
             const compressed = compressHistory(this.messages, {
@@ -960,7 +1037,7 @@ export class Agent {
                 exitPlanMode: () => this.exitPlanModeFromTool(),
                 todos: [],
             };
-            const executor = new ToolExecutor(context);
+            const executor = new ToolExecutor(context, this.customToolNames);
             const toolResults = new Map<string, Promise<string>>();
             const toolStartTimes = new Map<string, number>();
 
@@ -987,7 +1064,7 @@ export class Agent {
                             if (cb.type === "thinking") {
                                 thinkingIdx.add(idx);
                                 thinkingStartedAt = Date.now();
-                                updateStatus("Thinking");
+                                if (!this.isSubAgent) updateStatus("Thinking");
                                 break;
                             }
                             if (cb.type === "tool_use") {
@@ -1018,7 +1095,7 @@ export class Agent {
 
                             if (thinkingIdx.has(idx)) {
                                 const ms = Date.now() - thinkingStartedAt;
-                                if (ms >= 1000) printThinkingDuration(ms);
+                                if (!this.isSubAgent && ms >= 1000) printThinkingDuration(ms);
                                 break;
                             }
 
@@ -1061,7 +1138,7 @@ export class Agent {
                                 // The agent tool narrates itself — start line,
                                 // end line, token count — so the generic call
                                 // line would say the same thing twice.
-                                if (state.name !== "agent") printToolCall(state.name, input);
+                                if (!this.isSubAgent && state.name !== "agent") printToolCall(state.name, input);
                                 toolStartTimes.set(state.id, Date.now());
 
                                 if (inputError) {
@@ -1111,7 +1188,7 @@ export class Agent {
             }
 
             this.endOutput();
-            endStatus();
+            if (!this.isSubAgent) endStatus();
 
             // Wait for all in-flight tools to finish.
             //
@@ -1123,7 +1200,7 @@ export class Agent {
             // tools are already complete by the time the stream ends.
             //
             // A straggler is the one silent gap left in a turn, so cover it.
-            if (!executor.isIdle) {
+            if (!this.isSubAgent && !executor.isIdle) {
                 beginStatus(() => {
                     const running = executor.running;
                     if (running.length === 1) return `Running ${running[0]}`;
@@ -1135,7 +1212,7 @@ export class Agent {
             // Must end here, not after the results print: leaving it active
             // would carry this phase's elapsed time into the next iteration,
             // which then reports a fresh API call as already 6s old.
-            endStatus();
+            if (!this.isSubAgent) endStatus();
 
             // Drop thinking blocks before storing in history: they are the
             // model's scratchpad and can be thousands of tokens long.
@@ -1154,18 +1231,20 @@ export class Agent {
                 // same way. The budget is the problem, and only the user can
                 // raise it.
                 if (stopReason === "max_tokens") {
-                    printTurnEnd(
-                        "the model produced no output — it is spending the whole token budget on thinking. Raise --max-tokens",
-                    );
+                    if (!this.isSubAgent) {
+                        printTurnEnd(
+                            "the model produced no output — it is spending the whole token budget on thinking. Raise --max-tokens",
+                        );
+                    }
                     return;
                 }
                 // Not truncated: a genuinely empty response, usually transient.
                 if (!emptyTurnRetried) {
-                    printTurnEnd("the model returned an empty turn — retrying once");
+                    if (!this.isSubAgent) printTurnEnd("the model returned an empty turn — retrying once");
                     emptyTurnRetried = true;
                     continue;
                 }
-                printTurnEnd("the model returned an empty turn again — nothing to continue with");
+                if (!this.isSubAgent) printTurnEnd("the model returned an empty turn again — nothing to continue with");
                 return;
             }
 
@@ -1174,11 +1253,20 @@ export class Agent {
             // A truncated turn is reported even when it continues below: the
             // model may have been cut off mid-sentence or mid-tool-call.
             if (stopReason === "max_tokens") {
-                printTurnEnd("response hit the max token limit — this turn may be incomplete");
+                if (!this.isSubAgent) printTurnEnd("response hit the max token limit — this turn may be incomplete");
             }
 
             // If no tools were called, the model is done.
-            if (toolResults.size === 0) return;
+            if (toolResults.size === 0) {
+                if (this.outputBuffer !== null) {
+                    const finalText = filtered
+                        .filter((block): block is Anthropic.TextBlockParam => block.type === "text")
+                        .map((block) => block.text)
+                        .join("");
+                    if (finalText) this.outputBuffer.push(finalText);
+                }
+                return;
+            }
 
             // Build tool results in the same order as tool_use blocks appeared.
             const resultBlocks: Anthropic.ToolResultBlockParam[] = [];
@@ -1189,7 +1277,9 @@ export class Agent {
                     toolResultLimit(block.name),
                 );
                 const elapsed = Date.now() - (toolStartTimes.get(block.id) ?? Date.now());
-                if (block.name !== "agent") printToolResult(block.name, output, elapsed, block.input as Record<string, any>);
+                if (!this.isSubAgent && block.name !== "agent") {
+                    printToolResult(block.name, output, elapsed, block.input as Record<string, any>);
+                }
                 resultBlocks.push({
                     type: "tool_result",
                     tool_use_id: block.id,

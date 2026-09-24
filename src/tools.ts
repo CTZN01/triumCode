@@ -427,15 +427,44 @@ function lineOfIndex(content: string, index: number): number {
     return content.slice(0, index).split("\n").length;
 }
 
-// The pre-edit line numbers where each non-overlapping occurrence of `needle`
-// starts — all of them, because a replace_all's line deltas land on both sides
-// of an earlier anchor and each side shifts it differently.
-function matchStartLines(content: string, needle: string): number[] {
-    const starts: number[] = [];
-    for (let i = content.indexOf(needle); i !== -1; i = content.indexOf(needle, i + needle.length)) {
-        starts.push(lineOfIndex(content, i));
+function offsetOfLine(content: string, line: number): number {
+    let offset = 0;
+    for (let current = 1; current < line; current++) {
+        const newline = content.indexOf("\n", offset);
+        if (newline === -1) return content.length;
+        offset = newline + 1;
     }
-    return starts;
+    return offset;
+}
+
+// Collect non-overlapping match offsets in one pass. Keeping offsets lets a
+// later multi_edit accurately shift an earlier region even when both edits
+// touch the same source line.
+function matchOffsetsIn(content: string, needle: string): number[] {
+    const offsets: number[] = [];
+    for (let i = content.indexOf(needle); i !== -1; i = content.indexOf(needle, i + needle.length)) {
+        offsets.push(i);
+    }
+    return offsets;
+}
+
+function transformOffset(offset: number, matchOffsets: number[], oldLength: number, newLength: number): number {
+    const delta = newLength - oldLength;
+    let low = 0;
+    let high = matchOffsets.length;
+    while (low < high) {
+        const middle = (low + high) >>> 1;
+        if (matchOffsets[middle] + oldLength <= offset) low = middle + 1;
+        else high = middle;
+    }
+
+    const start = matchOffsets[low];
+    if (start !== undefined && offset >= start) {
+        // An earlier region was edited again. Keep its anchor at the
+        // corresponding point in the replacement, clamped if it shrank.
+        return start + low * delta + Math.min(offset - start, newLength);
+    }
+    return offset + low * delta;
 }
 
 type LineWindow = { startLine: number; endLine: number };
@@ -488,8 +517,12 @@ type EditResult =
         startLine: number;
         endLine: number;
         replaced: number;
-        /** Pre-edit line numbers where each replaced occurrence started. */
-        matchStarts: number[];
+        /** Pre-edit character offsets for each non-overlapping match. */
+        matchOffsets: number[];
+        startOffset: number;
+        endOffset: number;
+        matchedLength: number;
+        replacementLength: number;
         relaxed: string | null;
     }
     | { ok: false; message: string };
@@ -516,15 +549,20 @@ function applyEdit(content: string, oldString: string, newString: string, replac
         const next = hits.count > 1
             ? content.split(needle).join(replacement)
             : content.slice(0, index) + replacement + content.slice(index + needle.length);
-        const matchStarts = matchStartLines(content, needle);
-        const startLine = matchStarts[0];
+        const matchOffsets = matchOffsetsIn(content, needle);
+        const startOffset = matchOffsets[0];
+        const startLine = lineOfIndex(content, startOffset);
         return {
             ok: true,
             content: next,
             startLine,
             endLine: startLine + replacement.split("\n").length - 1,
             replaced: hits.count,
-            matchStarts,
+            matchOffsets,
+            startOffset,
+            endOffset: startOffset + replacement.length,
+            matchedLength: needle.length,
+            replacementLength: replacement.length,
             relaxed: null,
         };
     }
@@ -548,19 +586,25 @@ function applyEdit(content: string, oldString: string, newString: string, replac
     const trailing = findWindows(fileLines, needleLines, sameIgnoringTrailing, 5);
     if (trailing.length === 1) {
         const { startLine, endLine } = trailing[0];
-        const inserted = replacement.split("\n");
-        const next = [
-            ...fileLines.slice(0, startLine - 1),
-            ...inserted,
-            ...fileLines.slice(endLine),
-        ].join("\n");
+        const startOffset = offsetOfLine(content, startLine);
+        let endOffset = content.length;
+        if (endLine < fileLines.length) {
+            const nextLine = offsetOfLine(content, endLine + 1);
+            const delimiterLength = content[nextLine - 2] === "\r" ? 2 : 1;
+            endOffset = nextLine - delimiterLength;
+        }
+        const next = content.slice(0, startOffset) + replacement + content.slice(endOffset);
         return {
             ok: true,
             content: next,
             startLine,
-            endLine: startLine + inserted.length - 1,
+            endLine: startLine + replacement.split("\n").length - 1,
             replaced: 1,
-            matchStarts: [startLine],
+            matchOffsets: [startOffset],
+            startOffset,
+            endOffset: startOffset + replacement.length,
+            matchedLength: endOffset - startOffset,
+            replacementLength: replacement.length,
             relaxed: "ignoring trailing whitespace",
         };
     }
@@ -691,7 +735,7 @@ function multiEditImpl(input: { file_path: string; edits: MultiEditInput[] }): s
         return `Error reading file: ${e.message}`;
     }
 
-    const regions: Array<{ startLine: number; endLine: number; replaced: number }> = [];
+    const regions: Array<{ startOffset: number; endOffset: number; replaced: number }> = [];
     let added = 0;
     let removed = 0;
     let current = content;
@@ -705,24 +749,18 @@ function multiEditImpl(input: { file_path: string; edits: MultiEditInput[] }): s
             const detail = result.message.replace(/^Error: /, "");
             return `Error: edit ${i + 1} of ${input.edits.length} failed — ${detail}\n\nNothing was written: the whole batch was discarded.`;
         }
-        // Keep earlier regions in final-file coordinates. A later edit may be
-        // anchored above one of them, so its line delta shifts that region.
-        // The shift is per occurrence, not per edit: a replace_all with hits
-        // both above and below a region must move it only by the hits above
-        // it, and folding every hit into one delta skews the line numbers this
-        // result exists to pin down.
-        const oldLineCount = oldString.split("\n").length;
-        const newLineCount = newString.split("\n").length;
-        const delta = newLineCount - oldLineCount;
+        // Keep prior regions in final-file coordinates. Character offsets
+        // distinguish two edits on the same line and apply each replace_all
+        // delta only to anchors that follow that occurrence.
         for (const region of regions) {
-            let shift = 0;
-            for (const start of result.matchStarts) {
-                if (region.startLine > start + oldLineCount - 1) shift += delta;
-            }
-            region.startLine += shift;
-            region.endLine += shift;
+            region.startOffset = transformOffset(
+                region.startOffset, result.matchOffsets, result.matchedLength, result.replacementLength,
+            );
+            region.endOffset = transformOffset(
+                region.endOffset, result.matchOffsets, result.matchedLength, result.replacementLength,
+            );
         }
-        regions.push({ startLine: result.startLine, endLine: result.endLine, replaced: result.replaced });
+        regions.push({ startOffset: result.startOffset, endOffset: result.endOffset, replaced: result.replaced });
         added += newString.split("\n").length * result.replaced;
         removed += oldString.split("\n").length * result.replaced;
         current = result.content;
@@ -735,7 +773,9 @@ function multiEditImpl(input: { file_path: string; edits: MultiEditInput[] }): s
     const shown = Math.min(regions.length, 3);
     const parts: string[] = [];
     for (let i = 0; i < shown; i++) {
-        parts.push(snippetAround(lines, regions[i].startLine, regions[i].endLine));
+        const startLine = lineOfIndex(current, regions[i].startOffset);
+        const endLine = lineOfIndex(current, Math.max(regions[i].startOffset, regions[i].endOffset));
+        parts.push(snippetAround(lines, startLine, endLine));
     }
     const notes: string[] = [];
     if (regions.length > shown) notes.push(`showing ${shown} of ${regions.length} regions`);
@@ -1698,9 +1738,9 @@ register({
         required: ["description", "prompt"],
     },
     // The executor never sees this tool (the Agent intercepts it before the
-    // queue), so this flag is documentation: two delegations in one turn DO
-    // run alongside each other. They share no state — hence the warning in
-    // the prompt block below about parallel writes to the same file.
+    // queue), so this flag documents that delegations may overlap, up to the
+    // agent's sub-agent concurrency limit. They share no state — hence the
+    // warning below about parallel writes to the same file.
     isConcurrencySafe: () => true,
     isReadOnly: () => true,
     isDestructive: () => false,
@@ -1715,7 +1755,8 @@ register({
         const block = [
             "Use the agent tool to delegate a task that would otherwise flood this conversation: a broad search, a survey of several files, or an implementation you want designed before you commit to it. The sub-agent works in its own context and returns only its final summary — the tool calls it makes never enter this conversation.",
             "Its context is isolated in both directions: it cannot see this conversation, so the prompt must be self-contained (what to find, where to look, what to return).",
-            "Types: explore and plan are read-only and have no shell — use them for anything that only needs to look. general has the full tool set and can change files.",
+            "Types: explore and plan are read-only and have no shell — use them for anything that only needs to look. general has the project-task tool set and can change files, but has no user-interaction tools.",
+            "Up to three delegations run at once; additional calls wait for a slot.",
             "Do not split one task into several delegations that write the same files: parallel sub-agents share no state and will overwrite each other.",
             "Do not delegate a task you can finish in one or two tool calls; the round trip costs more than it saves.",
         ].join("\n");

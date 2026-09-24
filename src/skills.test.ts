@@ -26,6 +26,21 @@ test("project skills override user skills and parse supported frontmatter", () =
     assert.match(expandSkill(skill!, "the changes"), new RegExp(skill!.directory.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 });
 
+test("TriumCode skill directories are preferred over legacy Claude directories", () => {
+    const { home, cwd } = fixture();
+    mkdirSync(join(home, ".triumcode", "skills"), { recursive: true });
+    mkdirSync(join(cwd, ".triumcode", "skills"), { recursive: true });
+    writeFileSync(join(home, ".claude", "skills", "user.md"), "---\nname: user\ndescription: legacy user\n---\nlegacy");
+    writeFileSync(join(home, ".triumcode", "skills", "user.md"), "---\nname: user\ndescription: TriumCode user\n---\nnative");
+    writeFileSync(join(cwd, ".claude", "skills", "project.md"), "---\nname: project\ndescription: legacy project\n---\nlegacy");
+    writeFileSync(join(cwd, ".triumcode", "skills", "project.md"), "---\nname: project\ndescription: TriumCode project\n---\nnative");
+    clearSkillCache();
+
+    const skills = discoverSkills({ home, cwd });
+    assert.equal(skills.find((skill) => skill.name === "user")?.description, "TriumCode user");
+    assert.equal(skills.find((skill) => skill.name === "project")?.description, "TriumCode project");
+});
+
 test("non-user-invocable skills remain discoverable for model invocation", () => {
     const { home, cwd } = fixture();
     writeFileSync(join(cwd, ".claude", "skills", "internal.md"), "---\nname: internal\ndescription: internal\nuser-invocable: false\n---\nsecret");
