@@ -56,7 +56,7 @@ const MEMORY_INDEX_FILENAME = "MEMORY.md";
 // ── Storage layers ───────────────────────────────────────────
 
 // Project layer first; on a filename collision the project memory wins,
-// mirroring how .claude/skills overlays ~/.claude/skills.
+// mirroring how .triumcode/skills overlays ~/.triumcode/skills.
 export function getMemoryDirs(options: MemoryOptions = {}): { dir: string; source: "project" | "global" }[] {
     const cwd = resolve(options.cwd ?? process.cwd());
     const home = resolve(options.home ?? homedir());

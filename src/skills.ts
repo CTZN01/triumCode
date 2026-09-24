@@ -32,7 +32,7 @@ export function scalar(value: string | undefined): string {
 }
 
 // Shared with subagent.ts — a comma list or a JSON array, the two spellings
-// the frontmatter in .claude/ uses for allowed-tools.
+// skill and agent frontmatter use for allowed-tools.
 export function parseList(value: string | undefined): string[] {
     const text = (value ?? "").trim();
     if (!text) return [];
@@ -101,8 +101,13 @@ export function discoverSkills(options: SkillIndexOptions = {}): Skill[] {
     const key = `${cwd}\0${home}`;
     if (!options.refresh && cache.has(key)) return cache.get(key)!;
     const merged = new Map<string, Skill>();
+    // Keep reading Claude Code's directories as a migration fallback. Within
+    // each scope, TriumCode's own directory wins; project skills always win
+    // over user skills.
     for (const skill of readSkillDirectory(join(home, ".claude", "skills"), "user")) merged.set(skill.name, skill);
+    for (const skill of readSkillDirectory(join(home, ".triumcode", "skills"), "user")) merged.set(skill.name, skill);
     for (const skill of readSkillDirectory(join(cwd, ".claude", "skills"), "project")) merged.set(skill.name, skill);
+    for (const skill of readSkillDirectory(join(cwd, ".triumcode", "skills"), "project")) merged.set(skill.name, skill);
     const result = [...merged.values()].sort((a, b) => a.name.localeCompare(b.name));
     cache.set(key, result);
     return result;
@@ -116,7 +121,7 @@ export function getSkill(name: string, options: SkillIndexOptions = {}): Skill |
 
 export function expandSkill(skill: Skill, argumentsText = ""): string {
     return skill.prompt
-        .replace(/\$\{CLAUDE_SKILL_DIR\}|\$CLAUDE_SKILL_DIR/g, skill.directory)
+        .replace(/\$\{TRIUMCODE_SKILL_DIR\}|\$TRIUMCODE_SKILL_DIR|\$\{CLAUDE_SKILL_DIR\}|\$CLAUDE_SKILL_DIR/g, skill.directory)
         .replace(/\$\{ARGUMENTS\}|\$ARGUMENTS/g, argumentsText);
 }
 

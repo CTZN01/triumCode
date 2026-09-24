@@ -223,7 +223,7 @@ triumcode --api-base https://gateway.example/v1 \
 
 ## 技能
 
-技能是存放在 `.claude/skills/` 下的可复用 Markdown 提示词。
+技能是存放在 `.triumcode/skills/` 下的可复用 Markdown 提示词。
 
 ```markdown
 ---
@@ -236,12 +236,12 @@ mode: inline
 ---
 
 Review the current changes, then create a commit for $ARGUMENTS.
-The skill directory is ${CLAUDE_SKILL_DIR}.
+The skill directory is ${TRIUMCODE_SKILL_DIR}.
 ```
 
-用户技能从 `~/.claude/skills/` 加载；项目技能从 `.claude/skills/` 加载，同名时覆盖用户技能。使用 `/commit message` 调用可被用户调用的技能，或由模型通过 `skill` 工具加载。设置 `user-invocable: false` 会将技能从斜杠命令中移除，仅保留模型调用入口。
+用户技能从 `~/.triumcode/skills/` 加载；项目技能从 `.triumcode/skills/` 加载，同名时覆盖用户技能。为兼容旧配置，仍会读取 `~/.claude/skills/` 和项目 `.claude/skills/`。使用 `/commit message` 调用可被用户调用的技能，或由模型通过 `skill` 工具加载。设置 `user-invocable: false` 会将技能从斜杠命令中移除，仅保留模型调用入口。
 
-`allowed-tools` 支持逗号分隔列表或 JSON 数组。支持的模板变量为 `$ARGUMENTS`、`${ARGUMENTS}` 和 `${CLAUDE_SKILL_DIR}`。`mode: fork` 表示该提示词属于隔离子智能体执行；当前实现会将这份隔离约定交给 agent，工具执行仍位于同一进程内。
+`allowed-tools` 支持逗号分隔列表或 JSON 数组。支持的模板变量为 `$ARGUMENTS`、`${ARGUMENTS}` 和 `${TRIUMCODE_SKILL_DIR}`；现有技能仍可使用 `${CLAUDE_SKILL_DIR}`。`mode: fork` 表示该提示词属于隔离子智能体执行；当前实现会将这份隔离约定交给 agent，工具执行仍位于同一进程内。
 
 ## 记忆
 

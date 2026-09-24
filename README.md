@@ -278,7 +278,7 @@ Option 3 returns to `default` mode, so edits prompt again; the others move to
 
 ## Skills
 
-Skills are reusable Markdown prompts stored in `.claude/skills/`.
+Skills are reusable Markdown prompts stored in `.triumcode/skills/`.
 
 ```markdown
 ---
@@ -291,18 +291,21 @@ mode: inline
 ---
 
 Review the current changes, then create a commit for $ARGUMENTS.
-The skill directory is ${CLAUDE_SKILL_DIR}.
+The skill directory is ${TRIUMCODE_SKILL_DIR}.
 ```
 
-User skills are loaded from `~/.claude/skills/`; project skills are loaded from
-`.claude/skills/` and override a user skill of the same name. Invoke a
-user-invocable skill with `/commit message`, or let the model load one through
-the `skill` tool. Setting `user-invocable: false` removes a skill from the
+User skills are loaded from `~/.triumcode/skills/`; project skills are loaded
+from `.triumcode/skills/` and override a user skill of the same name. Existing
+Claude Code skill directories (`~/.claude/skills/` and project `.claude/skills/`)
+are still discovered as a migration fallback. Invoke a user-invocable skill
+with `/commit message`, or let the model load one through the `skill` tool.
+Setting `user-invocable: false` removes a skill from the
 slash-command surface and lists it as model-invocable only.
 
 `allowed-tools` accepts either a comma-separated list or a JSON array. The
 supported template variables are `$ARGUMENTS`, `${ARGUMENTS}`, and
-`${CLAUDE_SKILL_DIR}`. `mode: fork` marks the prompt as isolated sub-agent
+`${TRIUMCODE_SKILL_DIR}`. `${CLAUDE_SKILL_DIR}` remains supported for existing
+skills. `mode: fork` marks the prompt as isolated sub-agent
 work; the current runtime passes that isolation contract to the agent while
 tool execution remains in the same process.
 
