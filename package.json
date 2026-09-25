@@ -3,15 +3,19 @@
   "version": "1.0.0",
   "description": "A coding agent powered by Anthropic SDK with file tools",
   "type": "module",
-  "main": "./dist/agent.js",
+  "main": "./out/main/index.js",
   "bin": {
     "triumcode": "./dist/cli.js"
   },
   "scripts": {
     "build": "tsc",
-    "test": "tsc && node --test dist/",
+    "test": "tsc && node --test dist/ && npm run test:desktop",
+    "test:desktop": "tsc -p tsconfig.desktop-tests.json && node --test dist-desktop-tests/apps/desktop/main/git-service.test.js dist-desktop-tests/apps/desktop/main/task-status.test.js",
     "start": "node dist/cli.js",
-    "dev": "tsc && node dist/cli.js"
+    "dev": "tsc && node dist/cli.js",
+    "desktop:dev": "electron-vite dev",
+    "desktop:build": "electron-vite build",
+    "desktop:preview": "electron-vite preview"
   },
   "keywords": [
     "agent",
@@ -22,10 +26,21 @@
   "license": "MIT",
   "dependencies": {
     "@anthropic-ai/sdk": "^0.52.0",
-    "chalk": "^5.6.2"
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
+    "chalk": "^5.6.2",
+    "node-pty": "^1.1.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0"
   },
   "devDependencies": {
     "@types/node": "^22.15.3",
-    "typescript": "^5.8.3"
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^5.1.1",
+    "electron": "^39.8.10",
+    "electron-vite": "^5.0.0",
+    "typescript": "^5.8.3",
+    "vite": "^7.3.6"
   }
 }

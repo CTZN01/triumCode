@@ -1,0 +1,16 @@
+{
+    "compilerOptions": {
+        "target": "ES2022",
+        "module": "NodeNext",
+        "moduleResolution": "NodeNext",
+        "outDir": "./dist-desktop-tests",
+        "rootDir": ".",
+        "strict": true,
+        "esModuleInterop": true,
+        "skipLibCheck": true,
+        "forceConsistentCasingInFileNames": true,
+        "types": ["node"],
+        "declaration": false
+    },
+    "include": ["apps/desktop/main/git-service.ts", "apps/desktop/main/git-service.test.ts", "apps/desktop/main/task-status.ts", "apps/desktop/main/task-status.test.ts", "apps/desktop/main/workspace-store.ts", "apps/desktop/shared/contracts.ts", "src/**/*.ts"]
+}

@@ -20,6 +20,78 @@ TriumCode supports three API protocols, so it can connect to Anthropic directly 
 - Node.js 20 or later
 - An API key for Anthropic, or for a compatible gateway
 
+## Desktop preview
+
+This repository also contains a Windows-first Electron desktop alpha. It reuses
+the same Agent and tools as the CLI. The alpha includes local workspaces,
+workspace-scoped conversations, streamed replies, tool activity, approval
+cards that identify the default policy or matching user/project rule and record
+approval outcomes in activity, stop/cancel, model settings, per-run code review, Git status,
+staged/unstaged file diffs with old/new line numbers and collapsible hunks,
+selected-file stage/unstage actions, commits that contain staged content only,
+and a workspace-bound Windows PowerShell terminal. Creating a commit can run
+the repository's local Git hooks.
+The global task center aggregates recent tasks across saved workspaces, supports
+search and jumps to a session's latest activity, and can stop runs owned by the
+current desktop process. Tasks owned by another CLI or desktop process can only
+be viewed and refreshed here.
+The desktop settings page controls the concurrent-run limit (1–8, default 3).
+When the limit is reached, the draft stays in the composer and the app explains
+that a running task must finish before retrying.
+The workspace sidebar can create an isolated Git worktree from a selected
+branch or commit. If the source workspace has uncommitted changes, the user must
+confirm that those changes will not be copied. The worktree review dialog shows
+the baseline diff and dirty state, merges only a clean worktree into the
+original source branch, and directs conflict resolution to the source terminal.
+Removing a worktree is blocked while it has uncommitted changes; its branch is
+kept by default, and Git must confirm a branch is merged before it can be
+deleted. Runtime acceptance is still outstanding.
+Command approvals explain that programs can still access files outside the
+workspace or use the network; approval is not an OS-level sandbox.
+While the review panel is open, workspace file changes refresh its Git and
+per-run review state automatically.
+Review marks Git changes that existed before a task and can restore captured
+file versions after a second confirmation and a current-version check. For
+non-Git folders it reviews Agent file-tool writes; files changed directly by
+shell commands cannot be attributed there. In Git projects, visible command
+diffs are listed, but changes hidden by ignore rules or committed during a run
+cannot be fully attributed. Review snapshots stay in Electron's
+local user-data folder and retain up to 20 completed runs per workspace. Files
+over 2 MiB or snapshots over 8 MiB per run may be excluded from restore. This
+is not a complete desktop MVP: runtime and recovery acceptance, an OS-level
+process sandbox, and an installer are still outstanding.
+
+Desktop development requires Node.js 20.19 or later:
+
+```bash
+npm run desktop:dev
+npm run desktop:build
+npm run desktop:preview
+```
+
+The CLI commands above remain available. Existing CLI credentials are not
+copied automatically; the desktop settings page can import them into the
+operating system's protected credential store. API keys are not returned to
+the renderer. If no credential is ready, the desktop points to setup and keeps
+the draft without starting a request. Desktop settings and workspace recents live in Electron's local
+user-data folder; conversation files stay in the existing local TriumCode
+session store, including a bounded history of desktop tool and sub-agent
+activity that remains visible when a conversation is reopened. Session grants
+you explicitly approve are saved with that conversation and remain active
+after restart; only an exact tool call with matching parameters is allowed.
+You can revoke a grant from conversation details. Revocation blocks future
+matching calls but does not stop a process that has already started. Code review
+preimages are encrypted with the operating system's protected storage so files
+can be restored after a task ends; older snapshots are pruned after the most
+recent 20 completed runs per workspace.
+The top bar shows an estimate of context use and remaining usable window for the
+last request. Input, output, and cache token totals appear only when the
+provider actually reports those fields. Automatic context compaction is recorded
+in the activity timeline. Context figures are local estimates, not exact
+provider metering or account quota.
+Desktop conversation messages render Markdown tables and HTTPS links. The main
+process asks before opening an external link in the default browser.
+
 ## Installation
 
 ```bash
@@ -547,6 +619,14 @@ home directory is never accepted as a project root.
 - Keying on the project root rather than the working directory means the same
   session list is visible from any subdirectory of the project.
 - Sessions are never shared between projects.
+- Session files use revisions and a cross-process write lock. If another CLI or
+  desktop process changes a conversation first, a stale save is rejected and
+  the CLI requires `/resume` before continuing.
+- A cross-process workspace lease allows one Agent run or Git index write at a
+  time for a workspace. Different workspaces can run independently; separate
+  sessions in one worktree are serialized until task isolation is available.
+  Per-session leases still protect conversation history, and a run lease left
+  by a crashed process is recovered as an interrupted run by the desktop.
 - At most 50 sessions are retained per project; the oldest are pruned
   automatically.
 - Sessions in the legacy project-local `.triumcode/sessions/` directory are
@@ -662,7 +742,7 @@ block is never modified.
 npm run build        # Compile TypeScript to dist/
 npm run dev          # Build and run
 npx tsc --noEmit     # Type check without emitting
-npm test             # Build and run the test suite (node:test over dist/)
+npm test             # Build and run the CLI and desktop test suites
 ```
 
 ## Contributing

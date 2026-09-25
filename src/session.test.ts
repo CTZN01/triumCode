@@ -1,17 +1,18 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { tmpdir } from "node:os";
-import { projectRoot } from "./session.js";
+import { homedir, tmpdir } from "node:os";
+import { projectRoot, SessionBusyError, SessionStore } from "./session.js";
 
 // ── projectRoot ─────────────────────────────────────────────
 //
 // Every session path is derived from projectRoot(), so where it points decides
 // which conversations a run can see. It reads the live cwd and home on each
 // call — os.homedir() follows HOME/USERPROFILE from the environment — so both
-// can be redirected here without touching the real ones. (SESSIONS_ROOT is
-// fixed at module load and is deliberately left alone; nothing below writes.)
+// can be redirected here without touching the real ones. The lease test uses
+// unique workspace hashes and removes only its own session files.
 
 function inFakeHome(fn: (home: string) => void): void {
     const previousCwd = process.cwd();
@@ -65,4 +66,49 @@ test("home itself stays its own root, so a run started there keeps its sessions"
         process.chdir(home);
         assert.equal(projectRoot(), resolve(home));
     });
+});
+
+test("workspace leases serialize runs and Git mutations without blocking another workspace", () => {
+    const workspaceA = mkdtempSync(join(tmpdir(), "triumcode-lease-a-"));
+    const workspaceB = mkdtempSync(join(tmpdir(), "triumcode-lease-b-"));
+    const storeA = new SessionStore(workspaceA);
+    const storeB = new SessionStore(workspaceB);
+    const sessionA1 = storeA.create();
+    const sessionA2 = storeA.create();
+    const sessionB = storeB.create();
+    const hashA = createHash("sha256").update(resolve(workspaceA).toLowerCase()).digest("hex").slice(0, 12);
+    const hashB = createHash("sha256").update(resolve(workspaceB).toLowerCase()).digest("hex").slice(0, 12);
+    const sessionDirectoryA = join(homedir(), ".triumcode", "sessions", hashA);
+    const sessionDirectoryB = join(homedir(), ".triumcode", "sessions", hashB);
+    let releaseRun: (() => void) | null = null;
+    let releaseGit: (() => void) | null = null;
+
+    try {
+        releaseRun = storeA.acquireRun(sessionA1.id, sessionA1.revision);
+        assert.throws(() => storeA.acquireRun(sessionA2.id, sessionA2.revision), (error: unknown) =>
+            error instanceof SessionBusyError && error.scope === "workspace");
+        assert.throws(() => storeA.acquireWorkspaceGitMutation(), (error: unknown) =>
+            error instanceof SessionBusyError && error.scope === "workspace");
+
+        const releaseOtherWorkspace = storeB.acquireRun(sessionB.id, sessionB.revision);
+        releaseOtherWorkspace();
+
+        releaseRun();
+        releaseRun = null;
+        releaseGit = storeA.acquireWorkspaceGitMutation();
+        assert.throws(() => storeA.acquireRun(sessionA2.id, sessionA2.revision), (error: unknown) =>
+            error instanceof SessionBusyError && error.scope === "workspace");
+        releaseGit();
+        releaseGit = null;
+
+        const releaseNextRun = storeA.acquireRun(sessionA2.id, sessionA2.revision);
+        releaseNextRun();
+    } finally {
+        releaseGit?.();
+        releaseRun?.();
+        rmSync(workspaceA, { recursive: true, force: true });
+        rmSync(workspaceB, { recursive: true, force: true });
+        rmSync(sessionDirectoryA, { recursive: true, force: true });
+        rmSync(sessionDirectoryB, { recursive: true, force: true });
+    }
 });

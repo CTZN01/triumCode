@@ -1,0 +1,300 @@
+import { dialog, ipcMain, type BrowserWindow, type IpcMainInvokeEvent } from "electron";
+import type { CreateWorktreeRequest, DesktopSettings, PermissionChoice } from "../shared/contracts.js";
+import { AgentHost } from "./agent-host.js";
+import type { TerminalService } from "./terminal-service.js";
+import type { WorkspaceWatchService } from "./workspace-watch-service.js";
+import { DesktopServiceError } from "./workspace-store.js";
+
+interface IpcDependencies {
+    host: AgentHost;
+    terminals: TerminalService;
+    workspaceWatch: WorkspaceWatchService;
+    getWindow: () => BrowserWindow | null;
+}
+
+function assertTrusted(event: IpcMainInvokeEvent, getWindow: () => BrowserWindow | null): void {
+    const window = getWindow();
+    if (!window || event.sender !== window.webContents || event.senderFrame !== event.sender.mainFrame) {
+        throw new DesktopServiceError("UNTRUSTED_SENDER", "This request did not come from the TriumCode desktop window.");
+    }
+}
+
+function stringArg(value: unknown, field: string, maxLength = 1000): string {
+    if (typeof value !== "string" || value.length === 0 || value.length > maxLength) {
+        throw new DesktopServiceError("INVALID_ARGUMENT", `${field} is invalid.`);
+    }
+    return value;
+}
+
+function workspaceId(value: unknown): string {
+    const id = stringArg(value, "workspaceId", 32);
+    if (!/^[a-f0-9]{20}$/i.test(id)) throw new DesktopServiceError("INVALID_ARGUMENT", "workspaceId is invalid.");
+    return id;
+}
+
+function sessionId(value: unknown): string {
+    const id = stringArg(value, "sessionId", 8);
+    if (!/^[a-f0-9]{8}$/i.test(id)) throw new DesktopServiceError("INVALID_ARGUMENT", "sessionId is invalid.");
+    return id;
+}
+
+function requestId(value: unknown): string {
+    const id = stringArg(value, "requestId", 36);
+    if (!/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(id)) {
+        throw new DesktopServiceError("INVALID_ARGUMENT", "requestId is invalid.");
+    }
+    return id;
+}
+
+function expectedHash(value: unknown): string | null {
+    if (value === null) return null;
+    if (typeof value !== "string" || !/^[a-f0-9]{64}$/i.test(value)) {
+        throw new DesktopServiceError("INVALID_ARGUMENT", "The reviewed file version is invalid.");
+    }
+    return value;
+}
+
+function worktreeRequest(value: unknown): CreateWorktreeRequest {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+        throw new DesktopServiceError("INVALID_ARGUMENT", "隔离工作区参数无效。");
+    }
+    const input = value as Partial<CreateWorktreeRequest>;
+    const allowed = new Set(["taskName", "branchName", "baseRef", "parentPath", "confirmDirtySource"]);
+    if (Object.keys(input).some((key) => !allowed.has(key))) {
+        throw new DesktopServiceError("INVALID_ARGUMENT", "隔离工作区参数包含未知字段。");
+    }
+    if (typeof input.taskName !== "string" || input.taskName.length > 80
+        || typeof input.branchName !== "string" || input.branchName.length > 120
+        || typeof input.baseRef !== "string" || input.baseRef.length > 200
+        || typeof input.parentPath !== "string" || input.parentPath.length > 4_096
+        || typeof input.confirmDirtySource !== "boolean") {
+        throw new DesktopServiceError("INVALID_ARGUMENT", "隔离工作区参数格式无效。");
+    }
+    return {
+        taskName: input.taskName,
+        branchName: input.branchName,
+        baseRef: input.baseRef,
+        parentPath: input.parentPath,
+        confirmDirtySource: input.confirmDirtySource,
+    };
+}
+
+function terminalId(value: unknown): string {
+    const id = stringArg(value, "terminalId", 36);
+    if (!/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(id)) {
+        throw new DesktopServiceError("INVALID_ARGUMENT", "terminalId is invalid.");
+    }
+    return id;
+}
+
+function terminalSize(value: unknown, field: string, maximum: number): number {
+    if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1 || value > maximum) {
+        throw new DesktopServiceError("INVALID_ARGUMENT", `${field} is invalid.`);
+    }
+    return value;
+}
+
+function parseSettings(value: unknown): DesktopSettings {
+    if (!value || typeof value !== "object") throw new DesktopServiceError("INVALID_SETTINGS", "Settings are invalid.");
+    const input = value as Partial<DesktopSettings>;
+    if (typeof input.model !== "string" || !input.model.trim() || input.model.length > 200) {
+        throw new DesktopServiceError("INVALID_SETTINGS", "Enter a model name up to 200 characters.");
+    }
+    if (typeof input.apiBase !== "string" || input.apiBase.length > 2000) {
+        throw new DesktopServiceError("INVALID_SETTINGS", "API base URL is invalid.");
+    }
+    if (input.apiBase.trim()) {
+        let url: URL;
+        try { url = new URL(input.apiBase); }
+        catch { throw new DesktopServiceError("INVALID_SETTINGS", "API base URL must be an http or https URL."); }
+        if (url.protocol !== "http:" && url.protocol !== "https:") {
+            throw new DesktopServiceError("INVALID_SETTINGS", "API base URL must be an http or https URL.");
+        }
+    }
+    if (input.protocol !== "anthropic" && input.protocol !== "openai-chat" && input.protocol !== "openai-responses") {
+        throw new DesktopServiceError("INVALID_SETTINGS", "Select a supported API protocol.");
+    }
+    if (input.auth !== "api-key" && input.auth !== "bearer") {
+        throw new DesktopServiceError("INVALID_SETTINGS", "Select a supported authentication scheme.");
+    }
+    if (typeof input.thinking !== "boolean") throw new DesktopServiceError("INVALID_SETTINGS", "Thinking must be enabled or disabled.");
+    if (!input.effort || !["low", "medium", "high", "xhigh", "max"].includes(input.effort)) {
+        throw new DesktopServiceError("INVALID_SETTINGS", "Select a supported reasoning effort.");
+    }
+    if (typeof input.contextWindow !== "number" || !Number.isSafeInteger(input.contextWindow)
+        || input.contextWindow < 1024 || input.contextWindow > 10_000_000) {
+        throw new DesktopServiceError("INVALID_SETTINGS", "Context window must be between 1,024 and 10,000,000 tokens.");
+    }
+    if (typeof input.maxParallelRuns !== "number" || !Number.isSafeInteger(input.maxParallelRuns)
+        || input.maxParallelRuns < 1 || input.maxParallelRuns > 8) {
+        throw new DesktopServiceError("INVALID_SETTINGS", "同时运行任务数必须是 1 到 8 之间的整数。");
+    }
+    return {
+        model: input.model.trim(),
+        apiBase: input.apiBase.trim(),
+        protocol: input.protocol,
+        auth: input.auth,
+        thinking: input.thinking,
+        effort: input.effort,
+        contextWindow: input.contextWindow,
+        maxParallelRuns: input.maxParallelRuns,
+    };
+}
+
+export function registerIpcHandlers({ host, terminals, workspaceWatch, getWindow }: IpcDependencies): void {
+    const handle = (channel: string, callback: (...args: unknown[]) => unknown | Promise<unknown>): void => {
+        ipcMain.handle(channel, (event, ...args: unknown[]) => {
+            assertTrusted(event, getWindow);
+            return callback(...args);
+        });
+    };
+
+    handle("desktop:bootstrap", () => host.bootstrap());
+    handle("desktop:tasks", () => host.listTasks());
+    handle("desktop:worktree-setup", (workspace) => host.getWorktreeSetup(workspaceId(workspace)));
+    handle("desktop:worktree-association", (workspace) => host.getWorktreeAssociation(workspaceId(workspace)));
+    handle("desktop:choose-worktree-parent", async () => {
+        const window = getWindow();
+        if (!window) return null;
+        const result = await dialog.showOpenDialog(window, {
+            title: "选择隔离工作区的父目录",
+            properties: ["openDirectory"],
+        });
+        return result.canceled || result.filePaths.length === 0 ? null : result.filePaths[0];
+    });
+    handle("desktop:worktree-create", async (workspace, request) => {
+        const created = await host.createWorktree(workspaceId(workspace), worktreeRequest(request));
+        workspaceWatch.watchWorkspace(created.workspace.id);
+        return created;
+    });
+    handle("desktop:worktree-review", (workspace) => host.getWorktreeReview(workspaceId(workspace)));
+    handle("desktop:worktree-merge", (workspace) => {
+        const targetId = workspaceId(workspace);
+        const association = host.getWorktreeAssociation(targetId);
+        if (association && (terminals.hasOpenTerminals(targetId) || terminals.hasOpenTerminals(association.sourceWorkspaceId))) {
+            throw new DesktopServiceError("WORKSPACE_BUSY", "关闭源工作区和隔离工作区的终端后再合并。");
+        }
+        return host.mergeWorktree(targetId);
+    });
+    handle("desktop:worktree-remove", async (workspace, deleteBranch) => {
+        const targetId = workspaceId(workspace);
+        if (typeof deleteBranch !== "boolean") throw new DesktopServiceError("INVALID_ARGUMENT", "分支保留选择无效。");
+        const association = host.getWorktreeAssociation(targetId);
+        if (association && (terminals.hasOpenTerminals(targetId) || terminals.hasOpenTerminals(association.sourceWorkspaceId))) {
+            throw new DesktopServiceError("WORKSPACE_BUSY", "关闭源工作区和隔离工作区的终端后再移除工作树。");
+        }
+        const result = await host.removeWorktree(targetId, deleteBranch);
+        workspaceWatch.closeWorkspace(targetId);
+        return result;
+    });
+    handle("desktop:choose-workspace", async () => {
+        const window = getWindow();
+        if (!window) return null;
+        const result = await dialog.showOpenDialog(window, {
+            title: "Open a project folder",
+            properties: ["openDirectory", "createDirectory"],
+        });
+        if (result.canceled || result.filePaths.length === 0) return null;
+        const workspace = host.openWorkspace(result.filePaths[0]);
+        workspaceWatch.watchWorkspace(workspace.id);
+        return workspace;
+    });
+    handle("desktop:activate-workspace", (id) => {
+        const workspace = host.activateWorkspace(workspaceId(id));
+        workspaceWatch.watchWorkspace(workspace.id);
+        return workspace;
+    });
+    handle("desktop:remove-workspace", (id) => {
+        const targetId = workspaceId(id);
+        if (terminals.hasOpenTerminals(targetId)) {
+            throw new DesktopServiceError("WORKSPACE_BUSY", "Close this workspace's terminal before removing it from recents.");
+        }
+        host.removeWorkspace(targetId);
+        workspaceWatch.closeWorkspace(targetId);
+    });
+    handle("desktop:list-sessions", (id) => host.listSessions(workspaceId(id)));
+    handle("desktop:create-session", (id) => host.createSession(workspaceId(id)));
+    handle("desktop:open-session", (workspace, session) => host.openSession(workspaceId(workspace), sessionId(session)));
+    handle("desktop:rename-session", (workspace, session, title) =>
+        host.renameSession(workspaceId(workspace), sessionId(session), stringArg(title, "title", 120)));
+    handle("desktop:delete-session", (workspace, session) => host.deleteSession(workspaceId(workspace), sessionId(session)));
+    handle("desktop:git-snapshot", (workspace) => host.getGitSnapshot(workspaceId(workspace)));
+    handle("desktop:git-diff", (workspace, path, staged) => {
+        if (typeof staged !== "boolean") throw new DesktopServiceError("INVALID_ARGUMENT", "Diff type is invalid.");
+        return host.getGitDiff(workspaceId(workspace), stringArg(path, "path", 32_000), staged);
+    });
+    handle("desktop:git-stage-path", (workspace, path) =>
+        host.stageGitPath(workspaceId(workspace), stringArg(path, "path", 32_000)));
+    handle("desktop:git-unstage-path", (workspace, path) =>
+        host.unstageGitPath(workspaceId(workspace), stringArg(path, "path", 32_000)));
+    handle("desktop:git-commit", (workspace, message) =>
+        host.commitGitChanges(workspaceId(workspace), stringArg(message, "message", 500)));
+    handle("desktop:code-review", (workspace, session) => host.getCodeReview(workspaceId(workspace), sessionId(session)));
+    handle("desktop:review-file-check", (workspace, run, path, hash) => host.checkReviewFile(
+        workspaceId(workspace),
+        requestId(run),
+        stringArg(path, "path", 32_000),
+        expectedHash(hash),
+    ));
+    handle("desktop:review-file-restore", (workspace, run, path, hash) => host.restoreReviewFile(
+        workspaceId(workspace),
+        requestId(run),
+        stringArg(path, "path", 32_000),
+        expectedHash(hash),
+    ));
+    handle("desktop:terminal-create", (workspace, cols, rows) => {
+        const targetId = workspaceId(workspace);
+        host.assertTerminalCanOpen(targetId);
+        return terminals.create(
+            targetId,
+            terminalSize(cols, "cols", 500),
+            terminalSize(rows, "rows", 200),
+        );
+    });
+    handle("desktop:terminal-write", (id, data) => {
+        if (typeof data !== "string" || data.length > 64 * 1024) {
+            throw new DesktopServiceError("INVALID_ARGUMENT", "Terminal input is invalid.");
+        }
+        terminals.write(terminalId(id), data);
+    });
+    handle("desktop:terminal-resize", (id, cols, rows) => terminals.resize(
+        terminalId(id),
+        terminalSize(cols, "cols", 500),
+        terminalSize(rows, "rows", 200),
+    ));
+    handle("desktop:terminal-close", (id) => terminals.close(terminalId(id)));
+    handle("desktop:start-run", (workspace, session, text, request) => host.startRun(
+        workspaceId(workspace),
+        sessionId(session),
+        stringArg(text, "message", 100_000),
+        requestId(request),
+    ));
+    handle("desktop:cancel-run", (run) => host.cancelRun(stringArg(run, "runId", 36)));
+    handle("desktop:permission-response", (request, choice) => {
+        const value = stringArg(choice, "choice", 16) as PermissionChoice;
+        if (value !== "once" && value !== "session" && value !== "deny") {
+            throw new DesktopServiceError("INVALID_ARGUMENT", "Approval choice is invalid.");
+        }
+        host.respondToPermission(requestId(request), value);
+    });
+    handle("desktop:permission-grants", (workspace, session) => host.listPermissionGrants(
+        workspaceId(workspace),
+        sessionId(session),
+    ));
+    handle("desktop:permission-grant-revoke", (workspace, session, grant) => host.revokePermissionGrant(
+        workspaceId(workspace),
+        sessionId(session),
+        requestId(grant),
+    ));
+    handle("desktop:question-response", (request, answer) => {
+        if (typeof answer !== "string" || answer.length > 20_000) {
+            throw new DesktopServiceError("INVALID_ARGUMENT", "Answer is invalid.");
+        }
+        host.respondToQuestion(requestId(request), answer);
+    });
+    handle("desktop:settings-save", (settings) => host.saveSettings(parseSettings(settings)));
+    handle("desktop:credential-save", (key) => host.saveApiKey(stringArg(key, "apiKey", 10_000)));
+    handle("desktop:credential-import-cli", () => host.importCliCredential());
+    handle("desktop:credential-clear", () => host.clearApiKey());
+    handle("desktop:test-connection", () => host.testConnection());
+}

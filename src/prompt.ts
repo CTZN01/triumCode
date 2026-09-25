@@ -92,8 +92,7 @@ function loadRulesDir(cwd: string): string {
 }
 
 // Full CLAUDE.md content: walk-up files + rules directory.
-export function loadClaudeMd(): string {
-    const cwd = process.cwd();
+export function loadClaudeMd(cwd = process.cwd()): string {
     const parts = collectClaudeMdFiles(cwd);
     const rules = loadRulesDir(cwd);
 
@@ -108,7 +107,7 @@ export function loadClaudeMd(): string {
 // Git context — branch, recent commits, working tree status
 // ═══════════════════════════════════════════════════════════════
 
-export function getGitContext(): string {
+export function getGitContext(cwd = process.cwd()): string {
     try {
         // stderr is piped, not inherited. execSync forwards a failing child's
         // stderr to ours by default, and the `catch` below means "no git here,
@@ -116,6 +115,7 @@ export function getGitContext(): string {
         // as `fatal: not a git repository...` in every non-repo directory.
         const opts: ExecSyncOptionsWithStringEncoding = {
             encoding: "utf-8",
+            cwd,
             timeout: 3000,
             stdio: ["ignore", "pipe", "pipe"],
         };
@@ -259,17 +259,17 @@ Execute only after the user explicitly approves the plan.`;
 // The memory index is the one part that can change mid-session (the agent
 // saves a memory, and the index should show it on the next turn). That costs
 // one cache miss per save, which is rare and worth the freshness.
-export function buildStaticSystemPrompt(planMode = false): string {
-    const toolBlock = buildToolPromptBlock();
-    const skillBlock = buildSkillPromptBlock();
+export function buildStaticSystemPrompt(planMode = false, workspaceRoot = process.cwd()): string {
+    const toolBlock = buildToolPromptBlock(undefined, workspaceRoot);
+    const skillBlock = buildSkillPromptBlock({ cwd: workspaceRoot });
     const persona = planMode ? PERSONA + PLAN_MODE : PERSONA;
     return [
         persona,
         toolBlock,
         skillBlock,
-        buildEnvironmentContext(),
-        loadClaudeMd(),
-        buildMemoryPromptSection(),
+        buildEnvironmentContext(workspaceRoot),
+        loadClaudeMd(workspaceRoot),
+        buildMemoryPromptSection({ cwd: workspaceRoot }),
     ].filter(Boolean).join("\n\n");
 }
 
@@ -317,7 +317,7 @@ function probeWindowsToolsUncached(): string {
 // Sub-agents carry this and nothing else of the main prompt: cwd and platform
 // are what a tool call needs, and every byte of persona that came with them
 // would be re-sent on every sub-agent request.
-export function buildEnvironmentContext(): string {
+export function buildEnvironmentContext(workspaceRoot = process.cwd()): string {
     const platform = `${os.platform()} ${os.arch()}`;
     const shell = process.platform === "win32"
         ? (process.env.ComSpec || "cmd.exe")
@@ -325,7 +325,7 @@ export function buildEnvironmentContext(): string {
 
     return [
         "# Environment",
-        `Working directory: ${process.cwd()}`,
+        `Working directory: ${workspaceRoot}`,
         `Platform: ${platform}`,
         `Shell: ${shell}`,
         probeWindowsTools(),
@@ -339,11 +339,11 @@ export function buildEnvironmentContext(): string {
 // the agent writes, and a changing byte in the system prompt invalidates the
 // cache for the whole conversation behind it. Here it costs its own few dozen
 // tokens, on a message that is new anyway, and invalidates nothing.
-export function buildTurnContextReminder(): string {
+export function buildTurnContextReminder(workspaceRoot = process.cwd()): string {
     const date = new Date().toISOString().split("T")[0];
 
     const parts: string[] = [];
-    const git = getGitContext().trim();
+    const git = getGitContext(workspaceRoot).trim();
     if (git) parts.push(git);
 
     const deferred = getDeferredToolNames();

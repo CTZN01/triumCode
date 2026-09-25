@@ -1,7 +1,7 @@
-import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync, rmSync, readdirSync, statSync, openSync, readSync, closeSync, type Dirent } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync, rmSync, readdirSync, statSync, openSync, readSync, closeSync, realpathSync, type Dirent } from "node:fs";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { StringDecoder } from "node:string_decoder";
-import { dirname, join, basename, resolve } from "node:path";
+import { dirname, join, basename, resolve, relative, sep, isAbsolute } from "node:path";
 import type Anthropic from "@anthropic-ai/sdk";
 import { getSkill, resolveSkillPrompt } from "./skills.js";
 import { saveMemory, listMemories, MEMORY_TYPES, type MemoryType } from "./memory.js";
@@ -27,12 +27,49 @@ export interface TodoItem {
 // concerns appear (permissions, telemetry, abort signal …).
 export interface ToolContext {
     readFileState?: ReadFileState;
+    workspaceRoot?: string;
+    signal?: AbortSignal;
     askUser?: (question: string, options?: string[]) => Promise<string>;
     permissionPolicy?: import("./permissions.js").PermissionPolicy;
-    confirmPermission?: (message: string) => Promise<boolean>;
+    onPermissionDecision?: (
+        decision: import("./permissions.js").PermissionDecision,
+        toolCallId: string,
+        toolName: string,
+        input: Record<string, any>,
+    ) => void;
+    confirmPermission?: (request: import("./permissions.js").PermissionRequest) => Promise<import("./permissions.js").PermissionGrant>;
     enterPlanMode?: () => Promise<string>;
     exitPlanMode?: () => Promise<string>;
     todos?: TodoItem[];
+    /** Called before a desktop Agent file tool writes inside its workspace. */
+    onBeforeFileWrite?: (absolutePath: string) => void | Promise<void>;
+}
+
+function isWithin(root: string, target: string): boolean {
+    const rel = relative(root, target);
+    return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+}
+
+/** Resolve an agent-supplied path against the selected desktop workspace. */
+function resolveToolPath(path: string, context: ToolContext): string {
+    if (!context.workspaceRoot) return resolve(path);
+
+    const root = realpathSync.native(context.workspaceRoot);
+    const target = resolve(root, path);
+    let probe = target;
+    const suffix: string[] = [];
+    while (!existsSync(probe)) {
+        const parent = dirname(probe);
+        if (parent === probe) throw new Error(`Path is outside the selected workspace: ${path}`);
+        suffix.unshift(basename(probe));
+        probe = parent;
+    }
+
+    const resolved = resolve(realpathSync.native(probe), ...suffix);
+    if (!isWithin(root, resolved)) {
+        throw new Error(`Path is outside the selected workspace: ${path}`);
+    }
+    return resolved;
 }
 
 export interface Tool {
@@ -62,7 +99,7 @@ export interface Tool {
     // ── System prompt guidance ────────────────────────────────
     // Returns a fragment injected into the system prompt so the model
     // knows how to use this tool correctly. Empty string = nothing added.
-    prompt(): string;
+    prompt(workspaceRoot?: string): string;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -296,10 +333,11 @@ const readFileTool = register({
     maxResultSizeChars: 100_000,
 
     async call(input, ctx) {
-        const result = readFileImpl(input as { file_path: string; offset?: number; limit?: number });
+        const filePath = resolveToolPath(String(input.file_path ?? ""), ctx);
+        const result = readFileImpl({ ...(input as { file_path: string; offset?: number; limit?: number }), file_path: filePath });
         if (!result.ok) return result.message;
 
-        const absPath = resolve(input.file_path);
+        const absPath = filePath;
         const range: [number, number] = [result.start, result.end];
 
         if (ctx.readFileState && alreadyShown(absPath, ctx.readFileState, range, result.totalLines)) {
@@ -352,12 +390,13 @@ const writeFileTool = register({
     maxResultSizeChars: 2_000,
 
     async call(input, ctx) {
-        const absPath = resolve(input.file_path);
+        const absPath = resolveToolPath(String(input.file_path ?? ""), ctx);
         if (ctx.readFileState) {
             const blocked = staleWrite(absPath, "writing", ctx.readFileState);
             if (blocked !== null) return blocked;
         }
-        const result = writeFileImpl(input as { file_path: string; content: string });
+        await ctx.onBeforeFileWrite?.(absPath);
+        const result = writeFileImpl({ ...(input as { file_path: string; content: string }), file_path: absPath });
         if (ctx.readFileState && !result.startsWith("Error")) {
             recordRead(absPath, ctx.readFileState);
         }
@@ -695,12 +734,13 @@ const editFileTool = register({
     maxResultSizeChars: 4_000,
 
     async call(input, ctx) {
-        const absPath = resolve(input.file_path);
+        const absPath = resolveToolPath(String(input.file_path ?? ""), ctx);
         if (ctx.readFileState) {
             const blocked = staleWrite(absPath, "editing", ctx.readFileState);
             if (blocked !== null) return blocked;
         }
-        const result = editFileImpl(input as { file_path: string; old_string: string; new_string: string; replace_all?: boolean });
+        await ctx.onBeforeFileWrite?.(absPath);
+        const result = editFileImpl({ ...(input as { file_path: string; old_string: string; new_string: string; replace_all?: boolean }), file_path: absPath });
         if (ctx.readFileState && !result.startsWith("Error")) {
             recordRead(absPath, ctx.readFileState);
         }
@@ -815,12 +855,13 @@ const multiEditTool = register({
     maxResultSizeChars: 6_000,
 
     async call(input, ctx) {
-        const absPath = resolve(input.file_path);
+        const absPath = resolveToolPath(String(input.file_path ?? ""), ctx);
         if (ctx.readFileState) {
             const blocked = staleWrite(absPath, "editing", ctx.readFileState);
             if (blocked !== null) return blocked;
         }
-        const result = multiEditImpl(input as { file_path: string; edits: MultiEditInput[] });
+        await ctx.onBeforeFileWrite?.(absPath);
+        const result = multiEditImpl({ ...(input as { file_path: string; edits: MultiEditInput[] }), file_path: absPath });
         if (ctx.readFileState && !result.startsWith("Error")) {
             recordRead(absPath, ctx.readFileState);
         }
@@ -928,8 +969,9 @@ const listFilesTool = register({
     isDestructive: () => false,
     maxResultSizeChars: 30_000,
 
-    async call(input) {
-        return listFilesImpl(input as { directory_path: string; max_depth?: number });
+    async call(input, ctx) {
+        const directory = resolveToolPath(String(input.directory_path ?? ""), ctx);
+        return listFilesImpl({ ...(input as { directory_path: string; max_depth?: number }), directory_path: directory });
     },
 
     prompt: () => "",
@@ -1123,8 +1165,9 @@ const grepSearchTool = register({
     isDestructive: () => false,
     maxResultSizeChars: 30_000,
 
-    async call(input) {
-        return grepSearchImpl(input as { pattern: string; path: string });
+    async call(input, ctx) {
+        const path = resolveToolPath(String(input.path ?? ""), ctx);
+        return grepSearchImpl({ ...(input as { pattern: string; path: string }), path });
     },
 
     prompt: () => "grep_search uses JavaScript regex syntax. Anchor with ^/$ when needed. Results are capped at 100 matches — narrow the path or pattern if truncated.",
@@ -1260,7 +1303,12 @@ function spawnAndCapture(
     args: string[],
     cwd: string,
     onFinish: (result: string) => void,
+    signal?: AbortSignal,
 ): void {
+    if (signal?.aborted) {
+        onFinish("Cancelled before the program started.");
+        return;
+    }
     let child: ChildProcess;
     try {
         child = spawn(command, args, {
@@ -1284,6 +1332,7 @@ function spawnAndCapture(
     let clippedOut = false;
     let clippedErr = false;
     let timedOut = false;
+    let cancelled = false;
     let settled = false;
 
     const timer = setTimeout(() => { timedOut = true; killTree(child); }, RUN_TIMEOUT_MS);
@@ -1292,7 +1341,13 @@ function spawnAndCapture(
         if (settled) return;
         settled = true;
         clearTimeout(timer);
+        signal?.removeEventListener("abort", onAbort);
         onFinish(result);
+    };
+
+    const onAbort = (): void => {
+        cancelled = true;
+        killTree(child);
     };
 
     const capture = (chunk: Buffer, decoder: StringDecoder, stream: "out" | "err"): void => {
@@ -1308,6 +1363,8 @@ function spawnAndCapture(
 
     child.stdout?.on("data", (c: Buffer) => capture(c, outDecoder, "out"));
     child.stderr?.on("data", (c: Buffer) => capture(c, errDecoder, "err"));
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) onAbort();
 
     child.on("error", (e: any) => {
         if (e.code === "ENOENT" || (process.platform === "win32" && e.code === "EINVAL")) {
@@ -1321,7 +1378,9 @@ function spawnAndCapture(
         out = (out + outDecoder.end()).slice(0, RUN_MAX_CHARS);
         err = (err + errDecoder.end()).slice(0, RUN_MAX_CHARS);
 
-        const status = timedOut
+        const status = cancelled
+            ? "cancelled"
+            : timedOut
             ? `timed out after ${RUN_TIMEOUT_MS / 1000}s — killed`
             : signal !== null ? `killed by ${signal}` : `exit ${code}`;
 
@@ -1339,25 +1398,27 @@ function spawnAndCapture(
     });
 }
 
-function runCommandImpl(input: { command: string; args?: string[]; cwd?: string }): Promise<string> {
+function runCommandImpl(input: { command: string; args?: string[]; cwd?: string }, context: ToolContext): Promise<string> {
     const args = Array.isArray(input.args) ? input.args.map((a) => String(a)) : [];
-    const cwd = input.cwd || process.cwd();
+    const cwd = input.cwd
+        ? resolveToolPath(input.cwd, context)
+        : context.workspaceRoot ?? process.cwd();
 
     return new Promise<string>((resolve) => {
         // Wrap resolve to intercept ENOENT/EINVAL on Windows and auto-resolve
         // .cmd shims (npm, npx, yarn, tsc, …) to their underlying node command.
         const finish = (result: string): void => {
-            if (process.platform === "win32" && result.startsWith("Error: no such executable:")) {
+            if (!context.signal?.aborted && process.platform === "win32" && result.startsWith("Error: no such executable:")) {
                 const shim = resolveWindowsShim(input.command);
                 if (shim) {
-                    spawnAndCapture(shim.cmd, [shim.script, ...args], cwd, resolve);
+                    spawnAndCapture(shim.cmd, [shim.script, ...args], cwd, resolve, context.signal);
                     return;
                 }
             }
             resolve(result);
         };
 
-        spawnAndCapture(input.command, args, cwd, finish);
+        spawnAndCapture(input.command, args, cwd, finish, context.signal);
     });
 }
 
@@ -1378,8 +1439,8 @@ const runCommandTool = register({
     isDestructive: (input) => classifyCommand(input).destructive,
     maxResultSizeChars: 30_000,
 
-    async call(input) {
-        return runCommandImpl(input as { command: string; args?: string[]; cwd?: string });
+    async call(input, ctx) {
+        return runCommandImpl(input as { command: string; args?: string[]; cwd?: string }, ctx);
     },
 
     prompt: () =>
@@ -1392,14 +1453,20 @@ const runCommandTool = register({
 
 const GIT_DIFF_MAX_CHARS = 100_000;
 
-function gitDiffImpl(input: { cwd?: string; staged?: boolean; path?: string }): string {
+function gitDiffImpl(input: { cwd?: string; staged?: boolean; path?: string }, context: ToolContext): string {
+    const cwd = input.cwd
+        ? resolveToolPath(input.cwd, context)
+        : context.workspaceRoot ?? process.cwd();
     const args = ["diff"];
     if (input.staged === true) args.push("--cached");
-    if (input.path) args.push("--", input.path);
+    if (input.path) {
+        const target = resolveToolPath(input.path, context);
+        args.push("--", context.workspaceRoot ? relative(cwd, target) : input.path);
+    }
 
     try {
         const output = execFileSync("git", args, {
-            cwd: input.cwd || process.cwd(),
+            cwd,
             encoding: "utf-8",
             maxBuffer: GIT_DIFF_MAX_CHARS * 8,
             timeout: 10_000,
@@ -1413,8 +1480,8 @@ function gitDiffImpl(input: { cwd?: string; staged?: boolean; path?: string }): 
         return diff;
     } catch (e: any) {
         if (e.code === "ENOENT") {
-            return input.cwd
-                ? `Error running git diff: working directory does not exist: ${input.cwd}`
+            return input.cwd || context.workspaceRoot
+                ? `Error running git diff: working directory does not exist: ${cwd}`
                 : "Error: git executable not found.";
         }
         if (e.code === "ETIMEDOUT") return "Error: git diff timed out after 10s.";
@@ -1440,8 +1507,8 @@ const gitDiffTool = register({
     isDestructive: () => false,
     maxResultSizeChars: GIT_DIFF_MAX_CHARS,
 
-    async call(input) {
-        return gitDiffImpl(input as { cwd?: string; staged?: boolean; path?: string });
+    async call(input, ctx) {
+        return gitDiffImpl(input as { cwd?: string; staged?: boolean; path?: string }, ctx);
     },
 
     prompt: () => "Use git_diff to inspect changes before editing or reporting implementation status.",
@@ -1503,10 +1570,10 @@ register({
     isDestructive: () => false,
     maxResultSizeChars: 50_000,
 
-    async call(input) {
+    async call(input, context) {
         const name = String(input.name ?? "").trim();
         if (!name) return "Error: skill name must not be empty.";
-        const skill = getSkill(name);
+        const skill = getSkill(name, { cwd: context.workspaceRoot });
         if (!skill) return `Error: skill \"${name}\" was not found.`;
         const prompt = resolveSkillPrompt(name, String(input.arguments ?? ""));
         if (!prompt) return `Error: skill \"${name}\" could not be loaded.`;
@@ -1668,11 +1735,12 @@ register({
     isDestructive: () => false,
     maxResultSizeChars: 5_000,
 
-    async call(input) {
+    async call(input, context) {
         const operation = String(input.operation ?? "");
+        const memoryOptions = context.workspaceRoot ? { cwd: context.workspaceRoot } : undefined;
 
         if (operation === "list") {
-            const memories = listMemories();
+            const memories = listMemories(memoryOptions);
             if (memories.length === 0) return "No memories saved yet.";
             return memories
                 .map((m) => `- [${m.source}] ${m.name} (${m.type}) - ${m.description}`)
@@ -1693,7 +1761,7 @@ register({
                 description: description || name,
                 type,
                 content: content || description || name,
-            });
+            }, memoryOptions);
             return `Memory saved: ${path}`;
         }
 
@@ -1751,7 +1819,7 @@ register({
         return "Error: the agent tool is dispatched by the agent loop, not by the tool executor.";
     },
 
-    prompt: () => {
+    prompt: (workspaceRoot) => {
         const block = [
             "Use the agent tool to delegate a task that would otherwise flood this conversation: a broad search, a survey of several files, or an implementation you want designed before you commit to it. The sub-agent works in its own context and returns only its final summary — the tool calls it makes never enter this conversation.",
             "Its context is isolated in both directions: it cannot see this conversation, so the prompt must be self-contained (what to find, where to look, what to return).",
@@ -1760,7 +1828,7 @@ register({
             "Do not split one task into several delegations that write the same files: parallel sub-agents share no state and will overwrite each other.",
             "Do not delegate a task you can finish in one or two tool calls; the round trip costs more than it saves.",
         ].join("\n");
-        const custom = describeCustomAgents();
+        const custom = describeCustomAgents({ cwd: workspaceRoot });
         return custom ? `${block}\n${custom}` : block;
     },
 });
@@ -1865,9 +1933,9 @@ const toolSearchTool = register({
 //
 // `from` mirrors getToolDefinitionsFor: a sub-agent's prompt block describes
 // its own tools, not the whole registry it has no access to.
-export function buildToolPromptBlock(from?: Tool[]): string {
+export function buildToolPromptBlock(from?: Tool[], workspaceRoot?: string): string {
     const fragments = activeTools(from)
-        .map((t) => t.prompt())
+        .map((t) => t.prompt(workspaceRoot))
         .filter((p) => p.length > 0);
 
     return fragments.join("\n");

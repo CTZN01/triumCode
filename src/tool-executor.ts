@@ -56,6 +56,9 @@ export class ToolExecutor {
     constructor(context: ToolContext, allowedTools?: ReadonlySet<string>) {
         this.context = context;
         this.allowedTools = allowedTools;
+        context.signal?.addEventListener("abort", () => {
+            for (const item of this.pending.splice(0)) item.resolve("Cancelled before the tool started.");
+        }, { once: true });
     }
 
     // Enqueue a completed tool_use block for execution. Returns a promise that
@@ -67,6 +70,7 @@ export class ToolExecutor {
         name: string,
         input: Record<string, any>,
     ): Promise<string> {
+        if (this.context.signal?.aborted) return Promise.resolve("Cancelled before the tool started.");
         if (this.allowedTools && !this.allowedTools.has(name)) {
             return Promise.resolve(`Error: tool ${name} is not available to this agent.`);
         }
@@ -92,17 +96,52 @@ export class ToolExecutor {
         }
 
         const permission = this.context.permissionPolicy?.check(name, input);
+        if (permission) this.context.onPermissionDecision?.(permission, id, name, input);
         if (permission?.action === "deny") {
             return Promise.resolve(`Action denied: ${permission.message}`);
         }
-        if (permission?.action === "confirm" && permission.message) {
-            if (!this.context.confirmPermission) {
-                return Promise.resolve(`Action denied: confirmation is unavailable for ${permission.message}`);
+        if (permission?.action === "confirm") {
+            const confirmPermission = this.context.confirmPermission;
+            if (!confirmPermission) {
+                return Promise.resolve(`Action denied: confirmation is unavailable for ${permission.message ?? name}`);
             }
-            return this.context.confirmPermission(permission.message).then((confirmed) => {
-                if (!confirmed) return "User denied this action.";
-                if (permission.key) this.context.permissionPolicy?.confirm(permission.key);
-                return this.enqueueAllowed(id, name, input, tool);
+            return new Promise<string>((resolve) => {
+                let settled = false;
+                const finish = (result: string): void => {
+                    if (settled) return;
+                    settled = true;
+                    this.context.signal?.removeEventListener("abort", onAbort);
+                    resolve(result);
+                };
+                const onAbort = (): void => finish("Cancelled before the tool started.");
+                this.context.signal?.addEventListener("abort", onAbort, { once: true });
+                if (this.context.signal?.aborted) {
+                    onAbort();
+                    return;
+                }
+                confirmPermission({
+                    toolCallId: id,
+                    toolName: name,
+                    input,
+                    message: permission.message ?? name,
+                    source: permission.source,
+                    ...(permission.key ? { key: permission.key } : {}),
+                }).then((grant) => {
+                    if (settled) return;
+                    if (!grant) {
+                        finish("User denied this action.");
+                        return;
+                    }
+                    if (permission.key && grant !== "once") {
+                        this.context.permissionPolicy?.confirm(permission.key, name, input);
+                        const granted = this.context.permissionPolicy?.check(name, input);
+                        if (granted) this.context.onPermissionDecision?.(granted, id, name, input);
+                    }
+                    this.enqueueAllowed(id, name, input, tool).then(finish);
+                }).catch((error: unknown) => {
+                    const message = error instanceof Error ? error.message : String(error);
+                    finish(`Error requesting permission: ${message}`);
+                });
             });
         }
 
@@ -115,6 +154,7 @@ export class ToolExecutor {
         input: Record<string, any>,
         tool: ReturnType<typeof getTool>,
     ): Promise<string> {
+        if (this.context.signal?.aborted) return Promise.resolve("Cancelled before the tool started.");
         // Look up the tool and use its input-aware safety classification.
         const isConcurrencySafe_ = tool?.isConcurrencySafe(input) ?? false;
 
