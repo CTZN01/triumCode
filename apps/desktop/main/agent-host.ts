@@ -1,10 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import type Anthropic from "@anthropic-ai/sdk";
-import { Agent, type AgentContextUsage, type AgentEvent, type AgentUsage } from "../../../src/agent.js";
+import { Agent, type AgentContextUsage, type AgentEvent, type AgentFailureCategory, type AgentUsage } from "../../../src/agent.js";
+import { getModelPresets } from "../../../src/config.js";
 import { DesktopEventSequencer } from "../../../src/desktop-events.js";
 import { createProvider } from "../../../src/providers/index.js";
-import type { EffortLevel } from "../../../src/thinking.js";
 import {
     parsePermissionSource,
     type PermissionOutcome,
@@ -12,7 +12,7 @@ import {
     type PermissionSource,
     type SessionPermissionGrant,
 } from "../../../src/permissions.js";
-import { SessionBusyError, SessionConflictError, SessionStore, type DesktopUsageSnapshot, type SessionActivity, type SessionData, type SessionIndex } from "../../../src/session.js";
+import { SessionBusyError, SessionConflictError, SessionStore, type DesktopSessionSettings, type DesktopUsageSnapshot, type SessionActivity, type SessionData, type SessionIndex } from "../../../src/session.js";
 import type {
     BootstrapData,
     ConversationMessage,
@@ -86,6 +86,7 @@ interface SessionRuntime {
     workspaceId: string;
     workspaceRoot: string;
     sessionId: string;
+    desktopSettings: DesktopSessionSettings;
     revision: number;
     store: SessionStore;
     agent: Agent;
@@ -265,6 +266,16 @@ function limitedText(value: string, limit: number): string {
     return safe.length <= limit ? safe : `${safe.slice(0, limit)}\n[已截断]`;
 }
 
+function failureCategoryLabel(category: AgentFailureCategory): string {
+    switch (category) {
+        case "network": return "网络连接问题";
+        case "authentication": return "认证失败";
+        case "rate-limit": return "服务限流";
+        case "provider": return "模型服务或协议错误";
+        default: return "Agent 内部错误";
+    }
+}
+
 function safeSessionActivities(value: unknown): SessionActivity[] {
     if (!Array.isArray(value)) return [];
     const result: SessionActivity[] = [];
@@ -295,6 +306,11 @@ function safeSessionActivities(value: unknown): SessionActivity[] {
                 || item.permissionOutcome === "expired" || item.permissionOutcome === "cancelled"
                 ? { permissionOutcome: item.permissionOutcome } : {}),
             ...(typeof item.permissionGrantRevoked === "boolean" ? { permissionGrantRevoked: item.permissionGrantRevoked } : {}),
+            ...(item.failureCategory === "network" || item.failureCategory === "authentication" || item.failureCategory === "rate-limit"
+                || item.failureCategory === "provider" || item.failureCategory === "internal"
+                ? { failureCategory: item.failureCategory } : {}),
+            ...(typeof item.retryable === "boolean" ? { retryable: item.retryable } : {}),
+            ...(typeof item.safeToRetry === "boolean" ? { safeToRetry: item.safeToRetry } : {}),
         });
     }
     return result;
@@ -318,7 +334,9 @@ function activityFromEvent(
         title: string,
         detail: string,
         state: SessionActivity["state"],
-        extra: Pick<SessionActivity, "output" | "durationMs" | "permissionSource" | "permissionDecision" | "permissionOutcome"> = {},
+        extra: Pick<SessionActivity,
+            "output" | "durationMs" | "permissionSource" | "permissionDecision" | "permissionOutcome"
+            | "failureCategory" | "retryable" | "safeToRetry"> = {},
     ): SessionActivity => ({
         id,
         ...(runId ? { runId } : {}),
@@ -330,6 +348,9 @@ function activityFromEvent(
             ...(extra.permissionSource === undefined ? {} : { permissionSource: extra.permissionSource }),
             ...(extra.permissionDecision === undefined ? {} : { permissionDecision: extra.permissionDecision }),
             ...(extra.permissionOutcome === undefined ? {} : { permissionOutcome: extra.permissionOutcome }),
+            ...(extra.failureCategory === undefined ? {} : { failureCategory: extra.failureCategory }),
+            ...(extra.retryable === undefined ? {} : { retryable: extra.retryable }),
+            ...(extra.safeToRetry === undefined ? {} : { safeToRetry: extra.safeToRetry }),
             startedAt: activities.find((item) => item.id === id)?.startedAt ?? now,
             updatedAt: now,
     });
@@ -338,14 +359,14 @@ function activityFromEvent(
         return upsert(makeActivity(event.id, event.name, JSON.stringify(event.input, null, 2) ?? "{}", "running"));
     }
     if (event.type === "tool.completed") {
-        const denied = /user denied|action denied|blocked in plan mode/i.test(event.output);
-        const cancelled = /cancel(?:led|ed)/i.test(event.output);
-        const failed = !denied && !cancelled && /^(?:Error|error executing|error running)\b/i.test(event.output);
+        const state: SessionActivity["state"] = event.outcome === "denied" ? "denied"
+            : event.outcome === "cancelled" ? "interrupted"
+                : event.outcome === "failed" ? "failed" : "complete";
         return upsert(makeActivity(
             event.id,
             event.name,
             JSON.stringify(event.input, null, 2) ?? "{}",
-            denied ? "denied" : cancelled ? "interrupted" : failed ? "failed" : "complete",
+            state,
             { output: event.output, durationMs: event.durationMs },
         ));
     }
@@ -384,7 +405,11 @@ function activityFromEvent(
         return upsert(makeActivity(`sub-${event.id}`, `${event.name} 子代理`, event.error, "failed"));
     }
     if (event.type === "turn.failed") {
-        return upsert(makeActivity(randomUUID(), "任务失败", event.message, "failed"));
+        return upsert(makeActivity(randomUUID(), `任务失败 - ${failureCategoryLabel(event.category)}`, event.message, "failed", {
+            failureCategory: event.category,
+            retryable: event.retryable,
+            safeToRetry: event.safeToRetry,
+        }));
     }
     if (event.type === "turn.cancelled") {
         return upsert(makeActivity(randomUUID(), "任务已停止", "任务已停止，已完成的文件改动仍保留在工作区。", "notice"));
@@ -440,6 +465,43 @@ function errorMessage(error: unknown): string {
     return error instanceof Error ? redact(error.message) : redact(String(error));
 }
 
+function desktopSettingsSnapshot(settings: DesktopSettings): DesktopSessionSettings {
+    return {
+        modelPreset: settings.modelPreset,
+        model: settings.model,
+        apiBase: settings.apiBase,
+        protocol: settings.protocol,
+        auth: settings.auth,
+        thinking: settings.thinking,
+        effort: settings.effort,
+        contextWindow: settings.contextWindow,
+    };
+}
+
+function safeDesktopSettingsSnapshot(value: unknown): DesktopSessionSettings | null {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+    const item = value as Record<string, unknown>;
+    if ((item.modelPreset !== null && typeof item.modelPreset !== "string")
+        || typeof item.model !== "string"
+        || typeof item.apiBase !== "string"
+        || (item.protocol !== "anthropic" && item.protocol !== "openai-chat" && item.protocol !== "openai-responses")
+        || (item.auth !== "api-key" && item.auth !== "bearer")
+        || typeof item.thinking !== "boolean"
+        || typeof item.effort !== "string"
+        || typeof item.contextWindow !== "number" || !Number.isSafeInteger(item.contextWindow)
+        || item.contextWindow < 1_024 || item.contextWindow > 10_000_000) return null;
+    return {
+        modelPreset: item.modelPreset,
+        model: item.model,
+        apiBase: item.apiBase,
+        protocol: item.protocol,
+        auth: item.auth,
+        thinking: item.thinking,
+        effort: item.effort,
+        contextWindow: item.contextWindow,
+    };
+}
+
 export class AgentHost {
     private readonly workspaces: WorkspaceStore;
     private readonly settings: SettingsStore;
@@ -475,11 +537,26 @@ export class AgentHost {
     }
 
     bootstrap(): BootstrapData {
+        const presets = getModelPresets();
+        const settings = this.currentSettings();
         return {
             workspaces: this.workspaces.list(),
             activeWorkspaceId: this.workspaces.activeId(),
-            settings: this.settings.get(),
-            credentialState: this.credentials.state(),
+            settings: {
+                ...settings,
+                modelPreset: settings.modelPreset && Object.hasOwn(presets, settings.modelPreset)
+                    ? settings.modelPreset : null,
+            },
+            modelPresets: Object.entries(presets).map(([name, preset]) => ({
+                name,
+                model: preset.model,
+                ...(preset.apiBase === undefined ? {} : { apiBase: preset.apiBase }),
+                ...(preset.protocol === undefined ? {} : { protocol: preset.protocol }),
+                ...(preset.auth === undefined ? {} : { auth: preset.auth }),
+                ...(preset.contextWindow === undefined ? {} : { contextWindow: preset.contextWindow }),
+                hasApiKey: Boolean(preset.apiKey),
+            })),
+            credentialState: this.credentialState(settings.modelPreset),
         };
     }
 
@@ -496,7 +573,12 @@ export class AgentHost {
         if (this.gitMutations.has(workspaceId)) {
             throw new DesktopServiceError("WORKSPACE_BUSY", "Wait for the current Git operation before removing this workspace from recents.");
         }
-        this.assertWorkspaceRunsStopped(workspaceId);
+        const workspace = this.workspaces.listForTasks().find((item) => item.id === workspaceId);
+        const localRun = [...this.sessions.values()].some((runtime) => runtime.workspaceId === workspaceId && runtime.currentRunId !== null);
+        if (localRun) {
+            throw new DesktopServiceError("WORKSPACE_BUSY", "Stop the running task before removing this workspace from recents.");
+        }
+        if (workspace?.available) this.assertWorkspaceRunsStopped(workspaceId);
         this.removeWorkspaceRecord(workspaceId);
     }
 
@@ -522,19 +604,70 @@ export class AgentHost {
         return this.withWorkspaceGitMutation(workspaceId, async () => {
             const sourcePath = this.workspaces.getPath(workspaceId);
             const result = await createGitWorktree(sourcePath, input);
-            const workspace = this.workspaces.open(result.path);
-            this.worktreeStore.add({
-                workspaceId: workspace.id,
-                workspacePath: workspace.path,
-                taskName: result.taskName,
-                branchName: result.branchName,
-                sourceWorkspaceId: workspaceId,
-                sourcePath,
-                sourceBranch: result.sourceBranch,
-                baseCommit: result.baseCommit,
-                createdAt: new Date().toISOString(),
-            });
-            return { workspace, branchName: result.branchName, baseCommit: result.baseCommit, sourceDirty: result.sourceDirty };
+            let workspace: WorkspaceSummary | null = null;
+            try {
+                workspace = this.workspaces.open(result.path);
+                this.worktreeStore.add({
+                    workspaceId: workspace.id,
+                    workspacePath: workspace.path,
+                    taskName: result.taskName,
+                    branchName: result.branchName,
+                    sourceWorkspaceId: workspaceId,
+                    sourcePath,
+                    sourceBranch: result.sourceBranch,
+                    baseCommit: result.baseCommit,
+                    createdAt: new Date().toISOString(),
+                });
+                return { workspace, branchName: result.branchName, baseCommit: result.baseCommit, sourceDirty: result.sourceDirty };
+            } catch (failure) {
+                const cleanupAssociation: WorktreeAssociation = {
+                    workspaceId: workspace?.id ?? workspaceId,
+                    workspacePath: workspace?.path ?? result.path,
+                    taskName: result.taskName,
+                    branchName: result.branchName,
+                    sourceWorkspaceId: workspaceId,
+                    sourcePath,
+                    sourceBranch: result.sourceBranch,
+                    baseCommit: result.baseCommit,
+                    createdAt: new Date().toISOString(),
+                };
+                let cleanup: Awaited<ReturnType<typeof removeGitWorktree>>;
+                try {
+                    cleanup = await removeGitWorktree(sourcePath, result.path, cleanupAssociation, true);
+                } catch (cleanupFailure) {
+                    const registrationMessage = failure instanceof Error ? failure.message : String(failure);
+                    const cleanupMessage = cleanupFailure instanceof Error ? cleanupFailure.message : String(cleanupFailure);
+                    throw new DesktopServiceError(
+                        "WORKTREE_REGISTRATION_FAILED",
+                        `工作树已创建，但桌面登记失败且自动清理未完成。工作区仍位于 ${result.path}，分支 ${result.branchName} 可能仍存在。登记错误：${registrationMessage}；清理错误：${cleanupMessage}`,
+                    );
+                }
+                if (workspace) {
+                    try { this.workspaces.remove(workspace.id); }
+                    catch (cleanupFailure) {
+                        const cleanupMessage = cleanupFailure instanceof Error ? cleanupFailure.message : String(cleanupFailure);
+                        throw new DesktopServiceError(
+                            "WORKTREE_REGISTRATION_RECOVERED_WITH_STALE_WORKSPACE",
+                            `工作树和分支已清理，但最近项目记录未能移除。重新启动后可从不可访问项目中移除此记录。错误：${cleanupMessage}`,
+                        );
+                    }
+                    try { this.workspaces.activate(workspaceId); }
+                    catch (cleanupFailure) {
+                        const cleanupMessage = cleanupFailure instanceof Error ? cleanupFailure.message : String(cleanupFailure);
+                        throw new DesktopServiceError(
+                            "WORKTREE_SOURCE_RESTORE_FAILED",
+                            `工作树和分支已清理，但未能恢复源工作区为活动项目。请重新选择源工作区。错误：${cleanupMessage}`,
+                        );
+                    }
+                }
+                if (!cleanup.branchDeleted) {
+                    throw new DesktopServiceError(
+                        "WORKTREE_REGISTRATION_RECOVERED_WITH_BRANCH",
+                        `自动清理已移除工作树，但 Git 保留了分支 ${result.branchName}。登记错误：${failure instanceof Error ? failure.message : String(failure)}`,
+                    );
+                }
+                throw failure;
+            }
         });
     }
 
@@ -642,7 +775,8 @@ export class AgentHost {
                     id: `${workspace.id}:${session.id}`,
                     workspace,
                     session,
-                    status: desktopTaskStatus(session.status, hasPendingApproval, hasPendingQuestion),
+                    status: desktopTaskStatus(session.status, hasPendingApproval, hasPendingQuestion,
+                        isRunning ? storedSession.desktopWaitingFor : undefined),
                     runId: runtime?.currentRunId ?? null,
                     latestActivityId: latest?.id ?? null,
                     latestActivityTitle: latest?.title ?? null,
@@ -666,7 +800,8 @@ export class AgentHost {
 
     createSession(workspaceId: string): OpenSessionData {
         const store = this.storeFor(workspaceId);
-        const item = store.create(this.settings.get().model);
+        const settings = this.currentSettings();
+        const item = store.create(settings.model, desktopSettingsSnapshot(settings));
         return {
             session: toSummary({ ...item, messageCount: 0 }),
             messages: [],
@@ -775,14 +910,28 @@ export class AgentHost {
     }
 
     async startRun(workspaceId: string, sessionId: string, text: string, requestId: string): Promise<{ runId: string }> {
+        const prompt = text.trim();
+        if (!prompt) throw new DesktopServiceError("EMPTY_MESSAGE", "Write a message before sending it.");
+        if (prompt.length > 100_000) throw new DesktopServiceError("MESSAGE_TOO_LARGE", "Messages must be shorter than 100,000 characters.");
+        return this.startSessionRun(workspaceId, sessionId, requestId, prompt, false);
+    }
+
+    async retryRun(workspaceId: string, sessionId: string, requestId: string): Promise<{ runId: string }> {
+        return this.startSessionRun(workspaceId, sessionId, requestId, "", true);
+    }
+
+    private async startSessionRun(
+        workspaceId: string,
+        sessionId: string,
+        requestId: string,
+        submittedPrompt: string,
+        retryFailedRequest: boolean,
+    ): Promise<{ runId: string }> {
         const priorRunId = this.requestRuns.get(requestId);
         if (priorRunId) return { runId: priorRunId };
         if (this.gitMutations.has(workspaceId)) {
             throw new DesktopServiceError("WORKSPACE_BUSY", "Wait for the Git operation to finish before starting a task in this workspace.");
         }
-        const prompt = text.trim();
-        if (!prompt) throw new DesktopServiceError("EMPTY_MESSAGE", "Write a message before sending it.");
-        if (prompt.length > 100_000) throw new DesktopServiceError("MESSAGE_TOO_LARGE", "Messages must be shorter than 100,000 characters.");
         const store = this.storeFor(workspaceId);
         const item = store.load(sessionId);
         if (!item) throw new DesktopServiceError("SESSION_NOT_FOUND", "This conversation could not be found.");
@@ -791,6 +940,16 @@ export class AgentHost {
             throw new DesktopServiceError("SESSION_CONFLICT", "会话已被其他进程修改。请重新打开此会话后再开始任务。");
         }
         if (runtime.currentRunId) throw new DesktopServiceError("SESSION_BUSY", "此会话已有正在运行的任务。");
+        let prompt = submittedPrompt;
+        if (retryFailedRequest) {
+            const failedTurn = [...runtime.activities].reverse().find((activity) => activity.failureCategory !== undefined);
+            if (item.status !== "failed" || !failedTurn?.retryable || !failedTurn.safeToRetry) {
+                throw new DesktopServiceError("RUN_NOT_SAFELY_RETRYABLE", "最近一次失败可能已经执行过工具操作。请检查工作区改动，再恢复请求作为新消息继续。");
+            }
+            prompt = projectMessages(item.messages).reverse().find((message) => message.role === "user")?.text.trim() ?? "";
+            if (!prompt) throw new DesktopServiceError("RUN_RETRY_PROMPT_MISSING", "无法恢复最近失败请求的文本。请从会话内容中恢复请求后继续。");
+            if (prompt.length > 100_000) throw new DesktopServiceError("MESSAGE_TOO_LARGE", "Messages must be shorter than 100,000 characters.");
+        }
         const activeRuns = [...this.sessions.values()].filter((session) => session.currentRunId !== null).length;
         const maxParallelRuns = this.settings.get().maxParallelRuns;
         if (activeRuns >= maxParallelRuns) {
@@ -833,13 +992,15 @@ export class AgentHost {
             catch { /* A missing review snapshot does not prevent stopping the run. */ }
             runtime.reviewCaptureEnabled = false;
             runtime.currentRunId = null;
+            this.refreshRuntimeApiKey(runtime);
             runtime.releaseRunLease?.();
             runtime.releaseRunLease = null;
             this.publish(runtime, { type: "session.status", status: "cancelled" }, runId);
             return { runId };
         }
 
-        const task = runtime.agent.chat(prompt);
+        runtime.activities = runtime.activities.map((activity) => activity.safeToRetry ? { ...activity, safeToRetry: false } : activity);
+        const task = retryFailedRequest ? runtime.agent.retryFailedTurn(prompt) : runtime.agent.chat(prompt);
         let finalStatus: NonNullable<SessionData["status"]> = "idle";
         runtime.runPromise = task.then(() => {
             finalStatus = runtime.sessionRevisionConflict ? "failed" : runtime.cancelRequested ? "cancelled" : "idle";
@@ -853,6 +1014,7 @@ export class AgentHost {
             catch (error) { this.publish(runtime, { type: "notice", level: "warning", text: `无法更新代码审阅快照：${errorMessage(error)}` }); }
             runtime.reviewCaptureEnabled = false;
             runtime.currentRunId = null;
+            this.refreshRuntimeApiKey(runtime);
             runtime.runPromise = null;
             runtime.releaseRunLease?.();
             runtime.releaseRunLease = null;
@@ -910,34 +1072,92 @@ export class AgentHost {
         clearTimeout(pending.timer);
         this.questions.delete(requestId);
         const runtime = this.sessions.get(sessionKey(pending.workspaceId, pending.sessionId));
-        if (runtime) this.publish(runtime, {
-            type: "question.resolved",
-            requestId,
-            outcome: answer.trim() ? "answered" : "skipped",
-        });
+        if (runtime) {
+            this.persistSession(runtime);
+            this.publish(runtime, {
+                type: "question.resolved",
+                requestId,
+                outcome: answer.trim() ? "answered" : "skipped",
+            });
+        }
         pending.resolve(answer.trim() ? answer : "The user skipped this question. Do not treat this as a response.");
     }
 
     saveSettings(settings: DesktopSettings): DesktopSettings {
-        const saved = this.settings.save(settings);
+        const presets = getModelPresets();
+        const preset = settings.modelPreset && Object.hasOwn(presets, settings.modelPreset)
+            ? presets[settings.modelPreset] : undefined;
+        if (settings.modelPreset && !preset) {
+            throw new DesktopServiceError("MODEL_PRESET_NOT_FOUND", "这个命名模型预设已从 CLI 配置中移除。刷新设置后重新选择。");
+        }
+        const effectiveSettings = preset ? {
+            ...settings,
+            model: preset.model,
+            apiBase: preset.apiBase ?? settings.apiBase,
+            protocol: preset.protocol ?? settings.protocol,
+            auth: preset.auth ?? settings.auth,
+            contextWindow: preset.contextWindow ?? settings.contextWindow,
+        } : settings;
+        const storedPresetKey = Boolean(preset?.apiKey);
+        const previousPresetKey = storedPresetKey
+            ? this.credentials.getStoredApiKey(effectiveSettings.modelPreset)
+            : "";
+        if (preset?.apiKey) this.credentials.save(preset.apiKey, effectiveSettings.modelPreset);
+        let saved: DesktopSettings;
+        try {
+            saved = this.settings.save(effectiveSettings);
+        } catch (error) {
+            if (storedPresetKey) {
+                try {
+                    if (previousPresetKey) this.credentials.save(previousPresetKey, effectiveSettings.modelPreset);
+                    else this.credentials.clearStoredApiKey(effectiveSettings.modelPreset);
+                } catch (restoreError) {
+                    throw new DesktopServiceError(
+                        "SETTINGS_SAVE_RECOVERY_FAILED",
+                        `设置保存失败，且未能恢复该模型预设的原 API Key。请检查系统凭据存储后再继续。设置错误：${errorMessage(error)}；恢复错误：${errorMessage(restoreError)}`,
+                    );
+                }
+            }
+            throw error;
+        }
+        const apiKey = this.apiKeyForSettings(saved);
         for (const runtime of this.sessions.values()) {
-            if (runtime.currentRunId) continue;
-            runtime.agent.setModel({
-                model: saved.model,
-                apiBase: saved.apiBase,
-                apiKey: this.credentials.getApiKey(),
-                protocol: saved.protocol,
-                auth: saved.auth,
-                contextWindow: saved.contextWindow,
-            });
-            runtime.agent.setEffort(saved.effort as EffortLevel);
-            runtime.agent.setThinking(saved.thinking);
+            if (!runtime.currentRunId && runtime.desktopSettings.modelPreset === saved.modelPreset) {
+                runtime.agent.setModel({ apiKey });
+            }
         }
         return saved;
     }
 
-    credentialState(): BootstrapData["credentialState"] {
-        return this.credentials.state();
+    credentialState(presetName?: string | null): BootstrapData["credentialState"] {
+        const preset = presetName ? getModelPresets()[presetName] : undefined;
+        return this.credentials.state(presetName, Boolean(preset?.apiKey));
+    }
+
+    private currentSettings(): DesktopSettings {
+        const settings = this.settings.get();
+        return settings.modelPreset && !Object.hasOwn(getModelPresets(), settings.modelPreset)
+            ? { ...settings, modelPreset: null }
+            : settings;
+    }
+
+    private assertCredentialPreset(presetName: string | null): void {
+        if (presetName && !Object.hasOwn(getModelPresets(), presetName)) {
+            throw new DesktopServiceError("MODEL_PRESET_NOT_FOUND", "这个命名模型预设已从 CLI 配置中移除。刷新设置后重新选择。");
+        }
+    }
+
+    private apiKeyForSettings(settings: Pick<DesktopSessionSettings, "modelPreset">): string {
+        const presets = getModelPresets();
+        const preset = settings.modelPreset && Object.hasOwn(presets, settings.modelPreset)
+            ? presets[settings.modelPreset] : undefined;
+        return this.credentials.getStoredApiKey(settings.modelPreset)
+            || preset?.apiKey
+            || this.credentials.getApiKey(settings.modelPreset);
+    }
+
+    private refreshRuntimeApiKey(runtime: SessionRuntime): void {
+        runtime.agent.setModel({ apiKey: this.apiKeyForSettings(runtime.desktopSettings) });
     }
 
     private pendingPermissionsFor(workspaceId: string, sessionId: string): PendingPermissionRequest[] {
@@ -1004,35 +1224,45 @@ export class AgentHost {
             .map(({ requestId, question, options }) => ({ requestId, question, ...(options ? { options } : {}) }));
     }
 
-    saveApiKey(apiKey: string): BootstrapData["credentialState"] {
-        this.credentials.save(apiKey);
+    saveApiKey(apiKey: string, presetName: string | null): BootstrapData["credentialState"] {
+        this.assertCredentialPreset(presetName);
+        this.credentials.save(apiKey, presetName);
         for (const runtime of this.sessions.values()) {
-            if (!runtime.currentRunId) runtime.agent.setModel({ apiKey });
+            if (!runtime.currentRunId && runtime.desktopSettings.modelPreset === presetName) {
+                runtime.agent.setModel({ apiKey });
+            }
         }
-        return this.credentials.state();
+        return this.credentialState(presetName);
     }
 
-    importCliCredential(): BootstrapData["credentialState"] {
-        this.credentials.importCliCredential();
-        const apiKey = this.credentials.getApiKey();
+    importCliCredential(presetName: string | null): BootstrapData["credentialState"] {
+        this.assertCredentialPreset(presetName);
+        const preset = presetName ? getModelPresets()[presetName] : undefined;
+        this.credentials.importCliCredential(presetName, preset?.apiKey);
+        const apiKey = this.apiKeyForSettings({ ...this.settings.get(), modelPreset: presetName });
         for (const runtime of this.sessions.values()) {
-            if (!runtime.currentRunId) runtime.agent.setModel({ apiKey });
+            if (!runtime.currentRunId && runtime.desktopSettings.modelPreset === presetName) {
+                runtime.agent.setModel({ apiKey });
+            }
         }
-        return this.credentials.state();
+        return this.credentialState(presetName);
     }
 
-    clearApiKey(): BootstrapData["credentialState"] {
-        this.credentials.clear();
-        const apiKey = this.credentials.getApiKey();
+    clearApiKey(presetName: string | null): BootstrapData["credentialState"] {
+        this.assertCredentialPreset(presetName);
+        this.credentials.clear(presetName);
+        const apiKey = this.apiKeyForSettings({ ...this.settings.get(), modelPreset: presetName });
         for (const runtime of this.sessions.values()) {
-            if (!runtime.currentRunId) runtime.agent.setModel({ apiKey });
+            if (!runtime.currentRunId && runtime.desktopSettings.modelPreset === presetName) {
+                runtime.agent.setModel({ apiKey });
+            }
         }
-        return this.credentials.state();
+        return this.credentialState(presetName);
     }
 
     async testConnection(): Promise<{ ok: boolean; message: string }> {
-        const settings = this.settings.get();
-        const apiKey = this.credentials.getApiKey();
+        const settings = this.currentSettings();
+        const apiKey = this.apiKeyForSettings(settings);
         if (!apiKey) return { ok: false, message: "No API key is configured." };
         const provider = createProvider(settings.protocol, { apiBase: settings.apiBase, apiKey, auth: settings.auth });
         const controller = new AbortController();
@@ -1089,17 +1319,23 @@ export class AgentHost {
         const existing = this.sessions.get(key);
         if (existing) return existing;
         const workspaceRoot = this.workspaces.getPath(workspaceId);
-        const settings = this.settings.get();
+        const currentSettings = this.currentSettings();
+        const restoredDesktopSettings = safeDesktopSettingsSnapshot(data.desktopSettings);
+        const desktopSettings = restoredDesktopSettings ?? {
+            ...desktopSettingsSnapshot(currentSettings),
+            model: data.model || currentSettings.model,
+        };
         let runtime!: SessionRuntime;
         const agent = new Agent({
-            model: settings.model,
-            apiBase: settings.apiBase,
-            apiKey: this.credentials.getApiKey(),
-            protocol: settings.protocol,
-            auth: settings.auth,
-            thinking: settings.thinking,
-            effort: settings.effort,
-            contextWindow: settings.contextWindow,
+            model: desktopSettings.model,
+            modelLabel: desktopSettings.modelPreset ?? "",
+            apiBase: desktopSettings.apiBase,
+            apiKey: this.apiKeyForSettings(desktopSettings),
+            protocol: desktopSettings.protocol,
+            auth: desktopSettings.auth,
+            thinking: desktopSettings.thinking,
+            effort: desktopSettings.effort,
+            contextWindow: desktopSettings.contextWindow,
             workspaceRoot,
             permissionMode: "desktopDefault",
             sessionPermissionGrants: safeSessionPermissionGrants(data.desktopPermissionGrants),
@@ -1108,8 +1344,7 @@ export class AgentHost {
                 this.persistSession(runtime, messages, runtime.currentRunId ? "running" : "idle");
             },
             onEvent: (event) => {
-                if (event.type === "tool.completed" && event.name === "run_command"
-                    && !/user denied|action denied|blocked in plan mode/i.test(event.output)
+                if (event.type === "tool.completed" && event.name === "run_command" && event.executionStarted
                     && runtime.currentRunId && runtime.reviewCaptureEnabled) {
                     try { this.reviews.noteCommandRun(workspaceId, sessionId, runtime.currentRunId); }
                     catch (error) {
@@ -1148,6 +1383,7 @@ export class AgentHost {
             workspaceId,
             workspaceRoot,
             sessionId,
+            desktopSettings,
             revision: data.revision ?? 0,
             store,
             agent,
@@ -1166,6 +1402,7 @@ export class AgentHost {
         });
         agent.setAskUserCallback((question, options) => this.askUser(runtime, question, options));
         this.sessions.set(key, runtime);
+        if (!restoredDesktopSettings) this.persistSession(runtime);
         return runtime;
     }
 
@@ -1191,6 +1428,11 @@ export class AgentHost {
                 runtime.activities,
                 usageSnapshot(runtime.agent.getUsage(), runtime.agent.getContextUsage()),
                 safeSessionPermissionGrants(runtime.agent.getPersistedSessionPermissionGrants()),
+                runtime.desktopSettings,
+                [...this.permissions.values()].some((pending) => pending.workspaceId === runtime.workspaceId && pending.sessionId === runtime.sessionId)
+                    ? "approval"
+                    : [...this.questions.values()].some((pending) => pending.workspaceId === runtime.workspaceId && pending.sessionId === runtime.sessionId)
+                        ? "user" : undefined,
             );
             if (!saved) throw new Error("The session no longer exists.");
             runtime.revision = saved.revision ?? runtime.revision + 1;
@@ -1256,6 +1498,7 @@ export class AgentHost {
                 timer,
             };
             this.permissions.set(requestId, pending);
+            this.persistSession(runtime);
             this.publish(runtime, {
                 type: "permission.requested",
                 requestId,
@@ -1317,6 +1560,7 @@ export class AgentHost {
             const timer = setTimeout(() => {
                 if (!this.questions.has(requestId)) return;
                 this.questions.delete(requestId);
+                this.persistSession(runtime);
                 this.publish(runtime, { type: "question.resolved", requestId, outcome: "expired" });
                 resolve("The user did not answer before this question expired. Do not treat this as a response.");
             }, 300_000);
@@ -1329,6 +1573,7 @@ export class AgentHost {
                 resolve,
                 timer,
             });
+            this.persistSession(runtime);
         });
     }
 
@@ -1353,6 +1598,7 @@ export class AgentHost {
             if (pending.workspaceId !== runtime.workspaceId || pending.sessionId !== runtime.sessionId) continue;
             clearTimeout(pending.timer);
             this.questions.delete(id);
+            this.persistSession(runtime);
             this.publish(runtime, { type: "question.resolved", requestId: id, outcome: "cancelled" });
             pending.resolve("The task was stopped before the user answered this question.");
         }

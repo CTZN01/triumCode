@@ -13,9 +13,11 @@
     "test:desktop": "tsc -p tsconfig.desktop-tests.json && node --test dist-desktop-tests/apps/desktop/main/git-service.test.js dist-desktop-tests/apps/desktop/main/task-status.test.js",
     "start": "node dist/cli.js",
     "dev": "tsc && node dist/cli.js",
-    "desktop:dev": "electron-vite dev",
-    "desktop:build": "electron-vite build",
-    "desktop:preview": "electron-vite preview"
+    "desktop:setup": "install-electron",
+    "desktop:dev": "npm run desktop:setup && electron-vite dev",
+    "desktop:build": "npm run desktop:setup && electron-vite build",
+    "desktop:preview": "npm run desktop:setup && electron-vite preview",
+    "desktop:package": "npm run desktop:build && node scripts/package-desktop.mjs"
   },
   "keywords": [
     "agent",
@@ -38,7 +40,7 @@
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^5.1.1",
-    "electron": "^39.8.10",
+    "electron": "^44.4.5",
     "electron-vite": "^5.0.0",
     "typescript": "^5.8.3",
     "vite": "^7.3.6"

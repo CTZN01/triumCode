@@ -36,6 +36,7 @@ const api: DesktopApi = {
     resizeTerminal: (terminalId, cols, rows) => ipcRenderer.invoke("desktop:terminal-resize", terminalId, cols, rows),
     closeTerminal: (terminalId) => ipcRenderer.invoke("desktop:terminal-close", terminalId),
     startRun: (workspaceId, sessionId, text, requestId) => ipcRenderer.invoke("desktop:start-run", workspaceId, sessionId, text, requestId),
+    retryRun: (workspaceId, sessionId, requestId) => ipcRenderer.invoke("desktop:retry-run", workspaceId, sessionId, requestId),
     cancelRun: (runId) => ipcRenderer.invoke("desktop:cancel-run", runId),
     respondToPermission: (requestId, choice) => ipcRenderer.invoke("desktop:permission-response", requestId, choice),
     listPermissionGrants: (workspaceId, sessionId) => ipcRenderer.invoke("desktop:permission-grants", workspaceId, sessionId),
@@ -44,9 +45,10 @@ const api: DesktopApi = {
     ),
     respondToQuestion: (requestId, answer) => ipcRenderer.invoke("desktop:question-response", requestId, answer),
     saveSettings: (settings) => ipcRenderer.invoke("desktop:settings-save", settings),
-    saveApiKey: (apiKey) => ipcRenderer.invoke("desktop:credential-save", apiKey),
-    importCliCredential: () => ipcRenderer.invoke("desktop:credential-import-cli"),
-    clearApiKey: () => ipcRenderer.invoke("desktop:credential-clear"),
+    getCredentialState: (presetName) => ipcRenderer.invoke("desktop:credential-state", presetName),
+    saveApiKey: (apiKey, presetName) => ipcRenderer.invoke("desktop:credential-save", apiKey, presetName),
+    importCliCredential: (presetName) => ipcRenderer.invoke("desktop:credential-import-cli", presetName),
+    clearApiKey: (presetName) => ipcRenderer.invoke("desktop:credential-clear", presetName),
     testConnection: () => ipcRenderer.invoke("desktop:test-connection"),
     onEvent: (callback) => {
         const listener = (_event: Electron.IpcRendererEvent, payload: DesktopEvent): void => callback(payload);

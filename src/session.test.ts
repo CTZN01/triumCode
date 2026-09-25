@@ -68,6 +68,42 @@ test("home itself stays its own root, so a run started there keeps its sessions"
     });
 });
 
+test("desktop wait state is indexed across stores and cleared on completion or crash recovery", () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "triumcode-wait-state-"));
+    const store = new SessionStore(workspaceRoot);
+    let sessionId: string | undefined;
+    try {
+        const created = store.create("test-model");
+        sessionId = created.id;
+        const approval = store.save(created.id, [], created.model, created.revision ?? 0, "running",
+            undefined, undefined, undefined, undefined, "approval");
+        assert.equal(approval?.desktopWaitingFor, "approval");
+
+        const otherStore = new SessionStore(workspaceRoot);
+        assert.equal(otherStore.list().find((item) => item.id === created.id)?.desktopWaitingFor, "approval");
+
+        const question = otherStore.save(created.id, [], created.model, approval!.revision!, "running",
+            undefined, undefined, undefined, undefined, "user");
+        assert.equal(otherStore.list().find((item) => item.id === created.id)?.desktopWaitingFor, "user");
+
+        const completed = otherStore.save(created.id, [], created.model, question!.revision!, "idle");
+        assert.equal(completed?.desktopWaitingFor, undefined);
+        assert.equal(otherStore.list().find((item) => item.id === created.id)?.desktopWaitingFor, undefined);
+
+        const waitingAgain = otherStore.save(created.id, [], created.model, completed!.revision!, "running",
+            undefined, undefined, undefined, undefined, "approval");
+        assert.equal(waitingAgain?.desktopWaitingFor, "approval");
+        assert.equal(otherStore.recoverInterrupted(), 1);
+        const recovered = otherStore.load(created.id);
+        assert.equal(recovered?.status, "interrupted");
+        assert.equal(recovered?.desktopWaitingFor, undefined);
+        assert.equal(otherStore.list().find((item) => item.id === created.id)?.desktopWaitingFor, undefined);
+    } finally {
+        if (sessionId) store.delete(sessionId);
+        rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+});
+
 test("workspace leases serialize runs and Git mutations without blocking another workspace", () => {
     const workspaceA = mkdtempSync(join(tmpdir(), "triumcode-lease-a-"));
     const workspaceB = mkdtempSync(join(tmpdir(), "triumcode-lease-b-"));

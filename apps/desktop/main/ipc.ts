@@ -26,6 +26,14 @@ function stringArg(value: unknown, field: string, maxLength = 1000): string {
     return value;
 }
 
+function modelPresetName(value: unknown): string | null {
+    if (value === null) return null;
+    if (typeof value !== "string" || !value || value.length > 200) {
+        throw new DesktopServiceError("INVALID_ARGUMENT", "modelPreset is invalid.");
+    }
+    return value;
+}
+
 function workspaceId(value: unknown): string {
     const id = stringArg(value, "workspaceId", 32);
     if (!/^[a-f0-9]{20}$/i.test(id)) throw new DesktopServiceError("INVALID_ARGUMENT", "workspaceId is invalid.");
@@ -131,6 +139,7 @@ function parseSettings(value: unknown): DesktopSettings {
     }
     return {
         model: input.model.trim(),
+        modelPreset: typeof input.modelPreset === "string" && input.modelPreset ? input.modelPreset : null,
         apiBase: input.apiBase.trim(),
         protocol: input.protocol,
         auth: input.auth,
@@ -269,6 +278,11 @@ export function registerIpcHandlers({ host, terminals, workspaceWatch, getWindow
         stringArg(text, "message", 100_000),
         requestId(request),
     ));
+    handle("desktop:retry-run", (workspace, session, request) => host.retryRun(
+        workspaceId(workspace),
+        sessionId(session),
+        requestId(request),
+    ));
     handle("desktop:cancel-run", (run) => host.cancelRun(stringArg(run, "runId", 36)));
     handle("desktop:permission-response", (request, choice) => {
         const value = stringArg(choice, "choice", 16) as PermissionChoice;
@@ -293,8 +307,12 @@ export function registerIpcHandlers({ host, terminals, workspaceWatch, getWindow
         host.respondToQuestion(requestId(request), answer);
     });
     handle("desktop:settings-save", (settings) => host.saveSettings(parseSettings(settings)));
-    handle("desktop:credential-save", (key) => host.saveApiKey(stringArg(key, "apiKey", 10_000)));
-    handle("desktop:credential-import-cli", () => host.importCliCredential());
-    handle("desktop:credential-clear", () => host.clearApiKey());
+    handle("desktop:credential-state", (preset) => host.credentialState(modelPresetName(preset)));
+    handle("desktop:credential-save", (key, preset) => host.saveApiKey(
+        stringArg(key, "apiKey", 10_000),
+        modelPresetName(preset),
+    ));
+    handle("desktop:credential-import-cli", (preset) => host.importCliCredential(modelPresetName(preset)));
+    handle("desktop:credential-clear", (preset) => host.clearApiKey(modelPresetName(preset)));
     handle("desktop:test-connection", () => host.testConnection());
 }

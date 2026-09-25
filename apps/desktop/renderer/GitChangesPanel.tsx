@@ -1,9 +1,25 @@
 import { useEffect, useState } from "react";
+import type { KeyboardEvent } from "react";
 import type { CodeReviewSnapshot, GitFileChange, GitFileDiff, GitSnapshot, ReviewFile } from "../shared/contracts.js";
 import { DiffViewer } from "./DiffViewer.js";
 
 type FileFilter = "all" | "unstaged" | "staged";
 type ReviewView = "run" | "preexisting" | "worktree";
+
+function handleTabListKeyDown(event: KeyboardEvent<HTMLDivElement>): void {
+    if (!(["ArrowRight", "ArrowDown", "ArrowLeft", "ArrowUp", "Home", "End"] as string[]).includes(event.key)) return;
+    const tabs = [...event.currentTarget.querySelectorAll<HTMLButtonElement>("[role='tab']:not(:disabled)")];
+    if (tabs.length === 0) return;
+    const currentIndex = tabs.indexOf(document.activeElement as HTMLButtonElement);
+    const nextIndex = event.key === "Home" ? 0
+        : event.key === "End" ? tabs.length - 1
+            : event.key === "ArrowRight" || event.key === "ArrowDown"
+                ? (currentIndex + 1 + tabs.length) % tabs.length
+                : (currentIndex - 1 + tabs.length) % tabs.length;
+    event.preventDefault();
+    tabs[nextIndex]?.focus();
+    tabs[nextIndex]?.click();
+}
 
 function fileMark(file: GitFileChange): string {
     if (file.untracked) return "?";
@@ -206,16 +222,18 @@ export function GitChangesPanel({
     return <section className="git-changes-panel" aria-label="代码审阅和 Git 改动">
         <div className="git-panel-toolbar">
             <div className="git-panel-heading"><div><strong>代码审阅</strong><small>{review?.startedAt ? `最近任务 ${new Date(review.startedAt).toLocaleString()}` : "按任务检查改动"}</small></div><button className="secondary-button compact" onClick={onRefresh} disabled={loading}>{loading ? "刷新中..." : "刷新"}</button></div>
-            <div className="review-tabs" role="tablist" aria-label="代码审阅范围">
-                <button className={view === "run" ? "selected" : ""} onClick={() => setView("run")}>本轮任务{review?.files.length ? <span>{review.files.length}</span> : null}</button>
-                <button className={view === "preexisting" ? "selected" : ""} onClick={() => setView("preexisting")}>运行前已有{review?.preexisting.length ? <span>{review.preexisting.length}</span> : null}</button>
-                <button className={view === "worktree" ? "selected" : ""} onClick={() => setView("worktree")} disabled={!canShowWorktree}>当前工作树</button>
+            <div className="review-tabs" role="tablist" aria-label="代码审阅范围" onKeyDown={handleTabListKeyDown}>
+                <button id="review-scope-run" role="tab" aria-selected={view === "run"} aria-controls="review-scope-content" tabIndex={view === "run" ? 0 : -1} className={view === "run" ? "selected" : ""} onClick={() => setView("run")}>本轮任务{review?.files.length ? <span>{review.files.length}</span> : null}</button>
+                <button id="review-scope-preexisting" role="tab" aria-selected={view === "preexisting"} aria-controls="review-scope-content" tabIndex={view === "preexisting" ? 0 : -1} className={view === "preexisting" ? "selected" : ""} onClick={() => setView("preexisting")}>运行前已有{review?.preexisting.length ? <span>{review.preexisting.length}</span> : null}</button>
+                <button id="review-scope-worktree" role="tab" aria-selected={view === "worktree"} aria-controls="review-scope-content" tabIndex={view === "worktree" ? 0 : -1} className={view === "worktree" ? "selected" : ""} onClick={() => setView("worktree")} disabled={!canShowWorktree}>当前工作树</button>
             </div>
+        </div>
+
+        <div id="review-scope-content" className="git-panel-content" role="tabpanel" aria-labelledby={`review-scope-${view}`} tabIndex={0}>
             {view === "run" && review?.notice && <p className="git-scope-note">{review.notice}</p>}
             {view === "run" && review?.coverage === "partial" && <p className="git-scope-note">这轮审阅有覆盖范围限制；请同时查看提示、任务活动和当前工作树。</p>}
             {view === "preexisting" && <p className="git-scope-note">这些 Git 改动在本轮开始前已存在。这里只标记当时的文件状态；右侧差异显示当前文件内容。</p>}
             {view === "worktree" && <p className="git-scope-note">这里显示整个工作区的当前 Git 状态，包括任务开始前的改动。</p>}
-        </div>
 
         {loading && !snapshot ? <div className="git-panel-state">正在读取工作区...</div>
             : view === "worktree" && snapshot?.error ? <div className="git-panel-state git-panel-error"><strong>无法读取 Git 状态</strong><p>{snapshot.error}</p></div>
@@ -231,10 +249,10 @@ export function GitChangesPanel({
                                 <button className="primary-button compact" onClick={() => void commitStagedChanges()} disabled={busy || gitActionBusy || !canCommitStagedChanges || !commitMessage.trim()}>{gitActionBusy ? "处理中..." : "提交已暂存更改"}</button>
                                 {commitResult && <div className="git-mutation-message" role="status">{commitResult}</div>}
                             </div>
-                            <div className="git-file-filters" role="tablist" aria-label="文件状态筛选">
-                                <button className={filter === "all" ? "selected" : ""} onClick={() => setFilter("all")}>全部</button>
-                                <button className={filter === "unstaged" ? "selected" : ""} onClick={() => setFilter("unstaged")}>未暂存</button>
-                                <button className={filter === "staged" ? "selected" : ""} onClick={() => setFilter("staged")}>已暂存</button>
+                            <div className="git-file-filters" role="group" aria-label="文件状态筛选">
+                                <button aria-pressed={filter === "all"} className={filter === "all" ? "selected" : ""} onClick={() => setFilter("all")}>全部</button>
+                                <button aria-pressed={filter === "unstaged"} className={filter === "unstaged" ? "selected" : ""} onClick={() => setFilter("unstaged")}>未暂存</button>
+                                <button aria-pressed={filter === "staged"} className={filter === "staged" ? "selected" : ""} onClick={() => setFilter("staged")}>已暂存</button>
                             </div>
                         </>}
                         {view !== "worktree" && <div className="git-count-row"><span>{files.length} 个文件</span>{view === "run" && review?.status && <span>{review.status === "running" ? "任务进行中" : "最近一轮"}</span>}</div>}
@@ -245,7 +263,7 @@ export function GitChangesPanel({
                                     const gitFile = view === "run" ? null : entry as GitFileChange;
                                     const mark = reviewFile ? statusMark(reviewFile.status) : fileMark(gitFile!);
                                     const isSelected = selectedPath === entry.path;
-                                    return <button className={`git-file-row ${isSelected ? "selected" : ""}`} key={entry.path} onClick={() => reviewFile ? setSelectedPath(reviewFile.path) : selectFile(gitFile!)} title={entry.path}>
+                                    return <button aria-pressed={isSelected} className={`git-file-row ${isSelected ? "selected" : ""}`} key={entry.path} onClick={() => reviewFile ? setSelectedPath(reviewFile.path) : selectFile(gitFile!)} title={entry.path}>
                                         <span className={`git-file-mark ${markClass(mark)}`}>{mark}</span>
                                         <span className="git-file-path">{entry.path}</span>
                                         {reviewFile?.preexisting && <span className="git-side-badge">既有文件</span>}
@@ -266,9 +284,9 @@ export function GitChangesPanel({
                                         onClick={() => { setRestoreConfirm(true); setRestoreMessage(""); }}
                                     >还原</button>}
                                     {selectedReviewFile && fileStale && <span className="review-stale-badge">文件已变化</span>}
-                                    {selectedFile && <div className="git-diff-sides">
-                                        {selectedFile.staged && <button className={selectedStaged ? "selected" : ""} onClick={() => selectStagedSide(true)}>暂存</button>}
-                                        {(selectedFile.unstaged || selectedFile.untracked) && <button className={!selectedStaged ? "selected" : ""} onClick={() => selectStagedSide(false)}>工作区</button>}
+                                    {selectedFile && <div className="git-diff-sides" role="group" aria-label="选择差异版本">
+                                        {selectedFile.staged && <button aria-pressed={selectedStaged} className={selectedStaged ? "selected" : ""} onClick={() => selectStagedSide(true)}>暂存</button>}
+                                        {(selectedFile.unstaged || selectedFile.untracked) && <button aria-pressed={!selectedStaged} className={!selectedStaged ? "selected" : ""} onClick={() => selectStagedSide(false)}>工作区</button>}
                                     </div>}
                                     {selectedFile && view === "worktree" && (selectedFile.unstaged || selectedFile.untracked) && <button className="git-write-button" onClick={() => void stageSelected()} disabled={busy || gitActionBusy}>{gitActionBusy ? "处理中..." : "暂存文件"}</button>}
                                     {selectedFile && view === "worktree" && selectedFile.staged && <button className="git-write-button" onClick={() => void unstageSelected()} disabled={busy || gitActionBusy}>{gitActionBusy ? "处理中..." : "取消暂存"}</button>}
@@ -303,5 +321,6 @@ export function GitChangesPanel({
                             </> : <div className="git-panel-state">选择一个文件查看差异。</div>}
                         </div>}
                     </>}
+        </div>
     </section>;
 }

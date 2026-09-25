@@ -1,4 +1,5 @@
-import { app, BrowserWindow, dialog, session, shell } from "electron";
+import { app, BrowserWindow, dialog, screen, session, shell } from "electron";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { AgentHost } from "./agent-host.js";
@@ -19,18 +20,89 @@ let terminals: TerminalService | null = null;
 let workspaceWatch: WorkspaceWatchService | null = null;
 let closeAfterStopping = false;
 let closePromptOpen = false;
+let windowStatePath = "";
+
+interface SavedWindowState {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    maximized: boolean;
+}
+
+function readWindowState(): SavedWindowState | null {
+    if (!windowStatePath || !existsSync(windowStatePath)) return null;
+    try {
+        const value = JSON.parse(readFileSync(windowStatePath, "utf-8")) as Partial<SavedWindowState>;
+        if (typeof value.x !== "number" || !Number.isSafeInteger(value.x)
+            || typeof value.y !== "number" || !Number.isSafeInteger(value.y)
+            || typeof value.width !== "number" || !Number.isSafeInteger(value.width) || value.width < 920 || value.width > 5_000
+            || typeof value.height !== "number" || !Number.isSafeInteger(value.height) || value.height < 620 || value.height > 5_000) return null;
+        return {
+            x: value.x,
+            y: value.y,
+            width: value.width,
+            height: value.height,
+            maximized: value.maximized === true,
+        };
+    } catch {
+        return null;
+    }
+}
+
+function initialWindowBounds(): { bounds: Electron.Rectangle; maximized: boolean } {
+    const saved = readWindowState();
+    const displays = screen.getAllDisplays();
+    const visibleDisplay = saved && displays.find(({ workArea }) => saved.x < workArea.x + workArea.width
+        && saved.x + saved.width > workArea.x
+        && saved.y < workArea.y + workArea.height
+        && saved.y + saved.height > workArea.y);
+    const display = visibleDisplay ?? (saved ? screen.getDisplayMatching(saved) : screen.getPrimaryDisplay());
+    const area = display.workArea;
+    const width = Math.min(saved?.width ?? 1_440, Math.max(920, area.width));
+    const height = Math.min(saved?.height ?? 940, Math.max(620, area.height));
+    const bounds = saved && visibleDisplay
+        ? {
+            x: Math.min(Math.max(saved.x, area.x), Math.max(area.x, area.x + area.width - width)),
+            y: Math.min(Math.max(saved.y, area.y), Math.max(area.y, area.y + area.height - height)),
+            width,
+            height,
+        }
+        : {
+            x: Math.round(area.x + (area.width - width) / 2),
+            y: Math.round(area.y + (area.height - height) / 2),
+            width,
+            height,
+        };
+    return { bounds, maximized: saved?.maximized ?? false };
+}
+
+function saveWindowState(window: BrowserWindow): void {
+    if (!windowStatePath || window.isDestroyed()) return;
+    const bounds = window.isMaximized() ? window.getNormalBounds() : window.getBounds();
+    const state: SavedWindowState = { ...bounds, maximized: window.isMaximized() };
+    const tempPath = `${windowStatePath}.${process.pid}.tmp`;
+    try {
+        mkdirSync(dirname(windowStatePath), { recursive: true });
+        writeFileSync(tempPath, JSON.stringify(state), "utf-8");
+        try { renameSync(tempPath, windowStatePath); }
+        catch {
+            writeFileSync(windowStatePath, JSON.stringify(state), "utf-8");
+        }
+    } catch { /* keep the current window usable if local preferences cannot be saved */ }
+}
 
 function createWindow(): BrowserWindow {
+    const restored = initialWindowBounds();
     const window = new BrowserWindow({
-        width: 1440,
-        height: 940,
+        ...restored.bounds,
         minWidth: 920,
         minHeight: 620,
         show: false,
         backgroundColor: "#111318",
         title: "TriumCode",
         webPreferences: {
-            preload: join(here, "../preload/index.mjs"),
+            preload: join(here, "../preload/index.cjs"),
             contextIsolation: true,
             nodeIntegration: false,
             sandbox: true,
@@ -39,7 +111,25 @@ function createWindow(): BrowserWindow {
         },
     });
 
-    window.once("ready-to-show", () => window.show());
+    window.once("ready-to-show", () => {
+        if (restored.maximized) window.maximize();
+        window.show();
+    });
+    let saveTimer: ReturnType<typeof setTimeout> | undefined;
+    const scheduleWindowStateSave = (): void => {
+        if (saveTimer) clearTimeout(saveTimer);
+        saveTimer = setTimeout(() => {
+            saveTimer = undefined;
+            saveWindowState(window);
+        }, 250);
+    };
+    window.on("move", scheduleWindowStateSave);
+    window.on("resize", scheduleWindowStateSave);
+    window.on("close", () => {
+        if (saveTimer) clearTimeout(saveTimer);
+        saveTimer = undefined;
+        saveWindowState(window);
+    });
     window.webContents.setWindowOpenHandler(({ url }) => {
         try {
             const parsed = new URL(url);
@@ -109,6 +199,7 @@ if (hasSingleInstanceLock) {
         app.setAppUserModelId("com.triumcode.desktop");
         session.defaultSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
         const userData = app.getPath("userData");
+        windowStatePath = join(userData, "window-state.json");
         const workspaces = new WorkspaceStore(userData);
         const settings = new SettingsStore(userData);
         const credentials = new CredentialStore(userData);

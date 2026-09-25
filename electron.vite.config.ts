@@ -17,6 +17,10 @@ export default defineConfig({
         build: {
             rollupOptions: {
                 input: resolve(root, "apps/desktop/preload/index.ts"),
+                output: {
+                    format: "cjs",
+                    entryFileNames: "index.cjs",
+                },
             },
         },
     },

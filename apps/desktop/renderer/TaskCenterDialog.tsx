@@ -79,10 +79,14 @@ export function TaskCenterDialog({
             onKeyDown={(event) => {
                 if (event.key === "Escape") { event.stopPropagation(); onClose(); return; }
                 if (event.key !== "Tab") return;
-                const focusable = [...(dialogRef.current?.querySelectorAll<HTMLElement>("button:not(:disabled), input:not(:disabled), [tabindex]:not([tabindex='-1'])") ?? [])];
+                const focusable = [...(dialogRef.current?.querySelectorAll<HTMLElement>("a[href], button:not(:disabled), input:not(:disabled):not([type='hidden']), select:not(:disabled), textarea:not(:disabled), summary, [tabindex]:not([tabindex='-1'])") ?? [])]
+                    .filter((element) => element.getClientRects().length > 0);
                 const first = focusable[0];
                 const last = focusable.at(-1);
-                if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+                const activeIndex = focusable.indexOf(document.activeElement as HTMLElement);
+                if (!first) { event.preventDefault(); dialogRef.current?.focus(); }
+                else if (activeIndex < 0) { event.preventDefault(); (event.shiftKey ? last : first)?.focus(); }
+                else if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
                 else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
             }}>
             <div className="settings-heading">

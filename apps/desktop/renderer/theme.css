@@ -1,0 +1,1373 @@
+/* Neutral desktop palette shared by both appearance modes. */
+:root {
+    font-family: Inter, "Segoe UI Variable", "Segoe UI", "Microsoft YaHei UI", sans-serif;
+    font-size: 13px;
+    color-scheme: light dark;
+    --canvas: #ffffff;
+    --sidebar: #f7f7f7;
+    --surface: #ffffff;
+    --field: #f7f7f7;
+    --hover: #efefef;
+    --border: #e5e5e5;
+    --text: #242424;
+    --muted: #686868;
+    --accent: #9a4b25;
+    --focus: #a55732;
+    --button: #242424;
+    --button-text: #ffffff;
+    --danger: #b42318;
+    --danger-bg: #fff3f1;
+    --warning: #8a5a15;
+    --warning-bg: #fff8eb;
+    --success: #267247;
+    --success-bg: #edf8f1;
+}
+:root[data-theme="dark"] {
+    color-scheme: dark;
+    --canvas: #171717;
+    --sidebar: #1e1e1e;
+    --surface: #202020;
+    --field: #171717;
+    --hover: #2b2b2b;
+    --border: #343434;
+    --text: #ededed;
+    --muted: #a0a0a0;
+    --accent: #e2a178;
+    --focus: #e2a178;
+    --button: #ededed;
+    --button-text: #171717;
+    --danger: #e58d84;
+    --danger-bg: #32201f;
+    --warning: #d8b47d;
+    --warning-bg: #30281d;
+    --success: #92c8a4;
+    --success-bg: #1e3025;
+}
+:root[data-theme="light"] { color-scheme: light; }
+@media (prefers-color-scheme: dark) {
+    :root[data-theme="system"] {
+        color-scheme: dark;
+        --canvas: #171717; --sidebar: #1e1e1e; --surface: #202020;
+        --field: #171717; --hover: #2b2b2b; --border: #343434;
+        --text: #ededed; --muted: #a0a0a0; --accent: #e2a178;
+        --focus: #e2a178; --button: #ededed; --button-text: #171717;
+        --danger: #e58d84; --danger-bg: #32201f;
+        --warning: #d8b47d; --warning-bg: #30281d;
+        --success: #92c8a4; --success-bg: #1e3025;
+    }
+}
+
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) {
+    color: var(--text);
+    background: var(--surface);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) body {
+    background: var(--canvas);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) button:focus-visible,
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) input:focus-visible,
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) textarea:focus-visible,
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) select:focus-visible {
+    outline: 2px solid var(--focus);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .app-shell {
+    background: var(--canvas);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .column-resizer {
+    background: var(--surface);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .column-resizer::after {
+    background: var(--surface);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .column-resizer:hover::after,
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .column-resizer:focus-visible::after {
+    background: var(--hover);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .sidebar {
+    background: var(--sidebar);
+    border-right: 1px solid var(--border);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .brand-row {
+    border-bottom: 1px solid var(--border);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .brand-mark {
+    color: var(--accent);
+    border: 1px solid var(--border);
+    background: var(--surface);
+    box-shadow: none;
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .brand-name {
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .brand-edition {
+    color: var(--muted);
+    border: 1px solid var(--border);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .new-task-button {
+    border: 1px solid var(--border);
+    background: var(--button);
+    color: var(--button-text);
+    box-shadow: none;
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .new-task-button:hover:not(:disabled) {
+    background: var(--button);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) kbd {
+    color: var(--text);
+    background: var(--surface);
+    border: 1px solid var(--border);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .new-task-button kbd {
+    color: var(--button-text);
+    border-color: var(--border);
+    background: var(--button);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .search-box {
+    border: 1px solid var(--border);
+    color: var(--muted);
+    background: var(--surface);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .search-box:focus-within {
+    border-color: var(--border);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .search-box input {
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .search-box input::placeholder {
+    color: var(--muted);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .side-scroll::-webkit-scrollbar-thumb,
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .conversation::-webkit-scrollbar-thumb,
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .activity-list::-webkit-scrollbar-thumb {
+    background: var(--surface);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .section-head {
+    color: var(--muted);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .icon-button {
+    color: var(--muted);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .icon-button:hover {
+    color: var(--text);
+    background: var(--hover);
+    border-color: var(--border);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .workspace-row,
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .session-row {
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .workspace-row:hover,
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .session-row:hover {
+    background: var(--hover);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .workspace-row.selected,
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .session-row.selected {
+    background: var(--hover);
+    color: var(--accent);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .workspace-dot {
+    background: var(--surface);
+    box-shadow: none;
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .workspace-dot.missing {
+    background: var(--surface);
+    box-shadow: none;
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .workspace-state {
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .branch-chip {
+    color: var(--muted);
+    border: 1px solid var(--border);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .row-action {
+    color: var(--muted);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .row-action:hover {
+    color: var(--text);
+    background: var(--hover);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .session-status {
+    background: var(--surface);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .session-status.running {
+    background: var(--surface);
+    box-shadow: none;
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .session-status.interrupted {
+    background: var(--warning-bg);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .session-status.failed {
+    background: var(--danger-bg);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .session-status.cancelled {
+    background: var(--surface);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .session-state-label {
+    color: var(--muted);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .session-state-label.running {
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .session-state-label.interrupted,
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .session-state-label.failed {
+    color: var(--danger);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .side-empty {
+    color: var(--muted);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .sidebar-bottom {
+    border-top: 1px solid var(--border);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .local-status {
+    color: var(--muted);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .online-indicator {
+    background: var(--surface);
+    box-shadow: none;
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .status-dot-separator {
+    color: var(--muted);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .settings-entry {
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .settings-entry:hover,
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .settings-entry.active {
+    color: var(--accent);
+    background: var(--hover);
+    border-color: var(--border);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .settings-shortcut {
+    color: var(--muted);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .main-column {
+    background: var(--canvas);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .topbar {
+    border-bottom: 1px solid var(--border);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .breadcrumbs {
+    color: var(--muted);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .crumb-project {
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .crumb-session {
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .topbar-chip,
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .permission-chip {
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .git-branch-icon {
+    color: var(--accent);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .model-chip:hover {
+    border-color: var(--border);
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .model-spark {
+    color: var(--accent);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .context-meter small {
+    color: var(--muted);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .permission-chip {
+    color: var(--text);
+    border-color: var(--border);
+    background: var(--surface);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .shield-icon {
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .activity-bars i {
+    background: var(--surface);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .panel-selected {
+    background: var(--field);
+    border-color: var(--border);
+    color: var(--accent);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .task-center-toggle {
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .task-center-toggle:hover,
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .task-center-toggle.selected {
+    border-color: var(--border);
+    background: var(--hover);
+    color: var(--accent);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .welcome-area,
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .missing-workspace {
+    background: var(--canvas);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .welcome-orb,
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .conversation-orb {
+    color: var(--text);
+    border: 1px solid var(--border);
+    background: var(--surface);
+    box-shadow: none;
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .eyebrow {
+    color: var(--accent);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .welcome-area h1 {
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .welcome-area p {
+    color: var(--muted);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .welcome-credential {
+    color: var(--muted);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .welcome-credential.ready {
+    color: var(--success);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .setup-indicator {
+    background: var(--surface);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .welcome-credential.ready .setup-indicator {
+    background: var(--surface);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .primary-button {
+    color: var(--button-text);
+    border: 1px solid var(--border);
+    background: var(--button);
+    box-shadow: none;
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .primary-button:hover:not(:disabled) {
+    background: var(--button);
+    border-color: var(--border);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .secondary-button {
+    color: var(--text);
+    background: var(--surface);
+    border: 1px solid var(--border);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .secondary-button:hover:not(:disabled) {
+    background: var(--hover);
+    border-color: var(--border);
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .welcome-footnote {
+    color: var(--muted);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .missing-icon {
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .missing-workspace p {
+    color: var(--muted);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .credential-setup-banner {
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .external-run-banner {
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .external-run-banner span {
+    color: var(--muted);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .message + .message {
+    border-top: 1px solid var(--border);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .message-avatar {
+    color: var(--text);
+    background: var(--surface);
+    border: 1px solid var(--border);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .message.user .message-avatar {
+    color: var(--text);
+    background: var(--surface);
+    border-color: var(--border);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .message-meta {
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .message.user .message-meta {
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .copy-message {
+    color: var(--muted);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .copy-message:hover {
+    background: var(--hover);
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .message-body {
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .message-body h3,
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .message-body h4,
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .message-body h5 {
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .message-body strong {
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .message-body em {
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .message-body code:not(.code-block code) {
+    color: var(--text);
+    background: var(--field);
+    border: 1px solid var(--border);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .message-body a {
+    color: var(--accent);
+    text-decoration-color: var(--accent);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .message-body a:hover {
+    color: var(--accent);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .message-table-wrap {
+    border: 1px solid var(--border);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .message-table {
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .message-table th,
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .message-table td {
+    border-right: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .message-table th {
+    color: var(--text);
+    background: var(--surface);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .message-table tbody tr:nth-child(even) {
+    background: var(--canvas);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .code-block {
+    background: var(--field);
+    border: 1px solid var(--border);
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .code-header {
+    color: var(--muted);
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .code-header button {
+    color: var(--muted);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .code-header button:hover {
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .thinking-placeholder {
+    color: var(--muted);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .thinking-placeholder i {
+    background: var(--surface);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .empty-conversation h2 {
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .empty-conversation p {
+    color: var(--muted);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .suggestion-card {
+    color: var(--text);
+    background: var(--surface);
+    border: 1px solid var(--border);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .suggestion-card:hover {
+    background: var(--hover);
+    border-color: var(--border);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .suggestion-icon {
+    color: var(--text);
+    background: var(--surface);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .suggestion-card strong {
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .suggestion-card small {
+    color: var(--muted);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .suggestion-card > svg:last-child {
+    color: var(--muted);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .approval-card,
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .question-card {
+    border: 1px solid var(--border);
+    background: var(--surface);
+    box-shadow: none;
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .question-card {
+    border-color: var(--border);
+    background: var(--surface);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .decision-icon.warning {
+    color: var(--warning);
+    border: 1px solid var(--border);
+    background: var(--warning-bg);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .decision-icon.question {
+    color: var(--text);
+    border: 1px solid var(--border);
+    background: var(--surface);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .decision-heading strong {
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .question-card .decision-heading strong {
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .decision-heading small {
+    color: var(--muted);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .question-card .decision-heading small {
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .approval-operation {
+    border: 1px solid var(--border);
+    background: var(--surface);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .operation-name {
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .approval-operation pre {
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .operation-reason {
+    color: var(--muted);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .approval-policy {
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .approval-policy span,
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .activity-policy > span {
+    color: var(--muted);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .approval-boundary {
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .approval-boundary strong {
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .approval-session-note {
+    color: var(--muted);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .danger-quiet {
+    color: var(--danger);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .danger-quiet:hover {
+    background: var(--danger-bg);
+    border-color: var(--border);
+    color: var(--danger);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .activity-policy {
+    border-top: 1px solid var(--border);
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .activity-policy small {
+    color: var(--muted);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .activity-policy.outcome {
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .question-answer input {
+    border: 1px solid var(--border);
+    background: var(--field);
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .question-answer input:focus {
+    border-color: var(--border);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .composer {
+    border: 1px solid var(--border);
+    background: var(--surface);
+    box-shadow: none;
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .composer:focus-within {
+    border-color: var(--border);
+    box-shadow: none;
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .composer.is-busy {
+    border-color: var(--border);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .composer textarea {
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .composer textarea::placeholder {
+    color: var(--muted);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .composer textarea:disabled {
+    color: var(--muted);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .composer-hints {
+    color: var(--muted);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .send-button {
+    border: 1px solid var(--border);
+    background: var(--button);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .send-button:hover:not(:disabled) {
+    background: var(--button);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .stop-button {
+    color: var(--danger);
+    border: 1px solid var(--border);
+    background: var(--danger-bg);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .stop-button:hover {
+    background: var(--danger-bg);
+    border-color: var(--border);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .stop-square {
+    background: var(--surface);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .composer-footer {
+    color: var(--muted);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .retry-prompt-button {
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .retry-prompt-button:hover {
+    border-color: var(--border);
+    background: var(--hover);
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .retry-disclosure {
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .status-indicator {
+    color: var(--muted);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .status-indicator i {
+    background: var(--surface);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .status-indicator i.pulse {
+    background: var(--surface);
+    box-shadow: none;
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) 50% {
+    box-shadow: none;
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .toast-error {
+    border: 1px solid var(--border);
+    background: var(--danger-bg);
+    color: var(--danger);
+    box-shadow: none;
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .toast-error button {
+    color: var(--danger);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .inspector {
+    background: var(--sidebar);
+    border-left: 1px solid var(--border);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .inspector-tabs {
+    border-bottom: 1px solid var(--border);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .inspector-tabs button {
+    color: var(--muted);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .inspector-tabs button.selected {
+    color: var(--accent);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .inspector-tabs button.selected::after {
+    background: var(--hover);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .inspector-tabs button span {
+    background: var(--sidebar);
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .inspector-panel-content:focus-visible,
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .git-panel-content:focus-visible {
+    outline: 2px solid var(--focus);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .activity-empty-icon {
+    background: var(--surface);
+    border: 1px solid var(--border);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .activity-empty-icon span {
+    background: var(--surface);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .inspector-empty strong {
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .inspector-empty p {
+    color: var(--muted);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .activity-row {
+    border-bottom: 1px solid var(--border);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .activity-state-mark {
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .activity-row.denied .activity-state-mark {
+    color: var(--danger);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .activity-row.failed .activity-state-mark {
+    color: var(--danger);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .activity-row.interrupted .activity-state-mark {
+    color: var(--warning);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .activity-row.running .activity-state-mark {
+    border: 1px solid var(--border);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .activity-row.notice .activity-state-mark {
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .activity-title {
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .activity-row.running .activity-title {
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .activity-state-label {
+    color: var(--muted);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .activity-state-label.running,
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .activity-state-label.notice {
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .activity-state-label.denied,
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .activity-state-label.failed {
+    color: var(--danger);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .activity-state-label.interrupted {
+    color: var(--warning);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .activity-state-label.complete {
+    color: var(--success);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .activity-duration {
+    color: var(--muted);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .activity-time {
+    color: var(--muted);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .activity-detail > pre {
+    color: var(--muted);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .activity-output {
+    border-top: 1px solid var(--border);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .activity-output-heading > span {
+    color: var(--muted);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .activity-copy {
+    color: var(--muted);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .activity-copy:hover {
+    border-color: var(--border);
+    background: var(--hover);
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .activity-output pre {
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .detail-card {
+    border-bottom: 1px solid var(--border);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .detail-label {
+    color: var(--muted);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .detail-card strong {
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .detail-card code {
+    color: var(--muted);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .detail-card small {
+    color: var(--muted);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .grant-row {
+    border: 1px solid var(--border);
+    background: var(--surface);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .grant-row strong {
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .settings-inline {
+    color: var(--text);
+    border: 1px solid var(--border);
+    background: var(--surface);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .settings-inline:hover {
+    background: var(--hover);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .inspector-footer {
+    border-top: 1px solid var(--border);
+    color: var(--muted);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .privacy-dot {
+    background: var(--surface);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .git-panel-toolbar {
+    border-bottom: 1px solid var(--border);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .git-panel-heading strong {
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .git-panel-heading small {
+    color: var(--muted);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .review-tabs {
+    border: 1px solid var(--border);
+    background: var(--surface);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .review-tabs button {
+    color: var(--muted);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .review-tabs button span {
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .review-tabs button.selected {
+    border-color: var(--border);
+    background: var(--hover);
+    color: var(--accent);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .git-scope-note {
+    color: var(--muted);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .git-count-row {
+    color: var(--muted);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .git-count-row span:first-child {
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .git-commit-box {
+    border-bottom: 1px solid var(--border);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .git-commit-box label {
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .git-commit-box textarea {
+    border: 1px solid var(--border);
+    background: var(--field);
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .git-commit-box textarea:focus {
+    border-color: var(--border);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .git-commit-box small {
+    color: var(--muted);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .git-mutation-message {
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .git-stage-note {
+    color: var(--muted);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .git-write-button {
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .git-write-button:hover:not(:disabled) {
+    background: var(--hover);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .git-truncated-notice {
+    color: var(--text);
+    background: var(--surface);
+    border: 1px solid var(--border);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .git-file-filters button,
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .git-diff-sides button {
+    color: var(--muted);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .git-file-filters button:hover,
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .git-diff-sides button:hover {
+    color: var(--text);
+    background: var(--hover);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .git-file-filters button.selected,
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .git-diff-sides button.selected {
+    color: var(--accent);
+    border-color: var(--border);
+    background: var(--hover);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .git-file-list::-webkit-scrollbar-thumb,
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .git-diff-content::-webkit-scrollbar-thumb {
+    background: var(--surface);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .git-file-row:hover {
+    background: var(--hover);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .git-file-row.selected {
+    background: var(--hover);
+    border-color: var(--border);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .git-file-mark {
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .git-file-mark.added {
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .git-file-mark.deleted {
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .git-file-path {
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .git-side-badge {
+    background: var(--surface);
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .git-side-badge.staged {
+    background: var(--surface);
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .git-list-empty,
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .git-clean-state {
+    color: var(--muted);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .git-diff-section {
+    border-top: 1px solid var(--border);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .git-diff-heading {
+    border-bottom: 1px solid var(--border);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .git-diff-path {
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .review-restore-button {
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .review-restore-button:hover:not(:disabled) {
+    background: var(--hover);
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .review-stale-badge {
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .review-restore-confirm {
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .review-restore-confirm strong {
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .review-restore-confirm p {
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .danger-button.compact {
+    border: 1px solid var(--border);
+    background: var(--danger-bg);
+    color: var(--danger);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .danger-button.compact:hover:not(:disabled) {
+    background: var(--danger-bg);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .review-restore-success {
+    border: 1px solid var(--border);
+    background: var(--success-bg);
+    color: var(--success);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .git-diff-content {
+    background: var(--surface);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .diff-viewer {
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .diff-column-heading {
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--muted);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .diff-line-number {
+    border-right: 1px solid var(--border);
+    color: var(--muted);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .diff-line.meta .diff-line-text {
+    color: var(--muted);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .diff-line.addition .diff-line-text {
+    color: var(--text);
+    background: var(--surface);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .diff-line.deletion .diff-line-text {
+    color: var(--text);
+    background: var(--surface);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .diff-hunk {
+    border-top: 1px solid var(--border);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .diff-hunk-heading {
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .diff-hunk-heading:hover {
+    background: var(--hover);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .git-panel-state {
+    color: var(--muted);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .git-panel-state strong {
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .git-panel-state.git-panel-error {
+    color: var(--danger);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .terminal-toggle:hover:not(:disabled) {
+    border-color: var(--border);
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .terminal-panel {
+    border-top: 1px solid var(--border);
+    background: var(--surface);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .terminal-toolbar {
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .terminal-heading strong {
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .terminal-heading span {
+    color: var(--muted);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .terminal-actions button {
+    color: var(--muted);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .terminal-actions button:hover {
+    border-color: var(--border);
+    background: var(--hover);
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .terminal-actions .terminal-close:hover {
+    color: var(--text);
+    border-color: var(--border);
+    background: var(--hover);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .terminal-status-row {
+    border-top: 1px solid var(--border);
+    color: var(--muted);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .terminal-error {
+    color: var(--danger);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .modal-scrim {
+    background: var(--surface);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .task-center-dialog {
+    border: 1px solid var(--border);
+    background: var(--surface);
+    box-shadow: none;
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .task-center-search {
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--muted);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .task-center-search:focus-within {
+    border-color: var(--border);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .task-center-search input {
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .task-center-search input::placeholder {
+    color: var(--muted);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .task-center-error {
+    border: 1px solid var(--border);
+    background: var(--danger-bg);
+    color: var(--danger);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .task-center-list::-webkit-scrollbar-thumb {
+    background: var(--surface);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .task-center-empty {
+    color: var(--muted);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .task-center-row {
+    border-bottom: 1px solid var(--border);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .task-center-status-mark {
+    background: var(--surface);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .task-center-status-mark.running,
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .task-center-status-mark.waiting-approval,
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .task-center-status-mark.waiting-user {
+    background: var(--surface);
+    box-shadow: none;
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .task-center-status-mark.failed {
+    background: var(--danger-bg);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .task-center-status-mark.interrupted {
+    background: var(--warning-bg);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .task-center-task-heading strong {
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .task-center-status {
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .task-center-status.failed {
+    color: var(--danger);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .task-center-status.interrupted {
+    color: var(--warning);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .task-center-status.completed,
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .task-center-status.cancelled {
+    color: var(--success);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .task-center-project {
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .task-center-project span {
+    color: var(--muted);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .task-center-task-meta {
+    color: var(--muted);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .task-center-stop {
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .task-center-stop:hover:not(:disabled) {
+    border-color: var(--border);
+    background: var(--hover);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .task-center-footer {
+    color: var(--muted);
+    border-top: 1px solid var(--border);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .worktree-dialog {
+    border: 1px solid var(--border);
+    background: var(--surface);
+    box-shadow: none;
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .worktree-loading {
+    color: var(--muted);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .worktree-source {
+    border: 1px solid var(--border);
+    background: var(--surface);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .worktree-source > span {
+    color: var(--muted);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .worktree-source strong {
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .worktree-source code {
+    color: var(--muted);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .worktree-parent-field input {
+    border: 1px solid var(--border);
+    background: var(--field);
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .worktree-parent-field input::placeholder {
+    color: var(--muted);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .worktree-dirty-warning {
+    border: 1px solid var(--border);
+    background: var(--warning-bg);
+    color: var(--warning);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .worktree-dirty-warning > span {
+    color: var(--warning);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .worktree-dirty-warning label {
+    color: var(--warning);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .worktree-dirty-warning input {
+    accent-color: var(--accent);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .worktree-actions {
+    border-top: 1px solid var(--border);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .worktree-review-summary > div {
+    border: 1px solid var(--border);
+    background: var(--surface);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .worktree-review-summary span,
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .worktree-review-status {
+    color: var(--muted);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .worktree-review-summary strong {
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .worktree-review-status span {
+    background: var(--surface);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .worktree-review-status .ok {
+    color: var(--success);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .worktree-review-status .warning {
+    color: var(--warning);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .worktree-review-diff {
+    border: 1px solid var(--border);
+    background: var(--surface);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .worktree-review-diff summary {
+    border-bottom: 1px solid var(--border);
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .worktree-review-diff pre {
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .worktree-action-notice {
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .worktree-action-notice.warning {
+    border-color: var(--border);
+    background: var(--warning-bg);
+    color: var(--warning);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .worktree-confirmation {
+    border: 1px solid var(--border);
+    background: var(--surface);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .worktree-confirmation.remove {
+    border-color: var(--border);
+    background: var(--surface);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .worktree-confirmation strong {
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .worktree-confirmation > span,
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .worktree-confirmation label {
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .worktree-confirmation input {
+    accent-color: var(--accent);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .danger-button:not(.compact) {
+    border: 1px solid var(--border);
+    background: var(--danger-bg);
+    color: var(--danger);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .danger-button:not(.compact):hover:not(:disabled) {
+    background: var(--danger-bg);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .worktree-manage-actions {
+    background: var(--surface);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .settings-dialog {
+    border: 1px solid var(--border);
+    background: var(--surface);
+    box-shadow: none;
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .settings-heading h2 {
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .settings-heading p {
+    color: var(--muted);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .field > span {
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .field input,
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .field select {
+    color: var(--text);
+    background: var(--field);
+    border: 1px solid var(--border);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .field input:focus,
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .field select:focus {
+    border-color: var(--border);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .field input::placeholder {
+    color: var(--muted);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .field-help {
+    color: var(--muted);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .toggle-row input {
+    accent-color: var(--accent);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .toggle-row strong {
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .toggle-row small {
+    color: var(--muted);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .settings-divider {
+    background: var(--surface);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .credential-header strong {
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .credential-header small {
+    color: var(--muted);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .text-button {
+    color: var(--accent);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .text-button:hover {
+    color: var(--accent);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .danger-text {
+    color: var(--danger);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .key-entry input {
+    color: var(--text);
+    background: var(--field);
+    border: 1px solid var(--border);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .key-entry input:focus {
+    border-color: var(--border);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .key-entry input::placeholder {
+    color: var(--muted);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .settings-footer {
+    border-top: 1px solid var(--border);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .test-result {
+    color: var(--muted);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .test-result.success {
+    color: var(--success);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .test-result.failure {
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .launch-screen {
+    background: var(--canvas);
+    color: var(--muted);
+}
+
+/* A quiet hierarchy for the main actions and empty states. */
+.brand-mark, .welcome-orb, .conversation-orb {
+    background: var(--surface) !important;
+    border: 1px solid var(--border) !important;
+    box-shadow: none !important;
+    color: var(--text) !important;
+}
+.primary-button, .new-task-button, .send-button {
+    background: var(--button) !important;
+    border-color: var(--button) !important;
+    color: var(--button-text) !important;
+    box-shadow: none !important;
+}
+.primary-button:hover:not(:disabled), .new-task-button:hover:not(:disabled), .send-button:hover:not(:disabled) { opacity: .86; }
+.modal-scrim { background: #0008; }
+.settings-dialog, .task-center-dialog, .worktree-dialog { box-shadow: 0 18px 55px #0003; }
+.message-body, .composer textarea { font-size: 13px; }
+.code-block > code, .activity-title, .activity-output pre, .worktree-review-diff pre {
+    font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+}
+.section-head, .branch-chip, .session-state-label, .local-status,
+.settings-shortcut, .topbar-chip, .permission-chip, .eyebrow,
+.composer-hints, .composer-footer, .activity-title, .activity-time,
+.activity-duration, .activity-state-label, .detail-label, .detail-card small,
+.field-help, .task-center-task-meta, .task-center-project,
+.worktree-source code, .worktree-review-status, .worktree-review-summary span {
+    font-size: 11px !important;
+}

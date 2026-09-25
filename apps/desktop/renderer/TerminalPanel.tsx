@@ -4,13 +4,36 @@ import { useEffect, useRef, useState } from "react";
 import type { TerminalSummary } from "../shared/contracts.js";
 import "@xterm/xterm/css/xterm.css";
 
+const terminalPalettes = {
+    light: {
+        background: "#ffffff", foreground: "#242424", cursor: "#242424",
+        selectionBackground: "#d9d9d9", black: "#242424", red: "#b42318",
+        green: "#267247", yellow: "#946200", blue: "#285ea8",
+        magenta: "#8a4ca8", cyan: "#147b87", white: "#ededed",
+        brightBlack: "#666666", brightRed: "#c7463c", brightGreen: "#348e58",
+        brightYellow: "#ad7915", brightBlue: "#3975bf", brightMagenta: "#a263ba",
+        brightCyan: "#23939b", brightWhite: "#ffffff",
+    },
+    dark: {
+        background: "#171717", foreground: "#e8e8e8", cursor: "#e8e8e8",
+        selectionBackground: "#444444", black: "#171717", red: "#ee8580",
+        green: "#8ccfa5", yellow: "#e2c078", blue: "#91b8e8",
+        magenta: "#c9a3e3", cyan: "#8ad1d4", white: "#e8e8e8",
+        brightBlack: "#777777", brightRed: "#f29b95", brightGreen: "#a8dcb7",
+        brightYellow: "#eed098", brightBlue: "#a9c9ed", brightMagenta: "#d9b8ed",
+        brightCyan: "#a4e0e2", brightWhite: "#ffffff",
+    },
+};
+
 export function TerminalPanel({
+    theme,
     workspaceId,
     workspaceName,
     workspacePath,
     onClose,
     onCopySelection,
 }: {
+    theme: "light" | "dark";
     workspaceId: string;
     workspaceName: string;
     workspacePath: string;
@@ -18,6 +41,7 @@ export function TerminalPanel({
     onCopySelection: (text: string) => void;
 }) {
     const surface = useRef<HTMLDivElement | null>(null);
+    const terminalRef = useRef<Terminal | null>(null);
     const [summary, setSummary] = useState<TerminalSummary | null>(null);
     const [title, setTitle] = useState("");
     const [error, setError] = useState("");
@@ -33,32 +57,12 @@ export function TerminalPanel({
         let terminalId: string | null = null;
         const terminal = new Terminal({
             cursorBlink: true,
-            fontFamily: '"Cascadia Code", Consolas, monospace',
-            fontSize: 11,
+            fontFamily: '"Cascadia Code", "SFMono-Regular", Consolas, monospace',
+            fontSize: 12,
             scrollback: 5000,
-            theme: {
-                background: "#101216",
-                foreground: "#d7d9df",
-                cursor: "#c8baff",
-                selectionBackground: "#5f568966",
-                black: "#15171d",
-                red: "#d98580",
-                green: "#8ac19f",
-                yellow: "#d6bd83",
-                blue: "#8ba8d4",
-                magenta: "#b49be2",
-                cyan: "#83bfc0",
-                white: "#d7d9df",
-                brightBlack: "#737987",
-                brightRed: "#e69b94",
-                brightGreen: "#a2d5b4",
-                brightYellow: "#e4ce99",
-                brightBlue: "#a0b8e3",
-                brightMagenta: "#c2a9ef",
-                brightCyan: "#9bd1d1",
-                brightWhite: "#f4f4f7",
-            },
+            theme: terminalPalettes[theme],
         });
+        terminalRef.current = terminal;
         const fit = new FitAddon();
         terminal.loadAddon(fit);
         terminal.open(root);
@@ -118,9 +122,14 @@ export function TerminalPanel({
             input.dispose();
             selection.dispose();
             terminal.dispose();
+            terminalRef.current = null;
             if (terminalId) void window.desktop.closeTerminal(terminalId).catch(() => undefined);
         };
     }, [generation, workspaceId]);
+
+    useEffect(() => {
+        if (terminalRef.current) terminalRef.current.options.theme = terminalPalettes[theme];
+    }, [theme]);
 
     const restart = async () => {
         if (!window.confirm("重启 PowerShell 会结束当前 shell 和它启动的前台程序。继续吗？")) return;

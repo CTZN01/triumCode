@@ -4,7 +4,7 @@ import { readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import * as os from "node:os";
 import { getActiveToolDefinitions, getToolDefinitionsFor, toolResultLimit, type ReadFileState, type Tool, type ToolContext } from "./tools.js";
-import { ToolExecutor } from "./tool-executor.js";
+import { ToolExecutor, toolExecutionResult, type ToolExecutionOutcome, type ToolExecutionResult } from "./tool-executor.js";
 import { envModel } from "./config.js";
 import { buildStaticSystemPrompt, buildTurnContextReminder, PLAN_MODE } from "./prompt.js";
 import {
@@ -93,6 +93,37 @@ function briefApiError(error: any): string {
     return first.length > 100 ? first.slice(0, 97) + "..." : first;
 }
 
+export type AgentFailureCategory = "network" | "authentication" | "rate-limit" | "provider" | "internal";
+
+function classifyAgentFailure(error: unknown): { category: AgentFailureCategory; retryable: boolean } {
+    const networkCodes = new Set([
+        "ECONNABORTED", "ECONNREFUSED", "ECONNRESET", "EHOSTUNREACH", "ENETUNREACH", "ENOTFOUND",
+        "EAI_AGAIN", "ETIMEDOUT", "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_SOCKET",
+    ]);
+    let current: unknown = error;
+    let status: number | null = null;
+    let networkFailure = false;
+    const seen = new Set<object>();
+    for (let depth = 0; depth < 4 && current && typeof current === "object" && !seen.has(current); depth++) {
+        seen.add(current);
+        const item = current as { code?: unknown; cause?: unknown; message?: unknown; name?: unknown; status?: unknown; statusCode?: unknown };
+        const candidateStatus = item.status ?? item.statusCode;
+        if (status === null && typeof candidateStatus === "number" && Number.isInteger(candidateStatus)) status = candidateStatus;
+        if (typeof item.code === "string" && networkCodes.has(item.code)) networkFailure = true;
+        if (typeof item.name === "string" && /^(?:APIConnection|Fetch|Network)/i.test(item.name)) networkFailure = true;
+        if (typeof item.message === "string" && /fetch failed|network error|socket hang up|timed out|connection (?:refused|reset|failed)/i.test(item.message)) {
+            networkFailure = true;
+        }
+        current = item.cause;
+    }
+
+    if (status === 401 || status === 403) return { category: "authentication", retryable: false };
+    if (status === 429) return { category: "rate-limit", retryable: true };
+    if (status !== null) return { category: "provider", retryable: status === 408 || status >= 500 };
+    if (networkFailure) return { category: "network", retryable: true };
+    return { category: "internal", retryable: false };
+}
+
 export interface AgentUsage {
     /** Prompt tokens billed at full price — the ones the cache did not serve. */
     input: number;
@@ -125,7 +156,7 @@ export type AgentEvent =
     | { type: "status.changed"; status: "working" | "thinking" | "running-tools" | "idle"; label?: string }
     | { type: "thinking.duration"; milliseconds: number }
     | { type: "tool.started"; id: string; name: string; input: Record<string, any> }
-    | { type: "tool.completed"; id: string; name: string; input: Record<string, any>; output: string; durationMs: number }
+    | { type: "tool.completed"; id: string; name: string; input: Record<string, any>; output: string; outcome: ToolExecutionOutcome; executionStarted: boolean; durationMs: number }
     | { type: "permission.checked"; id: string; name: string; input: Record<string, any>; action: PermissionAction; source: PermissionSource }
     | { type: "notice"; level: "info" | "warning"; text: string }
     | { type: "plan.mode"; enabled: boolean; path: string; permissionMode?: PermissionMode }
@@ -141,7 +172,7 @@ export type AgentEvent =
     | { type: "turn.completed"; usage: AgentUsage }
     | { type: "turn.cancel_requested" }
     | { type: "turn.cancelled" }
-    | { type: "turn.failed"; message: string };
+    | { type: "turn.failed"; message: string; category: AgentFailureCategory; retryable: boolean; safeToRetry: boolean };
 
 export interface AgentOptions {
     // These three are normally resolved by config.ts (CLI flag → config.json →
@@ -243,6 +274,7 @@ export class Agent {
     // ── Abort support ───────────────────────────────────────────
     private abortController: AbortController | null = null;
     public isProcessing = false;
+    private turnToolUseSeen = false;
 
     // ── Token usage tracking ────────────────────────────────────
     // `input` counts only uncached prompt tokens; cached ones are tracked
@@ -780,11 +812,13 @@ export class Agent {
         id: string,
         name: string,
         input: Record<string, any>,
-    ): Promise<string> {
+    ): Promise<ToolExecutionResult> {
         if (this.customToolNames && !this.customToolNames.has(name)) {
-            return Promise.resolve(`Error: tool ${name} is not available to this agent.`);
+            return Promise.resolve(toolExecutionResult(`Error: tool ${name} is not available to this agent.`, "failed"));
         }
-        if (name === "agent") return this.executeAgentTool(input);
+        if (name === "agent") {
+            return this.executeAgentTool(input).then((output) => toolExecutionResult(output, undefined, true));
+        }
         return executor.enqueue(id, name, input);
     }
 
@@ -1056,22 +1090,39 @@ export class Agent {
     }
 
     async chat(userText: string): Promise<void> {
-        // The volatile half of the context — git state, the date, which
-        // deferred tools are still unloaded — rides on the user's message
-        // rather than the system prompt. This message is new every turn, so
-        // nothing behind it is invalidated; the same bytes in the system prompt
-        // would cost a re-read of the whole conversation every time the agent
-        // wrote a file.
-        //
-        // Blocks rather than a bare string: withCacheBreakpoints attaches the
-        // tail cache breakpoint to a content block, so a string message would
-        // leave the turn with nothing to cache.
-        const reminder = buildTurnContextReminder(this.workspaceRoot);
+        return this.runTurn(userText, true);
+    }
+
+    async retryFailedTurn(userText: string): Promise<void> {
+        const last = this.messages.at(-1);
+        if (this.isProcessing || !last || (last.role !== "user" && last.role !== "assistant")) {
+            throw new Error("The failed request is no longer available for a safe retry.");
+        }
         this.messages.push({
             role: "user",
-            content: [{ type: "text", text: `${reminder}\n\n${userText}` }],
+            content: [{
+                type: "text",
+                text: `${buildTurnContextReminder(this.workspaceRoot)}\n\n<system-reminder>Continue the most recent visible user request from the existing conversation. The failed attempt did not start any tools. Continue from any partial assistant text without repeating the user request.</system-reminder>`,
+            }],
         });
         this.checkpoint();
+        return this.runTurn(userText, false);
+    }
+
+    private async runTurn(userText: string, appendUserMessage: boolean): Promise<void> {
+        this.turnToolUseSeen = false;
+        // Normal requests carry volatile context — git state, the date and
+        // deferred-tool availability — in the new user message. A safe retry
+        // preserves that visible request and adds its refreshed context to a
+        // hidden system reminder instead.
+        if (appendUserMessage) {
+            const reminder = buildTurnContextReminder(this.workspaceRoot);
+            this.messages.push({
+                role: "user",
+                content: [{ type: "text", text: `${reminder}\n\n${userText}` }],
+            });
+            this.checkpoint();
+        }
         this.emit({ type: "turn.started", userText });
         if (shouldAutoCompact(this.messages, this.contextWindow)) {
             const compactionId = randomUUID();
@@ -1092,7 +1143,13 @@ export class Agent {
             if (this.abortController.signal.aborted) this.emit({ type: "turn.cancelled" });
             else this.emit({ type: "turn.completed", usage: this.getUsage() });
         } catch (e: any) {
-            this.emit({ type: "turn.failed", message: briefApiError(e) });
+            const failure = classifyAgentFailure(e);
+            this.emit({
+                type: "turn.failed",
+                message: briefApiError(e),
+                ...failure,
+                safeToRetry: failure.retryable && !this.turnToolUseSeen,
+            });
             throw e;
         } finally {
             // Safety net: runAgentLoop can bail from several places (abort,
@@ -1293,7 +1350,7 @@ export class Agent {
                 todos: [],
             };
             const executor = new ToolExecutor(context, this.customToolNames);
-            const toolResults = new Map<string, Promise<string>>();
+            const toolResults = new Map<string, Promise<ToolExecutionResult>>();
             const toolStartTimes = new Map<string, number>();
 
             try {
@@ -1372,6 +1429,7 @@ export class Agent {
                                     checkpointPartialAssistant(false);
                                 }
                             } else if (state.type === "tool_use" && state.id && state.name) {
+                                this.turnToolUseSeen = true;
                                 const raw = state.jsonChunks.join("");
                                 let input: Record<string, any> = {};
                                 let inputError: string | null = null;
@@ -1411,9 +1469,10 @@ export class Agent {
                                 if (inputError) {
                                     // Answer with an error instead of executing, so
                                     // the model can re-issue the call correctly.
-                                    toolResults.set(state.id, Promise.resolve(
+                                    toolResults.set(state.id, Promise.resolve(toolExecutionResult(
                                         `Error: ${inputError}. Re-issue the call with the full arguments.`,
-                                    ));
+                                        "failed",
+                                    )));
                                 } else {
                                     toolResults.set(state.id, this.executeToolCall(executor, state.id, state.name, input));
                                 }
@@ -1559,10 +1618,8 @@ export class Agent {
             const resultBlocks: Anthropic.ToolResultBlockParam[] = [];
             for (const block of filtered) {
                 if (block.type !== "tool_use") continue;
-                const output = prepareToolResult(
-                    await toolResults.get(block.id)!,
-                    toolResultLimit(block.name),
-                );
+                const result = await toolResults.get(block.id)!;
+                const output = prepareToolResult(result.output, toolResultLimit(block.name));
                 const elapsed = Date.now() - (toolStartTimes.get(block.id) ?? Date.now());
                 if (!this.isSubAgent) {
                     this.emit({
@@ -1571,6 +1628,8 @@ export class Agent {
                         name: block.name,
                         input: block.input as Record<string, any>,
                         output,
+                        outcome: result.outcome,
+                        executionStarted: result.executionStarted,
                         durationMs: elapsed,
                     });
                 }

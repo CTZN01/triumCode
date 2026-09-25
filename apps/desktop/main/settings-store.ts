@@ -16,6 +16,7 @@ export class SettingsStore {
         const config = resolveConfig({});
         return {
             model: config.model,
+            modelPreset: null,
             apiBase: config.apiBase,
             protocol: config.protocol,
             auth: config.auth,
@@ -34,6 +35,7 @@ export class SettingsStore {
             return {
                 ...fallback,
                 ...(typeof parsed.model === "string" ? { model: parsed.model } : {}),
+                ...(typeof parsed.modelPreset === "string" ? { modelPreset: parsed.modelPreset } : {}),
                 ...(typeof parsed.apiBase === "string" ? { apiBase: parsed.apiBase } : {}),
                 ...(parsed.protocol === "anthropic" || parsed.protocol === "openai-chat" || parsed.protocol === "openai-responses"
                     ? { protocol: parsed.protocol } : {}),
@@ -56,12 +58,18 @@ export class SettingsStore {
     }
 
     save(settings: DesktopSettings): DesktopSettings {
+        const previous = this.current;
         this.current = { ...settings };
-        mkdirSync(dirname(this.filePath), { recursive: true });
-        const temp = `${this.filePath}.${process.pid}.tmp`;
-        writeFileSync(temp, JSON.stringify(this.current, null, 2), "utf-8");
-        try { renameSync(temp, this.filePath); }
-        catch { writeFileSync(this.filePath, JSON.stringify(this.current, null, 2), "utf-8"); }
+        try {
+            mkdirSync(dirname(this.filePath), { recursive: true });
+            const temp = `${this.filePath}.${process.pid}.tmp`;
+            writeFileSync(temp, JSON.stringify(this.current, null, 2), "utf-8");
+            try { renameSync(temp, this.filePath); }
+            catch { writeFileSync(this.filePath, JSON.stringify(this.current, null, 2), "utf-8"); }
+        } catch (error) {
+            this.current = previous;
+            throw error;
+        }
         return this.get();
     }
 }

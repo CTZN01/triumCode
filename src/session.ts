@@ -132,6 +132,9 @@ export interface SessionActivity {
     permissionDecision?: PermissionAction;
     permissionOutcome?: PermissionOutcome;
     permissionGrantRevoked?: boolean;
+    failureCategory?: "network" | "authentication" | "rate-limit" | "provider" | "internal";
+    retryable?: boolean;
+    safeToRetry?: boolean;
 }
 
 export interface DesktopUsageSnapshot {
@@ -144,6 +147,18 @@ export interface DesktopUsageSnapshot {
     cacheWrite: number;
     cacheWriteAvailable: boolean;
     contextTokens?: number;
+}
+
+/** Non-secret desktop model settings pinned to a conversation when it is created. */
+export interface DesktopSessionSettings {
+    modelPreset: string | null;
+    model: string;
+    apiBase: string;
+    protocol: "anthropic" | "openai-chat" | "openai-responses";
+    auth: "api-key" | "bearer";
+    thinking: boolean;
+    effort: string;
+    contextWindow: number;
 }
 
 export interface SessionData {
@@ -159,6 +174,8 @@ export interface SessionData {
     desktopActivities?: SessionActivity[];
     desktopUsage?: DesktopUsageSnapshot;
     desktopPermissionGrants?: SessionPermissionGrant[];
+    desktopSettings?: DesktopSessionSettings;
+    desktopWaitingFor?: "approval" | "user";
     status?: "idle" | "running" | "interrupted" | "cancelled" | "failed";
     titleSource?: "auto" | "user";
 }
@@ -172,6 +189,7 @@ export interface SessionIndex {
     title: string;
     messageCount: number;
     status?: "idle" | "running" | "interrupted" | "cancelled" | "failed";
+    desktopWaitingFor?: "approval" | "user";
     latestActivity?: Pick<SessionActivity, "id" | "title">;
 }
 
@@ -258,7 +276,12 @@ function readSessionFile(filePath: string): SessionData | null {
         const raw = JSON.parse(readFileSync(filePath, "utf-8")) as SessionData;
         if (!raw || !Array.isArray(raw.messages)) return null;
         if (raw.revision !== undefined && (!Number.isSafeInteger(raw.revision) || raw.revision < 0)) return null;
-        return { ...raw, revision: raw.revision ?? 0 };
+        return {
+            ...raw,
+            revision: raw.revision ?? 0,
+            ...(raw.desktopWaitingFor === "approval" || raw.desktopWaitingFor === "user"
+                ? { desktopWaitingFor: raw.desktopWaitingFor } : { desktopWaitingFor: undefined }),
+        };
     } catch {
         return null;
     }
@@ -551,6 +574,8 @@ export function listSessions(workspaceRoot?: string): SessionIndex[] {
                     title: raw.title ?? "untitled",
                     messageCount: raw.messages.length,
                     status: raw.status,
+                    ...(raw.desktopWaitingFor === "approval" || raw.desktopWaitingFor === "user"
+                        ? { desktopWaitingFor: raw.desktopWaitingFor } : {}),
                     ...(latestActivity && typeof latestActivity.id === "string" && typeof latestActivity.title === "string"
                         ? { latestActivity: { id: latestActivity.id, title: latestActivity.title } }
                         : {}),
@@ -652,7 +677,7 @@ export class SessionStore {
         this.workspaceRoot = resolve(workspaceRoot);
     }
 
-    create(model = ""): SessionData {
+    create(model = "", desktopSettings?: DesktopSessionSettings): SessionData {
         ensureSessionDir(this.workspaceRoot);
         pruneOldest(this.workspaceRoot);
         while (true) {
@@ -672,6 +697,7 @@ export class SessionStore {
                     titleSource: "auto",
                     status: "idle",
                     messages: [],
+                    ...(desktopSettings === undefined ? {} : { desktopSettings }),
                 };
                 atomicWrite(path, JSON.stringify(data, null, 2));
                 return data;
@@ -697,6 +723,8 @@ export class SessionStore {
         desktopActivities?: SessionActivity[],
         desktopUsage?: DesktopUsageSnapshot,
         desktopPermissionGrants?: SessionPermissionGrant[],
+        desktopSettings?: DesktopSessionSettings,
+        desktopWaitingFor?: SessionData["desktopWaitingFor"],
     ): SessionData | null {
         const path = sessionPath(id, this.workspaceRoot);
         return withSessionLock(id, path, () => {
@@ -719,6 +747,8 @@ export class SessionStore {
                 ...(desktopActivities === undefined ? {} : { desktopActivities }),
                 ...(desktopUsage === undefined ? {} : { desktopUsage }),
                 ...(desktopPermissionGrants === undefined ? {} : { desktopPermissionGrants }),
+                ...(desktopSettings === undefined ? {} : { desktopSettings }),
+                desktopWaitingFor,
             };
             atomicWrite(path, JSON.stringify(data, null, 2));
             return data;
@@ -828,6 +858,7 @@ export class SessionStore {
                         ...loaded,
                         revision: sessionRevision(loaded) + 1,
                         status: "interrupted",
+                        desktopWaitingFor: undefined,
                         updated: now,
                         ...(desktopActivities ? { desktopActivities } : {}),
                     };

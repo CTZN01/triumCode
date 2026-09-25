@@ -62,13 +62,23 @@ export class WorktreeStore {
     }
 
     add(worktree: WorktreeAssociation): void {
-        const remaining = this.state.worktrees.filter((item) => item.workspaceId !== worktree.workspaceId);
-        this.state.worktrees = [...remaining, worktree];
-        this.persist();
+        const previous = this.state;
+        const remaining = previous.worktrees.filter((item) => item.workspaceId !== worktree.workspaceId);
+        this.state = { ...previous, worktrees: [...remaining, worktree] };
+        try { this.persist(); }
+        catch (error) {
+            this.state = previous;
+            throw error;
+        }
     }
 
     remove(workspaceId: string): void {
-        this.state.worktrees = this.state.worktrees.filter((worktree) => worktree.workspaceId !== workspaceId);
-        this.persist();
+        const previous = this.state;
+        this.state = { ...previous, worktrees: previous.worktrees.filter((worktree) => worktree.workspaceId !== workspaceId) };
+        try { this.persist(); }
+        catch (error) {
+            this.state = previous;
+            throw error;
+        }
     }
 }

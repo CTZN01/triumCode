@@ -186,6 +186,7 @@ export interface ConversationMessage {
 
 export interface DesktopSettings {
     model: string;
+    modelPreset: string | null;
     apiBase: string;
     protocol: Protocol;
     auth: AuthScheme;
@@ -195,12 +196,23 @@ export interface DesktopSettings {
     maxParallelRuns: number;
 }
 
+export interface DesktopModelPreset {
+    name: string;
+    model: string;
+    apiBase?: string;
+    protocol?: Protocol;
+    auth?: AuthScheme;
+    contextWindow?: number;
+    hasApiKey: boolean;
+}
+
 export type CredentialState = "secure-key" | "cli-key-available" | "environment-key" | "missing" | "unsupported";
 
 export interface BootstrapData {
     workspaces: WorkspaceSummary[];
     activeWorkspaceId: string | null;
     settings: DesktopSettings;
+    modelPresets: DesktopModelPreset[];
     credentialState: CredentialState;
 }
 
@@ -310,15 +322,17 @@ export interface DesktopApi {
     resizeTerminal(terminalId: string, cols: number, rows: number): Promise<void>;
     closeTerminal(terminalId: string): Promise<void>;
     startRun(workspaceId: string, sessionId: string, text: string, requestId: string): Promise<{ runId: string }>;
+    retryRun(workspaceId: string, sessionId: string, requestId: string): Promise<{ runId: string }>;
     cancelRun(runId: string): Promise<void>;
     respondToPermission(requestId: string, choice: PermissionChoice): Promise<void>;
     listPermissionGrants(workspaceId: string, sessionId: string): Promise<SessionPermissionGrantSummary[]>;
     revokePermissionGrant(workspaceId: string, sessionId: string, grantId: string): Promise<boolean>;
     respondToQuestion(requestId: string, answer: string): Promise<void>;
     saveSettings(settings: DesktopSettings): Promise<DesktopSettings>;
-    saveApiKey(apiKey: string): Promise<CredentialState>;
-    importCliCredential(): Promise<CredentialState>;
-    clearApiKey(): Promise<CredentialState>;
+    getCredentialState(presetName: string | null): Promise<CredentialState>;
+    saveApiKey(apiKey: string, presetName: string | null): Promise<CredentialState>;
+    importCliCredential(presetName: string | null): Promise<CredentialState>;
+    clearApiKey(presetName: string | null): Promise<CredentialState>;
     testConnection(): Promise<{ ok: boolean; message: string }>;
     onEvent(callback: (event: DesktopEvent) => void): () => void;
     onTerminalEvent(callback: (event: TerminalEvent) => void): () => void;

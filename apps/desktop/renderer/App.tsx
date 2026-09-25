@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type KeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import type {
     BootstrapData,
     ConversationMessage,
     CredentialState,
     CodeReviewSnapshot,
     DesktopEvent,
+    DesktopModelPreset,
     DesktopSettings,
     GitSnapshot,
     OpenSessionData,
@@ -17,7 +18,7 @@ import type {
     WorktreeAssociation,
     WorkspaceSummary,
 } from "../shared/contracts.js";
-import type { AgentContextUsage, AgentEvent, AgentUsage } from "../../../src/agent.js";
+import type { AgentContextUsage, AgentEvent, AgentFailureCategory, AgentUsage } from "../../../src/agent.js";
 import type { PermissionAction, PermissionSource } from "../../../src/permissions.js";
 import type { SessionPermissionGrantSummary } from "../../../src/permissions.js";
 import { DesktopRunEventTracker } from "../../../src/desktop-events.js";
@@ -28,8 +29,66 @@ import { TerminalPanel } from "./TerminalPanel.js";
 
 type ActivityRow = SessionActivity;
 
+interface PanelWidths {
+    sidebar: number;
+    inspector: number;
+}
+
+type AppTheme = "system" | "dark" | "light";
+
+const PANEL_WIDTHS_STORAGE_KEY = "triumcode.desktop.panel-widths.v1";
+
+function fitPanelWidths(widths: PanelWidths, viewportWidth: number): PanelWidths {
+    let sidebar = Math.min(340, Math.max(200, Math.round(widths.sidebar)));
+    let inspector = Math.min(420, Math.max(230, Math.round(widths.inspector)));
+    if (viewportWidth <= 1_020) return { sidebar, inspector };
+    const minimumMainWidth = viewportWidth <= 1_190 ? 420 : 460;
+    let overflow = Math.max(0, sidebar + inspector + minimumMainWidth + 10 - viewportWidth);
+    const reduceInspector = Math.min(overflow, inspector - 230);
+    inspector -= reduceInspector;
+    overflow -= reduceInspector;
+    sidebar = Math.max(200, sidebar - overflow);
+    return { sidebar, inspector };
+}
+
+function readPanelWidths(): PanelWidths {
+    const defaults = { sidebar: 262, inspector: 294 };
+    try {
+        const saved = JSON.parse(window.localStorage.getItem(PANEL_WIDTHS_STORAGE_KEY) ?? "null") as Partial<PanelWidths> | null;
+        if (typeof saved?.sidebar !== "number" || !Number.isFinite(saved.sidebar)
+            || typeof saved.inspector !== "number" || !Number.isFinite(saved.inspector)) return defaults;
+        return fitPanelWidths(saved as PanelWidths, window.innerWidth);
+    } catch {
+        return defaults;
+    }
+}
+
+function readThemePreference(): AppTheme {
+    try {
+        const saved = JSON.parse(window.localStorage.getItem(PANEL_WIDTHS_STORAGE_KEY) ?? "null") as { theme?: unknown } | null;
+        return saved?.theme === "light" || saved?.theme === "dark" ? saved.theme : "system";
+    } catch {
+        return "system";
+    }
+}
+
 function displayError(error: unknown): string {
     return error instanceof Error ? error.message : String(error);
+}
+
+function handleTabListKeyDown(event: KeyboardEvent<HTMLDivElement>): void {
+    const tabs = [...event.currentTarget.querySelectorAll<HTMLButtonElement>("[role='tab']:not(:disabled)")];
+    const currentIndex = tabs.indexOf(document.activeElement as HTMLButtonElement);
+    let nextIndex: number;
+    if (event.key === "ArrowRight" || event.key === "ArrowDown") nextIndex = (currentIndex + 1 + tabs.length) % tabs.length;
+    else if (event.key === "ArrowLeft" || event.key === "ArrowUp") nextIndex = (currentIndex - 1 + tabs.length) % tabs.length;
+    else if (event.key === "Home") nextIndex = 0;
+    else if (event.key === "End") nextIndex = tabs.length - 1;
+    else return;
+    if (tabs.length === 0) return;
+    event.preventDefault();
+    tabs[nextIndex]?.focus();
+    tabs[nextIndex]?.click();
 }
 
 function activityTime(value?: string): string {
@@ -77,6 +136,36 @@ function permissionOutcomeLabel(outcome: SessionActivity["permissionOutcome"]): 
     if (outcome === "expired") return "审批超时，按拒绝处理";
     if (outcome === "cancelled") return "任务停止时撤销了审批";
     return null;
+}
+
+function failureCategoryLabel(category: AgentFailureCategory): string {
+    switch (category) {
+        case "network": return "网络连接问题";
+        case "authentication": return "认证失败";
+        case "rate-limit": return "服务限流";
+        case "provider": return "模型服务或协议错误";
+        default: return "Agent 内部错误";
+    }
+}
+
+function failureNextStep(category: AgentFailureCategory, retryable: boolean): string {
+    if (category === "authentication") return "检查 API 密钥和认证方式后再继续。";
+    if (category === "rate-limit") return "等待服务限流窗口结束后再继续。";
+    if (category === "provider") return retryable
+        ? "模型服务暂时不可用，稍后可恢复请求。"
+        : "检查 API 地址、模型名称和协议设置。";
+    if (category === "network") return "检查网络连接和 API 地址后，确认工作区改动再恢复请求。";
+    return retryable ? "检查工作区改动后再恢复请求。" : "查看任务活动中的错误详情，再决定下一步。";
+}
+
+function sessionStatusLabel(status: SessionSummary["status"]): string {
+    switch (status) {
+        case "running": return "运行中";
+        case "interrupted": return "意外中断";
+        case "cancelled": return "已停止";
+        case "failed": return "失败";
+        default: return "";
+    }
 }
 
 function formatTokenCount(value: number): string {
@@ -254,6 +343,7 @@ export function App() {
     const [questions, setQuestions] = useState<PendingUserQuestion[]>([]);
     const [questionDraft, setQuestionDraft] = useState("");
     const [draft, setDraft] = useState("");
+    const [retryNotice, setRetryNotice] = useState("");
     const [search, setSearch] = useState("");
     const [gitView, setGitView] = useState<{ workspaceId: string; snapshot: GitSnapshot } | null>(null);
     const [reviewView, setReviewView] = useState<{ workspaceId: string; sessionId: string; snapshot: CodeReviewSnapshot } | null>(null);
@@ -278,9 +368,16 @@ export function App() {
     const [worktreeAssociation, setWorktreeAssociation] = useState<WorktreeAssociation | null>(null);
     const [error, setError] = useState("");
     const [starting, setStarting] = useState(true);
+    const [panelWidths, setPanelWidths] = useState(readPanelWidths);
+    const [theme, setTheme] = useState<AppTheme>(readThemePreference);
+    const [systemDark, setSystemDark] = useState(() => window.matchMedia("(prefers-color-scheme: dark)").matches);
+    const resolvedTheme = theme === "system" ? (systemDark ? "dark" : "light") : theme;
     const commandModifier = /Mac|iPhone|iPad/.test(navigator.userAgent) ? "⌘" : "Ctrl";
+    const appShellRef = useRef<HTMLDivElement | null>(null);
+    const resizingPanel = useRef<"sidebar" | "inspector" | null>(null);
     const endOfMessages = useRef<HTMLDivElement | null>(null);
     const activityList = useRef<HTMLDivElement | null>(null);
+    const composerInput = useRef<HTMLTextAreaElement | null>(null);
     const activeRef = useRef({ workspaceId: "", sessionId: "" });
     const eventTracker = useMemo(() => new DesktopRunEventTracker(), []);
     const pendingStartStops = useRef(new Set<string>());
@@ -288,6 +385,74 @@ export function App() {
     const reviewRequestSequence = useRef(0);
     const taskRequestSequence = useRef(0);
     const worktreeRequestSequence = useRef(0);
+
+    useEffect(() => {
+        const timer = window.setTimeout(() => {
+            try { window.localStorage.setItem(PANEL_WIDTHS_STORAGE_KEY, JSON.stringify({ ...panelWidths, theme })); }
+            catch { /* panel width preferences are optional */ }
+        }, 180);
+        return () => window.clearTimeout(timer);
+    }, [panelWidths, theme]);
+
+    useEffect(() => {
+        document.documentElement.dataset.theme = theme;
+    }, [theme]);
+
+    useEffect(() => {
+        const preference = window.matchMedia("(prefers-color-scheme: dark)");
+        const update = (): void => setSystemDark(preference.matches);
+        preference.addEventListener("change", update);
+        return () => preference.removeEventListener("change", update);
+    }, []);
+
+    useEffect(() => {
+        const resize = (): void => setPanelWidths((current) => fitPanelWidths(current, window.innerWidth));
+        window.addEventListener("resize", resize);
+        return () => window.removeEventListener("resize", resize);
+    }, []);
+
+    const resizePanelAt = (panel: "sidebar" | "inspector", clientX: number): void => {
+        const bounds = appShellRef.current?.getBoundingClientRect();
+        if (!bounds) return;
+        setPanelWidths((current) => fitPanelWidths({
+            ...current,
+            [panel]: panel === "sidebar" ? clientX - bounds.left : bounds.right - clientX,
+        }, bounds.width));
+    };
+
+    const startPanelResize = (panel: "sidebar" | "inspector", event: ReactPointerEvent<HTMLDivElement>): void => {
+        if (event.button !== 0) return;
+        event.preventDefault();
+        resizingPanel.current = panel;
+        event.currentTarget.setPointerCapture(event.pointerId);
+    };
+
+    const movePanelResize = (panel: "sidebar" | "inspector", event: ReactPointerEvent<HTMLDivElement>): void => {
+        if (resizingPanel.current === panel) resizePanelAt(panel, event.clientX);
+    };
+
+    const finishPanelResize = (event: ReactPointerEvent<HTMLDivElement>): void => {
+        resizingPanel.current = null;
+        if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+    };
+
+    const resizePanelFromKeyboard = (panel: "sidebar" | "inspector", event: KeyboardEvent<HTMLDivElement>): void => {
+        if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+        event.preventDefault();
+        const delta = event.key === "ArrowRight" ? 12 : -12;
+        setPanelWidths((current) => fitPanelWidths({
+            ...current,
+            [panel]: current[panel] + (panel === "sidebar" ? delta : -delta),
+        }, appShellRef.current?.getBoundingClientRect().width ?? window.innerWidth));
+    };
+
+    const selectRightPanel = (panel: "activity" | "details" | "changes"): void => {
+        setRightPanel(panel);
+        if (panel === "changes" && activeWorkspace?.available) {
+            void refreshGitSnapshot(activeWorkspace.id);
+            if (activeSession) void refreshCodeReview(activeWorkspace.id, activeSession.id);
+        }
+    };
 
     const refreshTaskCenter = useCallback(async () => {
         const request = ++taskRequestSequence.current;
@@ -382,6 +547,7 @@ export function App() {
             ? current.map((item) => item.id === opened.session.id ? opened.session : item)
             : [opened.session, ...current]);
         setMessages(opened.messages);
+        setRetryNotice("");
         setActivities(opened.activities);
         setPermissionGrants(opened.permissionGrants);
         setTokenUsage(opened.usage);
@@ -418,6 +584,7 @@ export function App() {
             setReviewView(null);
             setReviewLoading(false);
             setActiveSession(null);
+            setRetryNotice("");
             setMessages([]);
             setActivities([]);
             setPermissionGrants([]);
@@ -616,9 +783,9 @@ export function App() {
                 updatedAt: timestamp,
             }));
         } else if (agentEvent.type === "tool.completed") {
-            const denied = /user denied|action denied|blocked in plan mode/i.test(agentEvent.output);
-            const cancelled = /cancel(?:led|ed)/i.test(agentEvent.output);
-            const failed = !denied && !cancelled && /^(?:Error|error executing|error running)\b/i.test(agentEvent.output);
+            const state = agentEvent.outcome === "denied" ? "denied" as const
+                : agentEvent.outcome === "cancelled" ? "interrupted" as const
+                    : agentEvent.outcome === "failed" ? "failed" as const : "complete" as const;
             setActivities((current) => {
                 const previous = current.find((activity) => activity.id === agentEvent.id);
                 const timestamp = new Date().toISOString();
@@ -627,7 +794,7 @@ export function App() {
                     id: agentEvent.id,
                     title: agentEvent.name,
                     detail: JSON.stringify(agentEvent.input, null, 2),
-                    state: denied ? "denied" as const : cancelled ? "interrupted" as const : failed ? "failed" as const : "complete" as const,
+                    state,
                     output: agentEvent.output,
                     durationMs: agentEvent.durationMs,
                     startedAt: previous?.startedAt ?? timestamp,
@@ -763,16 +930,20 @@ export function App() {
             setBusy(false);
             setRunId(null);
             setStatusLabel("请求失败");
-            setError(agentEvent.message);
+            const category = failureCategoryLabel(agentEvent.category);
+            setError(`${category}：${agentEvent.message}\n${failureNextStep(agentEvent.category, agentEvent.retryable)}`);
             setApprovals([]);
             setQuestions([]);
             setQuestionDraft("");
             const timestamp = new Date().toISOString();
             setActivities((current) => appendActivity(current, {
                 id: event.eventId,
-                title: "任务失败",
+                title: `任务失败 - ${category}`,
                 detail: agentEvent.message,
                 state: "failed",
+                failureCategory: agentEvent.category,
+                retryable: agentEvent.retryable,
+                safeToRetry: agentEvent.safeToRetry,
                 startedAt: timestamp,
                 updatedAt: timestamp,
             }));
@@ -838,6 +1009,54 @@ export function App() {
         const needle = search.trim().toLowerCase();
         return needle ? sessions.filter((session) => session.title.toLowerCase().includes(needle)) : sessions;
     }, [search, sessions]);
+    const failedPrompt = activeSession?.status === "failed"
+        ? [...messages].reverse().find((message) => message.role === "user")?.text ?? ""
+        : "";
+    const failedTurnActivity = [...activities].reverse().find((activity) => activity.failureCategory !== undefined);
+
+    const restoreFailedPrompt = () => {
+        if (!failedPrompt || draft.trim()) return;
+        setDraft(failedPrompt);
+        setRetryNotice("请求已放回输入框。发送后会作为新消息追加到本会话。失败前已完成的文件或命令操作可能仍保留；请检查活动和改动，编辑后再发送。");
+        setStatusLabel("失败请求已放回输入框");
+        window.requestAnimationFrame(() => composerInput.current?.focus());
+    };
+
+    const retryFailedPrompt = async () => {
+        if (!failedPrompt || failedTurnActivity?.safeToRetry !== true || busy || externalRun || !activeWorkspace || !activeSession) return;
+        if (!hasDesktopCredential(bootstrap?.credentialState)) {
+            setError(credentialSetupMessage(bootstrap?.credentialState ?? "missing"));
+            setSettingsOpen(true);
+            return;
+        }
+        const workspaceId = activeWorkspace.id;
+        const sessionId = activeSession.id;
+        const sessionKey = `${workspaceId}:${sessionId}`;
+        pendingStartStops.current.delete(sessionKey);
+        setRetryNotice("");
+        setBusy(true);
+        setExternalRun(false);
+        setRunId(null);
+        setStatusLabel("正在安全重试");
+        setError("");
+        try {
+            const response = await window.desktop.retryRun(workspaceId, sessionId, crypto.randomUUID());
+            const runStarted = eventTracker.begin(sessionKey, response.runId);
+            if (pendingStartStops.current.delete(sessionKey)) {
+                await window.desktop.cancelRun(response.runId);
+            } else if (runStarted && activeRef.current.workspaceId === workspaceId && activeRef.current.sessionId === sessionId) {
+                setRunId(response.runId);
+            }
+            void refreshCodeReview(workspaceId, sessionId);
+        } catch (failure) {
+            pendingStartStops.current.delete(sessionKey);
+            if (activeRef.current.workspaceId === workspaceId && activeRef.current.sessionId === sessionId) {
+                setBusy(false);
+                setStatusLabel("请求失败");
+                setError(displayError(failure));
+            }
+        }
+    };
 
     const handleChooseWorkspace = async () => {
         try {
@@ -869,6 +1088,7 @@ export function App() {
             activeRef.current = { workspaceId: activeWorkspace.id, sessionId: created.session.id };
             setActiveSession(created.session);
             setMessages([]);
+            setRetryNotice("");
             setActivities([]);
             setPermissionGrants([]);
             setTokenUsage(created.usage);
@@ -888,7 +1108,8 @@ export function App() {
     useEffect(() => {
         const onShortcut = (event: globalThis.KeyboardEvent): void => {
             if (!(event.metaKey || event.ctrlKey) || event.altKey) return;
-            if ((event.target as HTMLElement | null)?.matches("input, textarea, select, [contenteditable='true']")) return;
+            const target = event.target instanceof HTMLElement ? event.target : null;
+            if (target?.matches("input, textarea, select, [contenteditable='true']") || target?.closest("[role='dialog']")) return;
             if (event.key.toLowerCase() === "n") {
                 event.preventDefault();
                 if (!busy) void handleNewSession();
@@ -917,6 +1138,7 @@ export function App() {
         const workspaceId = activeWorkspace.id;
         const sessionId = activeSession.id;
         const sessionKey = `${workspaceId}:${sessionId}`;
+        setRetryNotice("");
         pendingStartStops.current.delete(sessionKey);
         const optimistic: ConversationMessage = { id: `user-${crypto.randomUUID()}`, role: "user", text };
         setMessages((current) => [...current, optimistic]);
@@ -1060,11 +1282,13 @@ export function App() {
 
     if (starting) return <div className="launch-screen"><div className="brand-mark"><Icon name="spark" size={22} /></div><span>正在启动 TriumCode...</span></div>;
 
-    return <div className="app-shell">
+    return <div ref={appShellRef} className={`app-shell ${activeWorkspace ? "" : "no-inspector"}`}
+        style={{ "--sidebar-width": `${panelWidths.sidebar}px`, "--inspector-width": `${panelWidths.inspector}px` } as CSSProperties}>
         <aside className="sidebar">
             <div className="brand-row"><div className="brand-mark"><Icon name="spark" size={17} /></div><span className="brand-name">TriumCode</span><span className="brand-edition">LOCAL</span></div>
             <div className="sidebar-primary">
-                <button className="new-task-button" onClick={() => void handleNewSession()} disabled={!activeWorkspace?.available}>
+                <button className="new-task-button" onClick={() => void handleNewSession()} disabled={!activeWorkspace?.available}
+                    aria-keyshortcuts={commandModifier === "⌘" ? "Meta+N" : "Control+N"}>
                     <Icon name="plus" /><span>新建会话</span><kbd>{commandModifier} N</kbd>
                 </button>
                 <div className="search-box"><Icon name="search" size={15} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索会话" /></div>
@@ -1072,16 +1296,17 @@ export function App() {
             <div className="side-scroll">
                 <section className="nav-section">
                     <div className="section-head"><span>工作区</span><div className="workspace-section-actions">
-                        <button className="icon-button small" title="新建隔离工作区" disabled={!activeWorkspace?.available} onClick={() => setWorktreeDialogOpen(true)}><Icon name="branch" size={14} /></button>
-                        <button className="icon-button small" title="打开项目文件夹" onClick={() => void handleChooseWorkspace()}><Icon name="plus" size={15} /></button>
+                        <button className="icon-button small" title="新建隔离工作区" aria-label="新建隔离工作区" disabled={!activeWorkspace?.available} onClick={() => setWorktreeDialogOpen(true)}><Icon name="branch" size={14} /></button>
+                        <button className="icon-button small" title="打开项目文件夹" aria-label="打开项目文件夹" onClick={() => void handleChooseWorkspace()}><Icon name="plus" size={15} /></button>
                     </div></div>
                     {bootstrap?.workspaces.map((workspace) => <div className={`workspace-row ${activeWorkspace?.id === workspace.id ? "selected" : ""}`} key={workspace.id}>
-                        <button className="workspace-select" onClick={() => void openWorkspace(workspace)}>
+                        <button className="workspace-select" aria-current={activeWorkspace?.id === workspace.id ? "page" : undefined} onClick={() => void openWorkspace(workspace)}>
                             <span className={`workspace-dot ${workspace.available ? "" : "missing"}`} />
                             <span className="workspace-name">{workspace.name}</span>
+                            {!workspace.available && <span className="workspace-state">不可访问</span>}
                             {workspace.branch && <span className="branch-chip">{workspace.branch}</span>}
                         </button>
-                        <button className="row-action" title="从最近项目移除" onClick={() => void removeWorkspace(workspace)}><Icon name="close" size={13} /></button>
+                        <button className="row-action" title="从最近项目移除" aria-label={`从最近项目移除工作区：${workspace.name}`} onClick={() => void removeWorkspace(workspace)}><Icon name="close" size={13} /></button>
                     </div>)}
                     {!bootstrap?.workspaces.length && <div className="side-empty">打开一个本地代码项目，开始使用 Agent。</div>}
                 </section>
@@ -1089,13 +1314,14 @@ export function App() {
                     <div className="section-head"><span>会话</span>{activeWorkspace && <button className="icon-button small" title="新建会话" onClick={() => void handleNewSession()}><Icon name="plus" size={15} /></button>}</div>
                     {!activeWorkspace && <div className="side-empty">先选择一个工作区。</div>}
                     {activeWorkspace && visibleSessions.map((session) => <div className={`session-row ${activeSession?.id === session.id ? "selected" : ""}`} key={session.id}>
-                        <button className="session-select" onClick={() => void chooseSession(session)}>
-                    <span className={`session-status ${session.status}`} />
+                        <button className="session-select" aria-current={activeSession?.id === session.id ? "page" : undefined} onClick={() => void chooseSession(session)}>
+                    <span className={`session-status ${session.status}`} aria-hidden="true" />
                             <span className="session-title">{session.title}</span>
+                            {sessionStatusLabel(session.status) && <span className={`session-state-label ${session.status}`}>{sessionStatusLabel(session.status)}</span>}
                         </button>
                         <div className="session-actions">
-                            <button className="row-action" title="重命名会话" onClick={() => void renameSession(session)}>···</button>
-                            <button className="row-action" title="删除会话" onClick={() => void deleteSession(session)}><Icon name="trash" size={13} /></button>
+                            <button className="row-action" title="重命名会话" aria-label={`重命名会话：${session.title}`} onClick={() => void renameSession(session)}>···</button>
+                            <button className="row-action" title="删除会话" aria-label={`删除会话：${session.title}`} onClick={() => void deleteSession(session)}><Icon name="trash" size={13} /></button>
                         </div>
                     </div>)}
                     {activeWorkspace && sessions.length === 0 && <div className="side-empty">此工作区还没有会话。</div>}
@@ -1103,9 +1329,16 @@ export function App() {
             </div>
             <div className="sidebar-bottom">
                 <div className="local-status"><span className="online-indicator" /><span>本地 Agent</span><span className="status-dot-separator">·</span><span>{bootstrap ? credentialLabel(bootstrap.credentialState) : ""}</span></div>
-                <button className={`settings-entry ${settingsOpen ? "active" : ""}`} onClick={() => setSettingsOpen(true)}><Icon name="settings" size={16} /><span>设置</span><span className="settings-shortcut">{commandModifier} ,</span></button>
+                <button className={`settings-entry ${settingsOpen ? "active" : ""}`} onClick={() => setSettingsOpen(true)} aria-keyshortcuts={commandModifier === "⌘" ? "Meta+," : "Control+,"}><Icon name="settings" size={16} /><span>设置</span><span className="settings-shortcut">{commandModifier} ,</span></button>
             </div>
         </aside>
+
+        <div className="column-resizer" role="separator" aria-orientation="vertical" aria-label="调整侧栏宽度"
+            aria-valuemin={200} aria-valuemax={340} aria-valuenow={panelWidths.sidebar} tabIndex={0}
+            onPointerDown={(event) => startPanelResize("sidebar", event)}
+            onPointerMove={(event) => movePanelResize("sidebar", event)}
+            onPointerUp={finishPanelResize} onPointerCancel={finishPanelResize}
+            onKeyDown={(event) => resizePanelFromKeyboard("sidebar", event)} />
 
         <main className="main-column">
             <header className="topbar">
@@ -1114,7 +1347,7 @@ export function App() {
                 </div>
                 <div className="topbar-actions">
                     {activeWorkspace?.branch && <span className="topbar-chip"><span className="git-branch-icon">⌘</span>{activeWorkspace.branch}</span>}
-                    {bootstrap && <button className="topbar-chip model-chip" onClick={() => setSettingsOpen(true)} title="打开模型设置"><span className="model-spark">✳</span>{bootstrap.settings.model}</button>}
+                    {bootstrap && <button className="topbar-chip model-chip" onClick={() => setSettingsOpen(true)} title="打开模型设置"><span className="model-spark">✳</span>{bootstrap.settings.modelPreset || bootstrap.settings.model}</button>}
                     <button className={`topbar-chip task-center-toggle ${taskCenterOpen ? "selected" : ""}`} onClick={() => setTaskCenterOpen(true)} title="查看所有工作区的任务">任务中心</button>
                     {contextUsage && <span className="topbar-chip context-meter" title={`最近请求上下文为本地估算：约 ${contextUsage.estimatedTokens.toLocaleString("en-US")} / ${contextUsage.usableTokens.toLocaleString("en-US")} tokens；模型窗口 ${contextUsage.contextWindow.toLocaleString("en-US")} tokens，估算预算预留 20,000 tokens。`}>
                         <span>上下文 {Math.round(contextUsage.utilization * 100)}%</span>
@@ -1130,7 +1363,7 @@ export function App() {
                     </span>}
                     <span className="permission-chip"><span className="shield-icon">◇</span>{permissionMode === "plan" ? "计划模式 · 仅规划" : "默认 · 逐项确认"}</span>
                     <button className={`topbar-chip terminal-toggle ${terminalOpen ? "selected" : ""}`} onClick={toggleTerminal} disabled={!terminalOpen && !activeWorkspace?.available} title={terminalOpen ? "关闭工作区终端" : "打开绑定当前工作区的 PowerShell 终端"}>终端</button>
-                    <button className={`icon-button ${rightPanel === "activity" ? "panel-selected" : ""}`} title="任务活动" onClick={() => setRightPanel(rightPanel === "activity" ? "details" : "activity")}><span className="activity-bars"><i /><i /><i /></span></button>
+                    <button className={`icon-button ${rightPanel === "activity" ? "panel-selected" : ""}`} title="任务活动" aria-label="切换任务活动面板" aria-pressed={rightPanel === "activity"} onClick={() => selectRightPanel(rightPanel === "activity" ? "details" : "activity")}><span className="activity-bars"><i /><i /><i /></span></button>
                 </div>
             </header>
 
@@ -1169,7 +1402,7 @@ export function App() {
                         {messages.map((message) => <article className={`message ${message.role}`} key={message.id}>
                             <div className="message-avatar">{message.role === "user" ? "你" : <Icon name="spark" size={14} />}</div>
                             <div className="message-content">
-                                <div className="message-meta"><span>{message.role === "user" ? "你" : "TriumCode"}</span>{message.role === "assistant" && <button className="copy-message" title="复制消息" onClick={() => void navigator.clipboard.writeText(message.text)}><Icon name="copy" size={13} /></button>}</div>
+                                <div className="message-meta"><span>{message.role === "user" ? "你" : "TriumCode"}</span>{message.role === "assistant" && <button className="copy-message" title="复制消息" aria-label="复制消息" onClick={() => void navigator.clipboard.writeText(message.text)}><Icon name="copy" size={13} /></button>}</div>
                                 {message.text ? <MessageBody text={message.text} /> : <div className="thinking-placeholder"><i /><i /><i /><span>正在准备回复</span></div>}
                             </div>
                         </article>)}
@@ -1193,19 +1426,21 @@ export function App() {
 
                 {activeSession && <form className="composer-wrap" onSubmit={(event) => void handleSend(event)}>
                     <div className={`composer ${busy ? "is-busy" : ""}`}>
-                        <textarea value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={handleComposerKey} disabled={busy || externalRun || questions.length > 0} placeholder={externalRun ? "其他进程正在运行此任务..." : questions.length ? "先回答 Agent 的问题..." : busy ? "Agent 正在工作..." : "描述你希望在这个项目中完成的任务"} rows={Math.min(4, Math.max(1, draft.split("\n").length))} />
+                        <textarea ref={composerInput} value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={handleComposerKey} disabled={busy || externalRun || questions.length > 0} placeholder={externalRun ? "其他进程正在运行此任务..." : questions.length ? "先回答 Agent 的问题..." : busy ? "Agent 正在工作..." : "描述你希望在这个项目中完成的任务"} rows={Math.min(4, Math.max(1, draft.split("\n").length))} />
                         <div className="composer-bottom"><div className="composer-hints"><span><kbd>Enter</kbd> 发送</span><span><kbd>Shift</kbd> + <kbd>Enter</kbd> 换行</span></div>
                             {busy ? <button type="button" className="stop-button" onClick={() => void handleStop()}><span className="stop-square" />停止</button> : <button type="submit" className="send-button" disabled={!draft.trim() || externalRun} title={externalRun ? "任务由另一个进程运行" : "发送消息"}><Icon name="arrow" size={17} /></button>}
                         </div>
                     </div>
-                    <div className="composer-footer"><span className="status-indicator"><i className={busy ? "pulse" : ""} />{statusLabel}</span><span>{externalRun ? "任务由另一个进程控制" : "工作区写入和程序执行需要审批"}</span></div>
+                    <div className="composer-footer"><div className="composer-status-side"><span className="status-indicator"><i className={busy ? "pulse" : ""} />{statusLabel}</span>{failedPrompt && !draft.trim() && !busy && !externalRun && <div className="retry-actions">{failedTurnActivity?.safeToRetry === true && <button type="button" className="retry-prompt-button" title="仅在失败前未发起工具操作时可用；重用原请求，不新增用户消息。" onClick={() => void retryFailedPrompt()}>安全重试</button>}<button type="button" className="retry-prompt-button" onClick={restoreFailedPrompt}>恢复请求</button></div>}</div><span>{externalRun ? "任务由另一个进程控制" : "工作区写入和程序执行需要审批"}</span></div>
+                    {retryNotice && <div className="retry-disclosure" role="status">{retryNotice}</div>}
                 </form>}
             </>}
-            {error && <div className="toast-error" role="alert"><span>{error}</span><button onClick={() => setError("")}><Icon name="close" size={14} /></button></div>}
+            {error && <div className="toast-error" role="alert"><span>{error}</span><button aria-label="关闭错误提示" onClick={() => setError("")}><Icon name="close" size={14} /></button></div>}
             {terminalOpen && terminalWorkspaceId && bootstrap && (() => {
                 const workspace = bootstrap.workspaces.find((item) => item.id === terminalWorkspaceId);
                 return workspace ? <TerminalPanel
                     key={workspace.id}
+                    theme={resolvedTheme}
                     workspaceId={workspace.id}
                     workspaceName={workspace.name}
                     workspacePath={workspace.path}
@@ -1223,8 +1458,20 @@ export function App() {
             })()}
         </main>
 
-        {activeWorkspace && <aside className="inspector">
-            <div className="inspector-tabs"><button className={rightPanel === "activity" ? "selected" : ""} onClick={() => setRightPanel("activity")}>任务活动{activities.length > 0 && <span>{activities.length}</span>}</button><button className={rightPanel === "changes" ? "selected" : ""} onClick={() => { setRightPanel("changes"); if (activeWorkspace.available) { void refreshGitSnapshot(activeWorkspace.id); if (activeSession) void refreshCodeReview(activeWorkspace.id, activeSession.id); } }}>改动{reviewView?.workspaceId === activeWorkspace.id && reviewView.sessionId === activeSession?.id && reviewView.snapshot.files.length > 0 ? <span>{reviewView.snapshot.files.length}</span> : gitView?.workspaceId === activeWorkspace.id && gitView.snapshot.isGit && gitView.snapshot.files.length > 0 && <span>{gitView.snapshot.files.length}</span>}</button><button className={rightPanel === "details" ? "selected" : ""} onClick={() => setRightPanel("details")}>会话信息</button></div>
+        <div className="column-resizer inspector-resizer" role="separator" aria-orientation="vertical" aria-label="调整右侧面板宽度"
+            aria-valuemin={230} aria-valuemax={420} aria-valuenow={panelWidths.inspector} tabIndex={0}
+            onPointerDown={(event) => startPanelResize("inspector", event)}
+            onPointerMove={(event) => movePanelResize("inspector", event)}
+            onPointerUp={finishPanelResize} onPointerCancel={finishPanelResize}
+            onKeyDown={(event) => resizePanelFromKeyboard("inspector", event)} />
+
+        {activeWorkspace && <aside className="inspector" aria-label="工作区检查面板">
+            <div className="inspector-tabs" role="tablist" aria-label="检查面板" onKeyDown={handleTabListKeyDown}>
+                <button id="inspector-tab-activity" role="tab" aria-selected={rightPanel === "activity"} aria-controls="inspector-panel-content" tabIndex={rightPanel === "activity" ? 0 : -1} className={rightPanel === "activity" ? "selected" : ""} onClick={() => selectRightPanel("activity")}>任务活动{activities.length > 0 && <span>{activities.length}</span>}</button>
+                <button id="inspector-tab-changes" role="tab" aria-selected={rightPanel === "changes"} aria-controls="inspector-panel-content" tabIndex={rightPanel === "changes" ? 0 : -1} className={rightPanel === "changes" ? "selected" : ""} onClick={() => selectRightPanel("changes")}>改动{reviewView?.workspaceId === activeWorkspace.id && reviewView.sessionId === activeSession?.id && reviewView.snapshot.files.length > 0 ? <span>{reviewView.snapshot.files.length}</span> : gitView?.workspaceId === activeWorkspace.id && gitView.snapshot.isGit && gitView.snapshot.files.length > 0 && <span>{gitView.snapshot.files.length}</span>}</button>
+                <button id="inspector-tab-details" role="tab" aria-selected={rightPanel === "details"} aria-controls="inspector-panel-content" tabIndex={rightPanel === "details" ? 0 : -1} className={rightPanel === "details" ? "selected" : ""} onClick={() => selectRightPanel("details")}>会话信息</button>
+            </div>
+            <div id="inspector-panel-content" className="inspector-panel-content" role="tabpanel" aria-labelledby={`inspector-tab-${rightPanel}`} tabIndex={0}>
             {rightPanel === "changes" ? activeWorkspace.available
                 ? <GitChangesPanel
                     workspaceId={activeWorkspace.id}
@@ -1238,7 +1485,17 @@ export function App() {
                 : <div className="git-panel-state">工作区目录不可访问，无法读取 Git 状态。</div>
                 : rightPanel === "activity" ? <div className="activity-list" ref={activityList}>
                 {activities.length === 0 ? <div className="inspector-empty"><div className="activity-empty-icon"><span /><span /><span /></div><strong>活动会显示在这里</strong><p>工具调用、运行结果和需要确认的操作会按顺序列出。</p></div> : [...activities].reverse().map((activity) => <details className={`activity-row ${activity.state}`} key={activity.id} data-activity-id={activity.id} open={activity.state === "running"}>
-                    <summary><span className="activity-state-mark">{activity.state === "complete" ? "✓" : activity.state === "denied" || activity.state === "failed" ? "×" : activity.state === "interrupted" ? "!" : activity.state === "running" ? <i /> : "·"}</span><span className="activity-title">{activity.title}</span>{activity.updatedAt && <time className="activity-time" dateTime={activity.updatedAt}>{activityTime(activity.updatedAt)}</time>}{activity.durationMs !== undefined && <span className="activity-duration">{activity.durationMs < 1000 ? `${activity.durationMs}ms` : `${(activity.durationMs / 1000).toFixed(1)}s`}</span>}</summary>
+                    <summary>
+                        <span className="activity-state-mark">{activity.state === "complete" ? "✓" : activity.state === "denied" || activity.state === "failed" ? "×" : activity.state === "interrupted" ? "!" : activity.state === "running" ? <i /> : "·"}</span>
+                        <span className="activity-title">{activity.title}</span>
+                        <span className={`activity-state-label ${activity.state}`}>{activity.state === "complete" ? "已完成"
+                            : activity.state === "denied" ? "已拒绝"
+                                : activity.state === "failed" ? "失败"
+                                    : activity.state === "interrupted" ? "已取消"
+                                        : activity.state === "running" ? "运行中" : "提示"}</span>
+                        {activity.updatedAt && <time className="activity-time" dateTime={activity.updatedAt}>{activityTime(activity.updatedAt)}</time>}
+                        {activity.durationMs !== undefined && <span className="activity-duration">{activity.durationMs < 1000 ? `${activity.durationMs}ms` : `${(activity.durationMs / 1000).toFixed(1)}s`}</span>}
+                    </summary>
                     <div className="activity-detail">
                         <pre>{activity.detail}</pre>
                         {activity.permissionSource && (
@@ -1257,7 +1514,10 @@ export function App() {
                         {activity.permissionGrantRevoked && (
                             <div className="activity-policy outcome"><span>授权状态</span><strong>已撤销，不再放行后续匹配操作</strong></div>
                         )}
-                        {activity.output && <div className="activity-output"><span>结果</span><pre>{activity.output}</pre></div>}
+                        {activity.output && <div className="activity-output">
+                            <div className="activity-output-heading"><span>结果</span><button type="button" className="activity-copy" title="复制当前结果" aria-label="复制当前结果" onClick={() => void navigator.clipboard.writeText(activity.output!)}><Icon name="copy" size={12} /></button></div>
+                            <pre>{activity.output}</pre>
+                        </div>}
                     </div>
                 </details>)}
             </div> : <div className="details-panel">
@@ -1267,7 +1527,7 @@ export function App() {
                 }}>打开源工作区</button></div>}
                 <div className="detail-card"><span className="detail-label">工作区</span><strong>{activeWorkspace.name}</strong><code>{activeWorkspace.path}</code></div>
                 <div className="detail-card"><span className="detail-label">当前分支</span><strong>{activeWorkspace.branch || "非 Git 项目"}</strong></div>
-                <div className="detail-card"><span className="detail-label">模型</span><strong>{bootstrap?.settings.model || "未配置"}</strong><small>{bootstrap?.settings.protocol || ""}</small></div>
+                <div className="detail-card"><span className="detail-label">模型</span><strong>{bootstrap?.settings.modelPreset || bootstrap?.settings.model || "未配置"}</strong><small>{bootstrap ? `${bootstrap.settings.model} · ${bootstrap.settings.protocol}` : ""}</small></div>
                 <div className="detail-card"><span className="detail-label">权限模式</span><strong>{permissionMode === "plan" ? "计划模式" : "默认 - 逐项确认"}</strong><small>{permissionMode === "plan" ? "仅允许读取、提问和写计划文件。" : "读取自动允许；文件写入和命令执行需审批。"}</small></div>
                 <div className="detail-card grant-card"><span className="detail-label">本会话授权</span>{permissionGrants.length === 0
                     ? <small>当前没有本会话授权。</small>
@@ -1282,28 +1542,23 @@ export function App() {
                         : activeSession?.status === "failed" ? "上次请求失败" : statusLabel}</strong></div>
                 <button className="settings-inline" onClick={() => setSettingsOpen(true)}><Icon name="settings" size={15} />打开模型与连接设置<Icon name="arrow" size={14} /></button>
             </div>}
+            </div>
             <div className="inspector-footer"><span className="privacy-dot" />本地运行 · 不向 TriumCode 上传代码</div>
         </aside>}
 
         {settingsOpen && bootstrap && <SettingsDialog
             settings={bootstrap.settings}
+            modelPresets={bootstrap.modelPresets}
             credentialState={bootstrap.credentialState}
+            theme={theme}
             onClose={() => setSettingsOpen(false)}
+            onThemeChanged={setTheme}
             onSettingsSaved={(settings) => {
                 setBootstrap((current) => current ? { ...current, settings } : current);
-                setContextUsage((current) => {
-                    if (!current) return null;
-                    const usableTokens = Math.max(1, settings.contextWindow - 20_000);
-                    return {
-                        ...current,
-                        contextWindow: settings.contextWindow,
-                        usableTokens,
-                        remainingTokens: Math.max(0, usableTokens - current.estimatedTokens),
-                        utilization: current.estimatedTokens / usableTokens,
-                    };
-                });
+                void window.desktop.getBootstrap().then(setBootstrap).catch(() => undefined);
             }}
-            onCredentialChanged={(credentialState) => setBootstrap((current) => current ? { ...current, credentialState } : current)}
+            onCredentialChanged={(credentialState, presetName) => setBootstrap((current) => current
+                && current.settings.modelPreset === presetName ? { ...current, credentialState } : current)}
             onError={setError}
         />}
         {taskCenterOpen && <TaskCenterDialog
@@ -1351,17 +1606,23 @@ export function App() {
 
 function SettingsDialog({
     settings,
+    modelPresets,
     credentialState,
+    theme,
     onClose,
+    onThemeChanged,
     onSettingsSaved,
     onCredentialChanged,
     onError,
 }: {
     settings: DesktopSettings;
+    modelPresets: DesktopModelPreset[];
     credentialState: CredentialState;
+    theme: AppTheme;
     onClose: () => void;
+    onThemeChanged: (theme: AppTheme) => void;
     onSettingsSaved: (settings: DesktopSettings) => void;
-    onCredentialChanged: (state: CredentialState) => void;
+    onCredentialChanged: (state: CredentialState, presetName: string | null) => void;
     onError: (message: string) => void;
 }) {
     const [form, setForm] = useState(settings);
@@ -1371,8 +1632,60 @@ function SettingsDialog({
     const [testResult, setTestResult] = useState("");
     const [testSucceeded, setTestSucceeded] = useState(false);
     const [saved, setSaved] = useState(false);
+    const [routeCredentialState, setRouteCredentialState] = useState(credentialState);
+    const credentialLookup = useRef(0);
+    const dialogRef = useRef<HTMLElement | null>(null);
+    const previousFocus = useRef<HTMLElement | null>(null);
 
-    const update = <K extends keyof DesktopSettings>(field: K, value: DesktopSettings[K]) => setForm((current) => ({ ...current, [field]: value }));
+    useEffect(() => {
+        previousFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+        dialogRef.current?.querySelector<HTMLElement>("select, input, button")?.focus();
+        return () => previousFocus.current?.focus();
+    }, []);
+
+    const refreshCredentialState = async (presetName: string | null) => {
+        const lookup = ++credentialLookup.current;
+        try {
+            const state = await window.desktop.getCredentialState(presetName);
+            if (lookup === credentialLookup.current) setRouteCredentialState(state);
+        } catch (failure) { onError(displayError(failure)); }
+    };
+
+    useEffect(() => {
+        if (form.modelPreset === settings.modelPreset) setRouteCredentialState(credentialState);
+    }, [credentialState, form.modelPreset, settings.modelPreset]);
+
+    const update = <K extends keyof DesktopSettings>(field: K, value: DesktopSettings[K]) => {
+        const clearsPreset = ["model", "apiBase", "protocol", "auth"].includes(field);
+        setForm((current) => ({
+            ...current,
+            [field]: value,
+            ...(clearsPreset ? { modelPreset: null } : {}),
+        }));
+        if (clearsPreset && form.modelPreset !== null) void refreshCredentialState(null);
+    };
+    const chooseModelPreset = (name: string) => {
+        if (!name) {
+            update("modelPreset", null);
+            void refreshCredentialState(null);
+            return;
+        }
+        const preset = modelPresets.find((item) => item.name === name);
+        if (!preset) return;
+        setForm((current) => ({
+            ...current,
+            modelPreset: preset.name,
+            model: preset.model,
+            apiBase: preset.apiBase ?? current.apiBase,
+            protocol: preset.protocol ?? current.protocol,
+            auth: preset.auth ?? current.auth,
+            contextWindow: preset.contextWindow ?? current.contextWindow,
+        }));
+        setSaved(false);
+        setTestResult("");
+        setTestSucceeded(false);
+        void refreshCredentialState(preset.name);
+    };
     const saveSettings = async (event: FormEvent) => {
         event.preventDefault();
         setSaving(true);
@@ -1380,6 +1693,7 @@ function SettingsDialog({
             const result = await window.desktop.saveSettings(form);
             setForm(result);
             onSettingsSaved(result);
+            void refreshCredentialState(result.modelPreset);
             setSaved(true);
             setTestResult("");
         } catch (failure) { onError(displayError(failure)); }
@@ -1389,8 +1703,9 @@ function SettingsDialog({
         setTesting(true);
         setTestResult("");
         try {
-            await window.desktop.saveSettings(form);
-            onSettingsSaved(form);
+            const settings = await window.desktop.saveSettings(form);
+            setForm(settings);
+            onSettingsSaved(settings);
             const result = await window.desktop.testConnection();
             setTestResult(result.message);
             setTestSucceeded(result.ok);
@@ -1402,26 +1717,55 @@ function SettingsDialog({
     const saveKey = async () => {
         if (!key.trim()) return;
         try {
-            const state = await window.desktop.saveApiKey(key);
+            const state = await window.desktop.saveApiKey(key, form.modelPreset);
             setKey("");
-            onCredentialChanged(state);
+            setRouteCredentialState(state);
+            onCredentialChanged(state, form.modelPreset);
             setSaved(false);
         } catch (failure) { onError(displayError(failure)); }
     };
     const importCliKey = async () => {
-        try { onCredentialChanged(await window.desktop.importCliCredential()); }
+        try {
+            const state = await window.desktop.importCliCredential(form.modelPreset);
+            setRouteCredentialState(state);
+            onCredentialChanged(state, form.modelPreset);
+        }
         catch (failure) { onError(displayError(failure)); }
     };
     const clearKey = async () => {
-        try { onCredentialChanged(await window.desktop.clearApiKey()); }
+        try {
+            const state = await window.desktop.clearApiKey(form.modelPreset);
+            setRouteCredentialState(state);
+            onCredentialChanged(state, form.modelPreset);
+        }
         catch (failure) { onError(displayError(failure)); }
     };
 
     return <div className="modal-scrim" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-        <section className="settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+        <section ref={dialogRef} className="settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title" tabIndex={-1}
+            onKeyDown={(event) => {
+                if (event.key === "Escape") { event.stopPropagation(); onClose(); return; }
+                if (event.key !== "Tab") return;
+                const focusable = [...(dialogRef.current?.querySelectorAll<HTMLElement>("a[href], button:not(:disabled), input:not(:disabled):not([type='hidden']), select:not(:disabled), textarea:not(:disabled), summary, [tabindex]:not([tabindex='-1'])") ?? [])]
+                    .filter((element) => element.getClientRects().length > 0);
+                const first = focusable[0];
+                const last = focusable.at(-1);
+                const activeIndex = focusable.indexOf(document.activeElement as HTMLElement);
+                if (!first) { event.preventDefault(); dialogRef.current?.focus(); }
+                else if (activeIndex < 0) { event.preventDefault(); (event.shiftKey ? last : first)?.focus(); }
+                else if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+                else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+            }}>
             <div className="settings-heading"><div><div className="eyebrow">PREFERENCES</div><h2 id="settings-title">模型与连接</h2><p>设置只保存在这台设备上。密钥通过系统安全存储保护。</p></div><button className="icon-button" onClick={onClose} aria-label="关闭设置"><Icon name="close" /></button></div>
             <form onSubmit={(event) => void saveSettings(event)}>
                 <div className="settings-form-grid">
+                    <label className="field wide"><span>外观主题</span><select value={theme} onChange={(event) => onThemeChanged(event.target.value as AppTheme)}><option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option></select><small className="field-help">跟随系统会在系统外观变化时自动切换。偏好只保存在这台设备上。</small></label>
+                    <label className="field wide"><span>命名模型预设</span><select value={form.modelPreset ?? ""} onChange={(event) => chooseModelPreset(event.target.value)} disabled={modelPresets.length === 0}><option value="">自定义配置</option>{modelPresets.map((preset) => <option key={preset.name} value={preset.name}>{preset.name}</option>)}</select>
+                        <small className="field-help">{modelPresets.find((preset) => preset.name === form.modelPreset)?.hasApiKey
+                            ? "此预设在 CLI 配置中包含 API Key。保存设置后会通过系统安全存储保存到此预设专属槽位。手动输入的密钥也只绑定当前预设。"
+                            : modelPresets.length === 0 ? "未找到 CLI 命名预设。可在 ~/.triumcode/config.json 的 models 字段中配置。"
+                                : "预设来自 CLI 配置；手动修改模型路由字段后会切换为自定义配置。"}</small>
+                    </label>
                     <label className="field wide"><span>API 协议</span><select value={form.protocol} onChange={(event) => update("protocol", event.target.value as DesktopSettings["protocol"])}><option value="anthropic">Anthropic Messages</option><option value="openai-chat">OpenAI Chat Completions</option><option value="openai-responses">OpenAI Responses</option></select></label>
                     <label className="field wide"><span>模型名称</span><input value={form.model} onChange={(event) => update("model", event.target.value)} placeholder="例如 claude-sonnet-4-20250514" maxLength={200} /></label>
                     <label className="field wide"><span>API Base URL</span><input value={form.apiBase} onChange={(event) => update("apiBase", event.target.value)} placeholder="https://api.anthropic.com" maxLength={2000} /></label>
@@ -1432,9 +1776,9 @@ function SettingsDialog({
                     <label className="toggle-row"><input type="checkbox" checked={form.thinking} onChange={(event) => update("thinking", event.target.checked)} /><span><strong>启用扩展思考</strong><small>支持时向模型发送思考深度参数。</small></span></label>
                 </div>
                 <div className="settings-divider" />
-                <div className="credential-header"><div><strong>API 密钥</strong><small>{credentialLabel(credentialState)}</small></div>{credentialState === "secure-key" && <button type="button" className="text-button danger-text" onClick={() => void clearKey()}>删除</button>}</div>
-                <div className="key-entry"><input type="password" autoComplete="new-password" value={key} onChange={(event) => setKey(event.target.value)} placeholder={credentialState === "secure-key" ? "已设置密钥，可输入新密钥替换" : "粘贴 API 密钥"} maxLength={10000} /><button type="button" className="secondary-button compact" disabled={!key.trim()} onClick={() => void saveKey()}>安全保存</button></div>
-                {credentialState === "cli-key-available" && <button type="button" className="text-button import-key" onClick={() => void importCliKey()}>从现有 CLI 配置安全导入密钥</button>}
+                <div className="credential-header"><div><strong>API 密钥</strong><small>{credentialLabel(routeCredentialState)}</small></div>{routeCredentialState === "secure-key" && <button type="button" className="text-button danger-text" onClick={() => void clearKey()}>删除</button>}</div>
+                <div className="key-entry"><input type="password" autoComplete="new-password" value={key} onChange={(event) => setKey(event.target.value)} placeholder={routeCredentialState === "secure-key" ? "此路由已设置密钥，可输入新密钥替换" : "粘贴 API 密钥"} maxLength={10000} /><button type="button" className="secondary-button compact" disabled={!key.trim()} onClick={() => void saveKey()}>安全保存</button></div>
+                {routeCredentialState === "cli-key-available" && <button type="button" className="text-button import-key" onClick={() => void importCliKey()}>从现有 CLI 配置安全导入密钥</button>}
                 <div className="settings-footer">
                     <div className={`test-result ${testResult ? (testSucceeded ? "success" : "failure") : ""}`}>{testResult || "连接测试会发送一条很短的请求，并可能产生少量模型费用。"}</div>
                     <div className="settings-actions"><button type="button" className="secondary-button" disabled={testing} onClick={() => void testConnection()}>{testing ? "正在测试..." : "测试连接"}</button><button className="primary-button" disabled={saving}>{saving ? "保存中..." : saved ? "已保存" : "保存设置"}</button></div>

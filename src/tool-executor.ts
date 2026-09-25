@@ -10,7 +10,7 @@ interface PendingItem {
     name: string;
     input: Record<string, any>;
     isConcurrencySafe: boolean;
-    resolve: (result: string) => void;
+    resolve: (result: ToolExecutionResult) => void;
 }
 
 // A tool that is currently executing.
@@ -18,6 +18,28 @@ interface ExecutingItem {
     id: string;
     name: string;
     isConcurrencySafe: boolean;
+}
+
+export type ToolExecutionOutcome = "complete" | "failed" | "denied" | "cancelled";
+
+export interface ToolExecutionResult {
+    output: string;
+    outcome: ToolExecutionOutcome;
+    executionStarted: boolean;
+}
+
+function legacyToolOutcome(output: string): ToolExecutionOutcome {
+    return /^Error\b|^Sub-agent error:|^timed out after \d+s|^Too many matches \(over 8MB\)/i.test(output)
+        ? "failed"
+        : "complete";
+}
+
+export function toolExecutionResult(
+    output: string,
+    outcome: ToolExecutionOutcome = legacyToolOutcome(output),
+    executionStarted = false,
+): ToolExecutionResult {
+    return { output, outcome, executionStarted };
 }
 
 // ─── Concurrency rules ──────────────────────────────────────
@@ -57,22 +79,24 @@ export class ToolExecutor {
         this.context = context;
         this.allowedTools = allowedTools;
         context.signal?.addEventListener("abort", () => {
-            for (const item of this.pending.splice(0)) item.resolve("Cancelled before the tool started.");
+            for (const item of this.pending.splice(0)) {
+                item.resolve(toolExecutionResult("Cancelled before the tool started.", "cancelled"));
+            }
         }, { once: true });
     }
 
     // Enqueue a completed tool_use block for execution. Returns a promise that
-    // resolves with the tool's output string once execution finishes. The caller
+    // resolves with the tool's output and structured outcome once execution finishes. The caller
     // does NOT need to await this immediately — it will resolve whenever the
     // executor gets to it.
     enqueue(
         id: string,
         name: string,
         input: Record<string, any>,
-    ): Promise<string> {
-        if (this.context.signal?.aborted) return Promise.resolve("Cancelled before the tool started.");
+    ): Promise<ToolExecutionResult> {
+        if (this.context.signal?.aborted) return Promise.resolve(toolExecutionResult("Cancelled before the tool started.", "cancelled"));
         if (this.allowedTools && !this.allowedTools.has(name)) {
-            return Promise.resolve(`Error: tool ${name} is not available to this agent.`);
+            return Promise.resolve(toolExecutionResult(`Error: tool ${name} is not available to this agent.`, "failed"));
         }
 
         const tool = getTool(name);
@@ -89,31 +113,35 @@ export class ToolExecutor {
             .filter((key): key is string => typeof key === "string")
             .filter((key) => input[key] === undefined);
         if (missing.length > 0) {
-            return Promise.resolve(
+            return Promise.resolve(toolExecutionResult(
                 `Error: missing required argument${missing.length > 1 ? "s" : ""} for ${name}: `
                 + `${missing.join(", ")}. Re-issue the call with every required argument.`,
-            );
+                "failed",
+            ));
         }
 
         const permission = this.context.permissionPolicy?.check(name, input);
         if (permission) this.context.onPermissionDecision?.(permission, id, name, input);
         if (permission?.action === "deny") {
-            return Promise.resolve(`Action denied: ${permission.message}`);
+            return Promise.resolve(toolExecutionResult(`Action denied: ${permission.message}`, "denied"));
         }
         if (permission?.action === "confirm") {
             const confirmPermission = this.context.confirmPermission;
             if (!confirmPermission) {
-                return Promise.resolve(`Action denied: confirmation is unavailable for ${permission.message ?? name}`);
+                return Promise.resolve(toolExecutionResult(
+                    `Action denied: confirmation is unavailable for ${permission.message ?? name}`,
+                    "denied",
+                ));
             }
-            return new Promise<string>((resolve) => {
+            return new Promise<ToolExecutionResult>((resolve) => {
                 let settled = false;
-                const finish = (result: string): void => {
+                const finish = (result: ToolExecutionResult): void => {
                     if (settled) return;
                     settled = true;
                     this.context.signal?.removeEventListener("abort", onAbort);
                     resolve(result);
                 };
-                const onAbort = (): void => finish("Cancelled before the tool started.");
+                const onAbort = (): void => finish(toolExecutionResult("Cancelled before the tool started.", "cancelled"));
                 this.context.signal?.addEventListener("abort", onAbort, { once: true });
                 if (this.context.signal?.aborted) {
                     onAbort();
@@ -129,7 +157,7 @@ export class ToolExecutor {
                 }).then((grant) => {
                     if (settled) return;
                     if (!grant) {
-                        finish("User denied this action.");
+                        finish(toolExecutionResult("User denied this action.", "denied"));
                         return;
                     }
                     if (permission.key && grant !== "once") {
@@ -140,7 +168,7 @@ export class ToolExecutor {
                     this.enqueueAllowed(id, name, input, tool).then(finish);
                 }).catch((error: unknown) => {
                     const message = error instanceof Error ? error.message : String(error);
-                    finish(`Error requesting permission: ${message}`);
+                    finish(toolExecutionResult(`Error requesting permission: ${message}`, "failed"));
                 });
             });
         }
@@ -153,12 +181,12 @@ export class ToolExecutor {
         name: string,
         input: Record<string, any>,
         tool: ReturnType<typeof getTool>,
-    ): Promise<string> {
-        if (this.context.signal?.aborted) return Promise.resolve("Cancelled before the tool started.");
+    ): Promise<ToolExecutionResult> {
+        if (this.context.signal?.aborted) return Promise.resolve(toolExecutionResult("Cancelled before the tool started.", "cancelled"));
         // Look up the tool and use its input-aware safety classification.
         const isConcurrencySafe_ = tool?.isConcurrencySafe(input) ?? false;
 
-        return new Promise<string>((resolve) => {
+        return new Promise<ToolExecutionResult>((resolve) => {
             this.pending.push({ id, name, input, isConcurrencySafe: isConcurrencySafe_, resolve });
             this.dispatch();
         });
@@ -195,14 +223,16 @@ export class ToolExecutor {
         const tool = getTool(item.name);
         const exec = tool
             ? tool.call(item.input, this.context)
-            : Promise.resolve(`Unknown tool: ${item.name}`);
+            : Promise.resolve(`Error: unknown tool: ${item.name}`);
 
         exec
             .then((result) => {
-                item.resolve(result);
+                item.resolve(this.context.signal?.aborted
+                    ? toolExecutionResult(result, "cancelled", true)
+                    : toolExecutionResult(result, undefined, true));
             })
             .catch((err: any) => {
-                item.resolve(`Error executing ${item.name}: ${err.message ?? err}`);
+                item.resolve(toolExecutionResult(`Error executing ${item.name}: ${err.message ?? err}`, "failed", true));
             })
             .finally(() => {
                 this.executing.delete(item.id);

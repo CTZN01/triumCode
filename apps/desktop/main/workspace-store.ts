@@ -108,28 +108,49 @@ export class WorkspaceStore {
         const id = workspaceId(canonicalPath);
         const lastOpened = new Date().toISOString();
         const retained = this.state.workspaces.filter((item) => item.id !== id);
+        const previous = this.state;
         this.state = {
             activeWorkspaceId: id,
             workspaces: [{ id, path: canonicalPath, lastOpened }, ...retained].slice(0, 24),
         };
-        this.persist();
+        try { this.persist(); }
+        catch (error) {
+            this.state = previous;
+            throw error;
+        }
         return this.describe({ id, path: canonicalPath, lastOpened });
     }
 
     activate(id: string): WorkspaceSummary {
         const path = this.getPath(id);
+        const previous = this.state;
+        this.state = {
+            activeWorkspaceId: previous.activeWorkspaceId,
+            workspaces: previous.workspaces.map((item) => ({ ...item })),
+        };
         const entry = this.state.workspaces.find((item) => item.id === id)!;
         entry.path = path;
         entry.lastOpened = new Date().toISOString();
         this.state.activeWorkspaceId = id;
-        this.persist();
+        try { this.persist(); }
+        catch (error) {
+            this.state = previous;
+            throw error;
+        }
         return this.describe(entry);
     }
 
     remove(id: string): void {
-        this.state.workspaces = this.state.workspaces.filter((item) => item.id !== id);
-        if (this.state.activeWorkspaceId === id) this.state.activeWorkspaceId = null;
-        this.persist();
+        const previous = this.state;
+        this.state = {
+            activeWorkspaceId: previous.activeWorkspaceId === id ? null : previous.activeWorkspaceId,
+            workspaces: previous.workspaces.filter((item) => item.id !== id),
+        };
+        try { this.persist(); }
+        catch (error) {
+            this.state = previous;
+            throw error;
+        }
     }
 
     private describe(entry: StoredWorkspace, includeBranch = true): WorkspaceSummary {

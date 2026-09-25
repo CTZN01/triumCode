@@ -1,0 +1,6 @@
+{
+  "version": "0.1.0-preview.3",
+  "platform": "win-x64",
+  "electronVersion": "44.4.5",
+  "channel": "preview"
+}

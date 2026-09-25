@@ -34,10 +34,39 @@ the repository's local Git hooks.
 The global task center aggregates recent tasks across saved workspaces, supports
 search and jumps to a session's latest activity, and can stop runs owned by the
 current desktop process. Tasks owned by another CLI or desktop process can only
-be viewed and refreshed here.
+be viewed and refreshed here; their persisted state distinguishes waiting for
+approval or a user answer from active work without allowing this window to
+resolve or stop a run it does not own.
 The desktop settings page controls the concurrent-run limit (1–8, default 3).
 When the limit is reached, the draft stays in the composer and the app explains
 that a running task must finish before retrying.
+Named model presets from the CLI config can be selected in desktop settings.
+Each preset and the custom route has its own protected API key slot. A
+conversation keeps the model route and reasoning settings it was created with,
+so changing preferences applies to new conversations without silently moving an
+existing one to another provider. The saved route snapshot never contains an
+API key.
+The desktop restores the main window's size and position and panel widths. Its
+neutral light and dark themes follow the system appearance by default, including
+changes while the app is open; you can also choose either theme in Settings. Drag
+either vertical divider to resize the workspace sidebar or
+inspector; keyboard users can focus a divider and adjust it with the arrow keys.
+Common actions expose the visible `Ctrl+N` / `Ctrl+,` shortcuts on Windows and
+their `Command` equivalents on macOS. Inspector and review tabs support arrow,
+Home, and End navigation; dialogs keep keyboard focus inside, restore it when
+closed, and close with Escape. Approval actions, file selection, and collapsible
+diff hunks remain reachable by keyboard and expose their selected or status
+labels to assistive technology.
+For a failed task, the last request can be restored to the composer for review
+and editing. Sending it appends a new user message; the app does not replay the
+failed run automatically because completed file and command side effects may
+remain in the workspace.
+Turn failures identify network, authentication, rate-limit, provider/protocol,
+or internal errors and suggest the next configuration or recovery step. A safe
+retry is available only when a transient failure happened before any tool was
+started; it reuses the existing request without adding another visible user
+message. After a tool starts, review the workspace and restore the request as a
+new message instead.
 The workspace sidebar can create an isolated Git worktree from a selected
 branch or commit. If the source workspace has uncommitted changes, the user must
 confirm that those changes will not be copied. The worktree review dialog shows
@@ -46,6 +75,9 @@ original source branch, and directs conflict resolution to the source terminal.
 Removing a worktree is blocked while it has uncommitted changes; its branch is
 kept by default, and Git must confirm a branch is merged before it can be
 deleted. Runtime acceptance is still outstanding.
+If saving the desktop worktree association fails after Git creates the worktree,
+the app attempts to remove the empty worktree and restore the source workspace;
+if cleanup cannot finish, the error identifies the path and branch to recover.
 Command approvals explain that programs can still access files outside the
 workspace or use the network; approval is not an OS-level sandbox.
 While the review panel is open, workspace file changes refresh its Git and
@@ -59,15 +91,34 @@ cannot be fully attributed. Review snapshots stay in Electron's
 local user-data folder and retain up to 20 completed runs per workspace. Files
 over 2 MiB or snapshots over 8 MiB per run may be excluded from restore. This
 is not a complete desktop MVP: runtime and recovery acceptance, an OS-level
-process sandbox, and an installer are still outstanding.
+process sandbox, a signed installer, and an update path are still outstanding.
+Delivery is prioritized as a Windows x64 portable preview, followed by the
+reliability, task workflow, trust, and supported-release milestones in the
+[desktop roadmap](docs/desktop-roadmap.md). Task center, concurrent runs,
+worktrees, and Git write actions in the preview branch remain experimental
+until Windows and multi-process acceptance is recorded. The full requirements
+remain in the [desktop product specification](docs/desktop-plan.md).
 
-Desktop development requires Node.js 20.19 or later:
+Desktop dependency installation, development, and packaging require Node.js
+22.12 or later. The CLI continues to support Node.js 20:
 
 ```bash
 npm run desktop:dev
 npm run desktop:build
 npm run desktop:preview
+npm run desktop:package # creates a Windows x64 portable zip under out/desktop-release
 ```
+
+The portable app does not need Node.js at runtime. It supports Windows x64 only
+and currently has no installer, code signing, or automatic updates. Packaging
+downloads locked production dependencies. Extract the archive and run
+`TriumCode.exe`. Removing the extracted folder does not remove desktop settings,
+credentials, or project sessions from `%APPDATA%`.
+
+For a fresh development checkout, install dependencies with Node.js 22.12 or
+later, then run `npm run desktop:setup` once to download the matching Electron
+runtime. `npm run desktop:dev` also checks and installs that runtime before
+opening the app.
 
 The CLI commands above remain available. Existing CLI credentials are not
 copied automatically; the desktop settings page can import them into the
@@ -76,7 +127,9 @@ the renderer. If no credential is ready, the desktop points to setup and keeps
 the draft without starting a request. Desktop settings and workspace recents live in Electron's local
 user-data folder; conversation files stay in the existing local TriumCode
 session store, including a bounded history of desktop tool and sub-agent
-activity that remains visible when a conversation is reopened. Session grants
+activity that remains visible when a conversation is reopened. Tool activity
+shows explicit completed, failed, denied, or cancelled states alongside its
+result, which can be copied from the activity panel. Session grants
 you explicitly approve are saved with that conversation and remain active
 after restart; only an exact tool call with matching parameters is allowed.
 You can revoke a grant from conversation details. Revocation blocks future
