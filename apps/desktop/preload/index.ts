@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from "electron";
-import type { DesktopApi, DesktopEvent, TerminalEvent, WorkspaceChangedEvent } from "../shared/contracts.js";
+import type { DesktopApi, DesktopDialogRequest, DesktopEvent, TerminalEvent, WorkspaceChangedEvent } from "../shared/contracts.js";
 
 const api: DesktopApi = {
     getBootstrap: () => ipcRenderer.invoke("desktop:bootstrap"),
@@ -19,6 +19,8 @@ const api: DesktopApi = {
     openSession: (workspaceId, sessionId) => ipcRenderer.invoke("desktop:open-session", workspaceId, sessionId),
     updateSessionRoute: (workspaceId, sessionId, modelPreset, effort) => ipcRenderer.invoke("desktop:session-route", workspaceId, sessionId, modelPreset, effort),
     updatePermissionMode: (workspaceId, sessionId, mode) => ipcRenderer.invoke("desktop:permission-mode", workspaceId, sessionId, mode),
+    toggleWindowMaximize: () => ipcRenderer.invoke("desktop:toggle-window-maximize"),
+    setTitleBarOverlay: (theme) => ipcRenderer.invoke("desktop:set-titlebar-overlay", theme),
     renameSession: (workspaceId, sessionId, title) => ipcRenderer.invoke("desktop:rename-session", workspaceId, sessionId, title),
     deleteSession: (workspaceId, sessionId) => ipcRenderer.invoke("desktop:delete-session", workspaceId, sessionId),
     getGitSnapshot: (workspaceId) => ipcRenderer.invoke("desktop:git-snapshot", workspaceId),
@@ -67,6 +69,12 @@ const api: DesktopApi = {
         ipcRenderer.on("desktop:workspace-changed", listener);
         return () => ipcRenderer.removeListener("desktop:workspace-changed", listener);
     },
+    onDialogRequest: (callback) => {
+        const listener = (_event: Electron.IpcRendererEvent, payload: DesktopDialogRequest): void => callback(payload);
+        ipcRenderer.on("desktop:dialog-request", listener);
+        return () => ipcRenderer.removeListener("desktop:dialog-request", listener);
+    },
+    respondDialog: (id, accepted) => ipcRenderer.invoke("desktop:dialog-response", id, accepted),
 };
 
 contextBridge.exposeInMainWorld("desktop", api);

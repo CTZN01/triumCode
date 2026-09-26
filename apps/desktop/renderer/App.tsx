@@ -42,7 +42,7 @@ const PANEL_WIDTHS_STORAGE_KEY = "triumcode.desktop.panel-widths.v1";
 
 function fitPanelWidths(widths: PanelWidths, viewportWidth: number): PanelWidths {
     let sidebar = Math.min(340, Math.max(200, Math.round(widths.sidebar)));
-    let inspector = Math.min(420, Math.max(230, Math.round(widths.inspector)));
+    let inspector = Math.min(720, Math.max(230, Math.round(widths.inspector)));
     if (viewportWidth <= 1_020) return { sidebar, inspector };
     const minimumMainWidth = viewportWidth <= 1_190 ? 420 : 460;
     let overflow = Math.max(0, sidebar + inspector + minimumMainWidth + 10 - viewportWidth);
@@ -320,7 +320,7 @@ function MessageBody({ text }: { text: string }) {
     })}</div>;
 }
 
-function Icon({ name, size = 16 }: { name: "plus" | "folder" | "settings" | "search" | "more" | "close" | "trash" | "copy" | "arrow" | "spark" | "chevron" | "branch"; size?: number }) {
+function Icon({ name, size = 16 }: { name: "plus" | "folder" | "settings" | "search" | "more" | "close" | "trash" | "copy" | "arrow" | "spark" | "chevron" | "branch" | "alert"; size?: number }) {
     const paths: Record<string, ReactNode> = {
         plus: <><path d="M12 5v14" /><path d="M5 12h14" /></>,
         folder: <><path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" /></>,
@@ -334,9 +334,23 @@ function Icon({ name, size = 16 }: { name: "plus" | "folder" | "settings" | "sea
         spark: <><path d="m12 3 1.9 5.8L20 11l-6.1 2.2L12 19l-2-5.8L4 11l6-2.2z" /><path d="m19 15 .8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z" /></>,
         chevron: <path d="m9 18 6-6-6-6" />,
         branch: <><circle cx="7" cy="5" r="2" /><circle cx="17" cy="19" r="2" /><circle cx="17" cy="7" r="2" /><path d="M7 7v4a4 4 0 0 0 4 4h4a2 2 0 0 0 2-2V9" /><path d="M7 3v0" /></>,
+        alert: <><circle cx="12" cy="12" r="9" /><path d="M12 7.5v5.5" /><path d="M12 16.5h.01" /></>,
     };
     return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name]}</svg>;
 }
+
+function ContextRing({ utilization }: { utilization: number | null }) {
+    const circumference = 2 * Math.PI * 9;
+    const value = utilization === null ? 0 : Math.min(1, Math.max(0, utilization));
+    return <svg className="context-ring" width={16} height={16} viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <circle className="context-ring-track" cx="12" cy="12" r="9" strokeWidth="2.5" />
+        <circle className="context-ring-arc" cx="12" cy="12" r="9" strokeWidth="2.5" strokeLinecap="round" strokeDasharray={`${(circumference * value).toFixed(2)} ${circumference.toFixed(2)}`} transform="rotate(-90 12 12)" />
+    </svg>;
+}
+
+type PendingDialog =
+    | { kind: "confirm"; message: string; confirmLabel: string; danger: boolean; resolve: (accepted: boolean) => void }
+    | { kind: "prompt"; message: string; value: string; resolve: (value: string | null) => void };
 
 export function App() {
     const [bootstrap, setBootstrap] = useState<BootstrapData | null>(null);
@@ -358,6 +372,8 @@ export function App() {
     const [attachments, setAttachments] = useState<DesktopAttachment[]>([]);
     const [modelPickerOpen, setModelPickerOpen] = useState(false);
     const [permissionPickerOpen, setPermissionPickerOpen] = useState(false);
+    const [contextPickerOpen, setContextPickerOpen] = useState(false);
+    const [pendingDialog, setPendingDialog] = useState<PendingDialog | null>(null);
     const [sessionMenuId, setSessionMenuId] = useState<string | null>(null);
     const [retryNotice, setRetryNotice] = useState("");
     const [search, setSearch] = useState("");
@@ -413,10 +429,42 @@ export function App() {
         return () => window.clearTimeout(timer);
     }, [panelWidths, theme, fontScale]);
 
+    const confirmInApp = useCallback((message: string, confirmLabel = "确定", danger = false): Promise<boolean> => {
+        return new Promise((resolve) => { setPendingDialog({ kind: "confirm", message, confirmLabel, danger, resolve }); });
+    }, []);
+
+    const promptInApp = useCallback((message: string, value: string): Promise<string | null> => {
+        return new Promise((resolve) => { setPendingDialog({ kind: "prompt", message, value, resolve }); });
+    }, []);
+
+    useEffect(() => {
+        if (typeof window.desktop.onDialogRequest !== "function") return;
+        return window.desktop.onDialogRequest((request) => {
+            void confirmInApp(request.message, request.confirmLabel, request.danger).then((accepted) => {
+                void window.desktop.respondDialog(request.id, accepted).catch(() => undefined);
+            });
+        });
+    }, [confirmInApp]);
+
+    useEffect(() => {
+        if (!pendingDialog) return;
+        const closeOnEscape = (event: globalThis.KeyboardEvent): void => {
+            if (event.key !== "Escape") return;
+            if (pendingDialog.kind === "confirm") pendingDialog.resolve(false);
+            else pendingDialog.resolve(null);
+            setPendingDialog(null);
+        };
+        document.addEventListener("keydown", closeOnEscape);
+        return () => document.removeEventListener("keydown", closeOnEscape);
+    }, [pendingDialog]);
+
     useEffect(() => {
         document.documentElement.dataset.theme = theme;
         document.documentElement.style.setProperty("--font-scale", String(fontScale));
-    }, [theme, fontScale]);
+        if (typeof window.desktop.setTitleBarOverlay === "function") {
+            void window.desktop.setTitleBarOverlay(resolvedTheme).catch(() => undefined);
+        }
+    }, [theme, fontScale, resolvedTheme]);
 
     useEffect(() => {
         if (sessionRoute) setEffortChoice(sessionRoute.effort);
@@ -1143,14 +1191,14 @@ export function App() {
         } catch (failure) { setError(displayError(failure)); }
     };
 
-    const toggleTerminal = () => {
+    const toggleTerminal = async () => {
         if (!terminalOpen) {
             if (!activeWorkspace?.available) return;
             setTerminalWorkspaceId(activeWorkspace.id);
             setTerminalOpen(true);
             return;
         }
-        if (!window.confirm("关闭终端会结束此 PowerShell 会话和它启动的前台程序。继续吗？")) return;
+        if (!(await confirmInApp("关闭终端会结束此 PowerShell 会话和它启动的前台程序。继续吗？", "继续"))) return;
         setTerminalOpen(false);
     };
 
@@ -1318,7 +1366,7 @@ export function App() {
     };
 
     const removeWorkspace = async (workspace: WorkspaceSummary) => {
-        if (!window.confirm(`从最近项目中移除 ${workspace.name}？项目文件不会被删除。`)) return;
+        if (!(await confirmInApp(`从最近项目中移除 ${workspace.name}？项目文件不会被删除。`, "移除", true))) return;
         try {
             await window.desktop.removeWorkspace(workspace.id);
             const next = await window.desktop.getBootstrap();
@@ -1342,7 +1390,7 @@ export function App() {
 
     const renameSession = async (session: SessionSummary) => {
         if (!activeWorkspace) return;
-        const title = window.prompt("为这个会话命名", session.title);
+        const title = await promptInApp("为这个会话命名", session.title);
         if (!title?.trim()) return;
         try {
             const updated = await window.desktop.renameSession(activeWorkspace.id, session.id, title);
@@ -1352,7 +1400,7 @@ export function App() {
     };
 
     const deleteSession = async (session: SessionSummary) => {
-        if (!activeWorkspace || !window.confirm(`删除会话“${session.title}”及其本地审阅快照？工作区文件和 API Key 不会被删除。`)) return;
+        if (!activeWorkspace || !(await confirmInApp(`删除会话“${session.title}”及其本地审阅快照？工作区文件和 API Key 不会被删除。`, "删除", true))) return;
         try {
             const result = await window.desktop.deleteSession(activeWorkspace.id, session.id);
             const key = `${activeWorkspace.id}:${session.id}`;
@@ -1408,8 +1456,20 @@ export function App() {
 
     return <div ref={appShellRef} className={`app-shell ${activeWorkspace ? "" : "no-inspector"}`}
         style={{ "--sidebar-width": `${panelWidths.sidebar}px`, "--inspector-width": `${panelWidths.inspector}px` } as CSSProperties}>
+        <header className="titlebar" onDoubleClick={() => void window.desktop.toggleWindowMaximize()}>
+            <span className="brand-name">TriumCode</span>
+            <div className="breadcrumbs">
+                {activeWorkspace ? <><span className="crumb-project">{activeWorkspace.name}</span><Icon name="chevron" size={14} /><span className="crumb-session">{activeSession?.title || "新会话"}</span></> : <span className="crumb-session">桌面工作区</span>}
+            </div>
+            <div className="topbar-actions">
+                {activeWorkspace?.branch && <span className="topbar-chip"><span className="git-branch-icon"><Icon name="branch" size={15} /></span>{activeWorkspace.branch}</span>}
+                <button className={`topbar-chip task-center-toggle ${taskCenterOpen ? "selected" : ""}`} onClick={() => setTaskCenterOpen(true)} title="查看所有工作区的任务">任务中心</button>
+                <button className={`topbar-chip terminal-toggle ${terminalOpen ? "selected" : ""}`} onClick={toggleTerminal} disabled={!terminalOpen && !activeWorkspace?.available} title={terminalOpen ? "关闭工作区终端" : "打开绑定当前工作区的 PowerShell 终端"}>终端</button>
+                <button className={`icon-button ${rightPanel === "activity" ? "panel-selected" : ""}`} title="任务活动" aria-label="切换任务活动面板" aria-pressed={rightPanel === "activity"} onClick={() => selectRightPanel(rightPanel === "activity" ? "details" : "activity")}><span className="activity-bars"><i /><i /><i /></span></button>
+            </div>
+        </header>
+        <div className="app-columns">
         <aside className="sidebar">
-            <div className="brand-row"><span className="brand-name">TriumCode</span></div>
             <div className="sidebar-primary">
                 <button className="new-task-button" onClick={() => void handleNewSession()} disabled={!activeWorkspace?.available}
                     aria-keyshortcuts={commandModifier === "⌘" ? "Meta+N" : "Control+N"}>
@@ -1464,18 +1524,6 @@ export function App() {
             onKeyDown={(event) => resizePanelFromKeyboard("sidebar", event)} />
 
         <main className="main-column">
-            <header className="topbar">
-                <div className="breadcrumbs">
-                    {activeWorkspace ? <><span className="crumb-project">{activeWorkspace.name}</span><Icon name="chevron" size={14} /><span className="crumb-session">{activeSession?.title || "新会话"}</span></> : <span className="crumb-session">桌面工作区</span>}
-                </div>
-                <div className="topbar-actions">
-                    {activeWorkspace?.branch && <span className="topbar-chip"><span className="git-branch-icon"><Icon name="branch" size={15} /></span>{activeWorkspace.branch}</span>}
-                    <button className={`topbar-chip task-center-toggle ${taskCenterOpen ? "selected" : ""}`} onClick={() => setTaskCenterOpen(true)} title="查看所有工作区的任务">任务中心</button>
-                    <button className={`topbar-chip terminal-toggle ${terminalOpen ? "selected" : ""}`} onClick={toggleTerminal} disabled={!terminalOpen && !activeWorkspace?.available} title={terminalOpen ? "关闭工作区终端" : "打开绑定当前工作区的 PowerShell 终端"}>终端</button>
-                    <button className={`icon-button ${rightPanel === "activity" ? "panel-selected" : ""}`} title="任务活动" aria-label="切换任务活动面板" aria-pressed={rightPanel === "activity"} onClick={() => selectRightPanel(rightPanel === "activity" ? "details" : "activity")}><span className="activity-bars"><i /><i /><i /></span></button>
-                </div>
-            </header>
-
             {externalRun && activeSession && <div className="external-run-banner" role="status">
                 <div><strong>此任务正在另一个进程中运行</strong><span>当前窗口可以查看已保存的对话，但无法发送消息、回复审批或停止这个任务。</span></div>
                 <button className="secondary-button compact" onClick={() => void refreshExternalSession()}>刷新会话状态</button>
@@ -1536,15 +1584,34 @@ export function App() {
                         {attachments.length > 0 && <div className="attachment-list">{attachments.map((file) => <span className="attachment-chip" key={file.path} title={file.path}>{file.path.split(/[\\/]/).at(-1)}<button type="button" aria-label={`移除附件：${file.path}`} onClick={() => setAttachments((current) => current.filter((item) => item.path !== file.path))}><Icon name="close" size={12} /></button></span>)}</div>}
                         <div className="composer-bottom">
                             <div className="composer-left"><input ref={attachmentInput} type="file" multiple className="visually-hidden" tabIndex={-1} onChange={(event) => void chooseAttachments(event)} /><button type="button" className="composer-attach" title="添加本机文本文件" aria-label="添加文件" disabled={busy || externalRun} onClick={() => attachmentInput.current?.click()}><Icon name="plus" size={17} /></button>
-                                <div className="permission-picker"><button type="button" className="picker-trigger" aria-label="当前会话权限" aria-expanded={permissionPickerOpen} disabled={busy || externalRun || quickSettingsSaving || permissionMode === "plan"} onClick={() => { setPermissionPickerOpen((current) => !current); setModelPickerOpen(false); }}>{permissionMode === "plan" ? "计划模式" : permissionMode === "bypassPermissions" ? "完全访问" : permissionMode === "desktopAcceptEdits" ? "自动接受编辑" : "默认 - 逐项确认"}<Icon name="chevron" size={12} /></button>
+                                <div className="permission-picker"><button type="button" className={`picker-trigger ${permissionMode === "bypassPermissions" ? "warning" : ""}`} aria-label="当前会话权限" aria-expanded={permissionPickerOpen} disabled={busy || externalRun || quickSettingsSaving || permissionMode === "plan"} onClick={() => { setPermissionPickerOpen((current) => !current); setModelPickerOpen(false); }}>{permissionMode === "bypassPermissions" && <Icon name="alert" size={14} />}{permissionMode === "plan" ? "计划模式" : permissionMode === "bypassPermissions" ? "完全访问" : permissionMode === "desktopAcceptEdits" ? "自动接受编辑" : "默认 - 逐项确认"}<span className="picker-chevron"><Icon name="chevron" size={12} /></span></button>
                                     {permissionPickerOpen && <div className="composer-popover permission-popover" role="menu" aria-label="选择会话权限">{([{"mode": "desktopDefault", "label": "默认 - 逐项确认", "hint": "文件写入和命令执行前询问"}, {"mode": "desktopAcceptEdits", "label": "自动接受编辑", "hint": "文件编辑自动允许，命令仍需确认"}, {"mode": "bypassPermissions", "label": "完全访问", "hint": "自动运行工具，仍遵守明确拒绝规则"}] as const).map((choice) => <button type="button" role="menuitemradio" aria-checked={permissionMode === choice.mode} key={choice.mode} onClick={() => { setPermissionPickerOpen(false); void changePermissionMode(choice.mode); }}><span><strong>{choice.label}</strong><small>{choice.hint}</small></span>{permissionMode === choice.mode && <span className="picker-check">✓</span>}</button>)}</div>}
                                 </div>
                             </div>
-                            <div className="composer-right"><div className="model-picker"><button type="button" className="picker-trigger" aria-label="调整模型和思考强度" aria-expanded={modelPickerOpen} onClick={() => { setModelPickerOpen((current) => !current); setPermissionPickerOpen(false); }}>{sessionRoute?.modelPreset ?? sessionRoute?.model ?? "模型"} <span>{({ low: "低", medium: "中", high: "高", xhigh: "极高", max: "最大" } as Record<string, string>)[sessionRoute?.effort ?? "high"]}</span><Icon name="chevron" size={12} /></button>
-                                {modelPickerOpen && <div className="composer-popover model-popover"><label>模型<select aria-label="当前会话模型" disabled={!sessionRoute || busy || externalRun || quickSettingsSaving} value={sessionRoute?.modelPreset ?? ""} onChange={(event) => { if (event.target.value) void changeSessionRoute(event.target.value, effortChoice); else setSettingsOpen(true); }}><option value="">{sessionRoute?.model ?? "自定义模型"}</option>{bootstrap?.modelPresets.map((preset) => <option key={preset.name} value={preset.name}>{preset.name}</option>)}</select></label>
+                            <div className="composer-right"><div className="context-picker" onMouseEnter={() => setContextPickerOpen(true)} onMouseLeave={() => setContextPickerOpen(false)}><button type="button" className="picker-trigger" aria-label="上下文用量" aria-expanded={contextPickerOpen}><ContextRing utilization={contextUsage ? contextUsage.utilization : null} /></button>
+                                {contextPickerOpen && contextUsage && <div className="composer-popover context-popover" aria-label="上下文用量详情">
+                                    <div className="context-popover-heading"><strong>上下文容量</strong><span>{formatTokenCount(contextUsage.estimatedTokens)} / {formatTokenCount(contextUsage.contextWindow)} ({Math.round(contextUsage.utilization * 100)}%)</span></div>
+                                    <div className="context-popover-bar"><span style={{ width: `${Math.min(100, Math.round(contextUsage.utilization * 100))}%` }} /></div>
+                                    <div className="context-popover-rows">
+                                        {tokenUsage ? <>
+                                            <div><span>输入 tokens</span><strong>{tokenUsage.inputAvailable ? formatTokenCount(tokenUsage.input) : "暂无数据"}</strong></div>
+                                            <div><span>输出 tokens</span><strong>{tokenUsage.outputAvailable ? formatTokenCount(tokenUsage.output) : "暂无数据"}</strong></div>
+                                            <div><span>缓存读取</span><strong>{tokenUsage.cacheReadAvailable ? formatTokenCount(tokenUsage.cacheRead) : "暂无数据"}</strong></div>
+                                            <div><span>缓存写入</span><strong>{tokenUsage.cacheWriteAvailable ? formatTokenCount(tokenUsage.cacheWrite) : "暂无数据"}</strong></div>
+                                            <div><span>平均缓存命中率</span><strong>{Math.round(tokenUsage.cacheHitRate * 100)}%</strong></div>
+                                        </> : <div><span>发送任务后显示 token 用量。</span></div>}
+                                    </div>
+                                    <small className="context-popover-note">仅统计当前会话的模型窗口占用；服务商账户额度以账单为准。</small>
+                                </div>}
+                            </div>
+                                <div className="model-picker"><button type="button" className="picker-trigger" aria-label="调整模型和思考强度" aria-expanded={modelPickerOpen} onClick={() => { setModelPickerOpen((current) => !current); setPermissionPickerOpen(false); }}>{sessionRoute?.modelPreset ?? sessionRoute?.model ?? "模型"} <span>{({ low: "低", medium: "中", high: "高", xhigh: "极高", max: "最大" } as Record<string, string>)[sessionRoute?.effort ?? "high"]}</span><span className="picker-chevron"><Icon name="chevron" size={12} /></span></button>
+                                {modelPickerOpen && <div className="composer-popover model-popover" role="menu" aria-label="选择模型">
+                                    {bootstrap?.modelPresets.length ? <div className="model-menu-list">{bootstrap.modelPresets.map((preset) => <button type="button" role="menuitemradio" aria-checked={sessionRoute?.modelPreset === preset.name} key={preset.name} disabled={!sessionRoute || busy || externalRun || quickSettingsSaving} onClick={() => { setModelPickerOpen(false); if (sessionRoute?.modelPreset !== preset.name) void changeSessionRoute(preset.name, effortChoice); }}><span>{preset.name}</span>{sessionRoute?.modelPreset === preset.name && <span className="picker-check">✓</span>}</button>)}</div>
+                                    : <div className="model-menu-empty">还没有可用的模型预设，先到设置里配置一个模型。</div>}
+                                    <div className="model-menu-divider" />
                                     <div className="effort-heading"><span>思考强度</span><strong>{({ low: "低", medium: "中", high: "高", xhigh: "极高", max: "最大" } as Record<string, string>)[effortChoice]}</strong></div>
                                     <input type="range" aria-label="当前会话思考强度" min={0} max={4} step={1} disabled={!sessionRoute || busy || externalRun || quickSettingsSaving} value={["low", "medium", "high", "xhigh", "max"].indexOf(effortChoice)} onChange={(event) => setEffortChoice(["low", "medium", "high", "xhigh", "max"][Number(event.target.value)])} onPointerUp={() => { if (effortChoice !== sessionRoute?.effort) void changeSessionRoute(sessionRoute?.modelPreset ?? null, effortChoice); }} onKeyUp={() => { if (effortChoice !== sessionRoute?.effort) void changeSessionRoute(sessionRoute?.modelPreset ?? null, effortChoice); }} />
-                                    <div className="effort-scale"><span>低</span><span>最大</span></div>
+                                    <div className="effort-scale"><span>低</span><span>高</span></div>
                                 </div>}</div>
                                 {busy ? <button type="button" className="stop-button" onClick={() => void handleStop()}><span className="stop-square" />停止</button> : <button type="submit" className="send-button" disabled={(!draft.trim() && attachments.length === 0) || externalRun} title={externalRun ? "任务由另一个进程运行" : "发送消息"}><Icon name="arrow" size={17} /></button>}
                             </div>
@@ -1555,6 +1622,25 @@ export function App() {
                 </form>}
             </>}
             {error && <div className="toast-error" role="alert"><span>{error}</span><button aria-label="关闭错误提示" onClick={() => setError("")}><Icon name="close" size={14} /></button></div>}
+            {pendingDialog && <div className="modal-scrim confirm-scrim" onMouseDown={(event) => {
+                if (event.target !== event.currentTarget) return;
+                if (pendingDialog.kind === "confirm") pendingDialog.resolve(false);
+                else pendingDialog.resolve(null);
+                setPendingDialog(null);
+            }}>
+                <section className="confirm-dialog" role="alertdialog" aria-modal="true">
+                    {pendingDialog.kind === "prompt"
+                        ? <form onSubmit={(event) => { event.preventDefault(); pendingDialog.resolve(pendingDialog.value.trim() || null); setPendingDialog(null); }}>
+                            <strong>{pendingDialog.message}</strong>
+                            <input autoFocus value={pendingDialog.value} onChange={(event) => setPendingDialog({ ...pendingDialog, value: event.target.value })} />
+                            <div className="confirm-actions"><button type="button" className="secondary-button compact" onClick={() => { pendingDialog.resolve(null); setPendingDialog(null); }}>取消</button><button type="submit" className="primary-button compact">保存</button></div>
+                        </form>
+                        : <>
+                            <strong>{pendingDialog.message}</strong>
+                            <div className="confirm-actions"><button className="secondary-button compact" onClick={() => { pendingDialog.resolve(false); setPendingDialog(null); }}>取消</button><button autoFocus className={pendingDialog.danger ? "danger-button compact" : "primary-button compact"} onClick={() => { pendingDialog.resolve(true); setPendingDialog(null); }}>{pendingDialog.confirmLabel}</button></div>
+                        </>}
+                </section>
+            </div>}
             {terminalOpen && terminalWorkspaceId && bootstrap && (() => {
                 const workspace = bootstrap.workspaces.find((item) => item.id === terminalWorkspaceId);
                 return workspace ? <TerminalPanel
@@ -1563,6 +1649,7 @@ export function App() {
                     workspaceId={workspace.id}
                     workspaceName={workspace.name}
                     workspacePath={workspace.path}
+                    confirm={confirmInApp}
                     onClose={toggleTerminal}
                     onCopySelection={(selection) => {
                         const text = selection.trimEnd();
@@ -1578,7 +1665,7 @@ export function App() {
         </main>
 
         <div className="column-resizer inspector-resizer" role="separator" aria-orientation="vertical" aria-label="调整右侧面板宽度"
-            aria-valuemin={230} aria-valuemax={420} aria-valuenow={panelWidths.inspector} tabIndex={0}
+            aria-valuemin={230} aria-valuemax={720} aria-valuenow={panelWidths.inspector} tabIndex={0}
             onPointerDown={(event) => startPanelResize("inspector", event)}
             onPointerMove={(event) => movePanelResize("inspector", event)}
             onPointerUp={finishPanelResize} onPointerCancel={finishPanelResize}
@@ -1666,6 +1753,7 @@ export function App() {
             </div>
             <div className="inspector-footer"><span className="privacy-dot" />本地运行 · 不向 TriumCode 上传代码</div>
         </aside>}
+        </div>
 
         {settingsOpen && bootstrap && <SettingsDialog
             settings={bootstrap.settings}

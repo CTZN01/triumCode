@@ -14,6 +14,22 @@ interface IpcDependencies {
     getWindow: () => BrowserWindow | null;
 }
 
+const pendingDialogResponses = new Map<string, (accepted: boolean) => void>();
+let dialogSequence = 0;
+
+/** Shows the renderer's in-app confirm dialog and resolves with the user's choice. */
+export function requestRendererDialog(window: BrowserWindow, message: string, confirmLabel: string, danger = false): Promise<boolean> {
+    const id = `dialog-${++dialogSequence}`;
+    return new Promise((resolve) => {
+        if (window.isDestroyed()) {
+            resolve(false);
+            return;
+        }
+        pendingDialogResponses.set(id, resolve);
+        window.webContents.send("desktop:dialog-request", { id, message, confirmLabel, danger });
+    });
+}
+
 function assertTrusted(event: IpcMainInvokeEvent, getWindow: () => BrowserWindow | null): void {
     const window = getWindow();
     if (!window || event.sender !== window.webContents || event.senderFrame !== event.sender.mainFrame) {
@@ -111,6 +127,14 @@ export function registerIpcHandlers({ host, terminals, workspaceWatch, getWindow
             return callback(...args);
         });
     };
+
+    handle("desktop:dialog-response", (id, accepted) => {
+        const key = stringArg(id, "id", 64);
+        const resolve = pendingDialogResponses.get(key);
+        if (!resolve) return;
+        pendingDialogResponses.delete(key);
+        resolve(accepted === true);
+    });
 
     handle("desktop:bootstrap", () => host.bootstrap());
     handle("desktop:tasks", () => host.listTasks());
@@ -274,6 +298,23 @@ export function registerIpcHandlers({ host, terminals, workspaceWatch, getWindow
             throw new DesktopServiceError("INVALID_ARGUMENT", "权限模式无效。");
         }
         host.updatePermissionMode(workspaceId(workspace), sessionId(session), selected);
+    });
+    handle("desktop:toggle-window-maximize", () => {
+        const window = getWindow();
+        if (!window) return;
+        if (window.isMaximized()) window.unmaximize();
+        else window.maximize();
+    });
+    handle("desktop:set-titlebar-overlay", (theme) => {
+        const window = getWindow();
+        if (!window || process.platform !== "win32") return;
+        const selected = stringArg(theme, "theme", 8);
+        if (selected !== "dark" && selected !== "light") {
+            throw new DesktopServiceError("INVALID_ARGUMENT", "主题无效。");
+        }
+        window.setTitleBarOverlay(selected === "dark"
+            ? { color: "#13151a", symbolColor: "#e8e8e8" }
+            : { color: "#f1f3f7", symbolColor: "#242424" });
     });
     handle("desktop:credential-state", (preset) => host.credentialState(modelPresetName(preset)));
     handle("desktop:credential-save", (key, preset) => host.saveApiKey(

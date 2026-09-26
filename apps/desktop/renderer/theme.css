@@ -1,6 +1,6 @@
 /* Neutral desktop palette shared by both appearance modes. */
 :root {
-    font-family: "Segoe UI Variable", "Segoe UI", "PingFang SC", "Microsoft YaHei UI", sans-serif;
+    font-family: "MiSans VF", "MiSans", "Segoe UI Variable", "Segoe UI", "PingFang SC", "Microsoft YaHei UI", sans-serif;
     font-size: 14px;
     color-scheme: light dark;
     --canvas: #ffffff;
@@ -70,6 +70,10 @@
 :root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) select:focus-visible {
     outline: 2px solid var(--focus);
 }
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .composer textarea:focus-visible,
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .git-commit-box textarea:focus-visible {
+    outline: none;
+}
 :root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .app-shell {
     background: var(--canvas);
 }
@@ -87,21 +91,8 @@
     background: var(--sidebar);
     border-right: 1px solid var(--border);
 }
-:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .brand-row {
-    border-bottom: 1px solid var(--border);
-}
-:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .brand-mark {
-    color: var(--accent);
-    border: 1px solid var(--border);
-    background: var(--surface);
-    box-shadow: none;
-}
 :root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .brand-name {
     color: var(--text);
-}
-:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .brand-edition {
-    color: var(--muted);
-    border: 1px solid var(--border);
 }
 :root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .new-task-button {
     border: 1px solid var(--border);
@@ -163,7 +154,7 @@
 :root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .workspace-row.selected,
 :root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .session-row.selected {
     background: var(--hover);
-    color: var(--accent);
+    color: var(--text);
 }
 :root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .workspace-dot {
     background: var(--surface);
@@ -218,7 +209,7 @@
 }
 :root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .settings-entry:hover,
 :root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .settings-entry.active {
-    color: var(--accent);
+    color: var(--text);
     background: var(--hover);
     border-color: var(--border);
 }
@@ -228,8 +219,8 @@
 :root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .main-column {
     background: var(--canvas);
 }
-:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .topbar {
-    border-bottom: 1px solid var(--border);
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .app-columns {
+    border-top: 1px solid var(--border);
 }
 :root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .breadcrumbs {
     color: var(--muted);
@@ -247,14 +238,14 @@
     color: var(--text);
 }
 :root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .git-branch-icon {
-    color: var(--accent);
+    color: var(--text);
 }
 :root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .model-chip:hover {
     border-color: var(--border);
     color: var(--text);
 }
 :root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .model-spark {
-    color: var(--accent);
+    color: var(--text);
 }
 :root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .context-meter small {
     color: var(--muted);
@@ -273,7 +264,7 @@
 :root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .panel-selected {
     background: var(--field);
     border-color: var(--border);
-    color: var(--accent);
+    color: var(--text);
 }
 :root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .task-center-toggle {
     color: var(--text);
@@ -282,7 +273,7 @@
 :root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .task-center-toggle.selected {
     border-color: var(--border);
     background: var(--hover);
-    color: var(--accent);
+    color: var(--text);
 }
 :root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .welcome-area,
 :root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .missing-workspace {
@@ -296,7 +287,7 @@
     box-shadow: none;
 }
 :root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .eyebrow {
-    color: var(--accent);
+    color: var(--muted);
 }
 :root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .welcome-area h1 {
     color: var(--text);
@@ -659,7 +650,7 @@
     color: var(--muted);
 }
 :root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .inspector-tabs button.selected {
-    color: var(--accent);
+    color: var(--text);
 }
 :root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .inspector-tabs button.selected::after {
     background: var(--hover);
@@ -814,7 +805,7 @@
 :root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .review-tabs button.selected {
     border-color: var(--border);
     background: var(--hover);
-    color: var(--accent);
+    color: var(--text);
 }
 :root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .git-scope-note {
     color: var(--muted);
@@ -872,13 +863,17 @@
 }
 :root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .git-file-filters button.selected,
 :root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .git-diff-sides button.selected {
-    color: var(--accent);
+    color: var(--text);
     border-color: var(--border);
     background: var(--hover);
 }
 :root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .git-file-list::-webkit-scrollbar-thumb,
 :root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .git-diff-content::-webkit-scrollbar-thumb {
-    background: var(--surface);
+    background: var(--muted);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .git-file-list::-webkit-scrollbar-thumb:hover,
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .git-diff-content::-webkit-scrollbar-thumb:hover {
+    background: var(--text);
 }
 :root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .git-file-row:hover {
     background: var(--hover);
@@ -961,11 +956,6 @@
 :root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .diff-viewer {
     color: var(--text);
 }
-:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .diff-column-heading {
-    border-bottom: 1px solid var(--border);
-    background: var(--surface);
-    color: var(--muted);
-}
 :root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .diff-line-number {
     border-right: 1px solid var(--border);
     color: var(--muted);
@@ -974,21 +964,49 @@
     color: var(--muted);
 }
 :root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .diff-line.addition .diff-line-text {
-    color: var(--text);
-    background: var(--surface);
+    color: var(--success);
+    background: var(--success-bg);
 }
 :root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .diff-line.deletion .diff-line-text {
-    color: var(--text);
-    background: var(--surface);
+    color: var(--danger);
+    background: var(--danger-bg);
 }
 :root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .diff-hunk {
     border-top: 1px solid var(--border);
 }
 :root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .diff-hunk-heading {
-    color: var(--text);
+    color: var(--accent);
 }
 :root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .diff-hunk-heading:hover {
     background: var(--hover);
+}
+.diff-code {
+    color: var(--text);
+}
+.diff-code .hljs-comment, .diff-code .hljs-quote {
+    color: light-dark(#6e7781, #8b949e);
+    font-style: italic;
+}
+.diff-code .hljs-keyword, .diff-code .hljs-selector-tag, .diff-code .hljs-section, .diff-code .hljs-doctag, .diff-code .hljs-name, .diff-code .hljs-type, .diff-code .hljs-tag {
+    color: light-dark(#cf222e, #ff7b72);
+}
+.diff-code .hljs-string, .diff-code .hljs-regexp, .diff-code .hljs-addition, .diff-code .hljs-attribute {
+    color: light-dark(#0a3069, #a5d6ff);
+}
+.diff-code .hljs-number, .diff-code .hljs-literal, .diff-code .hljs-attr, .diff-code .hljs-property, .diff-code .hljs-variable, .diff-code .hljs-template-variable, .diff-code .hljs-symbol, .diff-code .hljs-bullet, .diff-code .hljs-link, .diff-code .hljs-meta {
+    color: light-dark(#0550ae, #79c0ff);
+}
+.diff-code .hljs-title, .diff-code .hljs-title.class_, .diff-code .hljs-title.function_ {
+    color: light-dark(#8250df, #d2a8ff);
+}
+.diff-code .hljs-built_in, .diff-code .hljs-class .hljs-title, .diff-code .hljs-params, .diff-code .hljs-selector-id, .diff-code .hljs-selector-class, .diff-code .hljs-selector-attr, .diff-code .hljs-selector-pseudo {
+    color: light-dark(#bc4c00, #ffa657);
+}
+.diff-code .hljs-emphasis {
+    font-style: italic;
+}
+.diff-code .hljs-strong {
+    font-weight: 600;
 }
 :root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .git-panel-state {
     color: var(--muted);
@@ -1328,7 +1346,7 @@
 }
 
 /* A quiet hierarchy for the main actions and empty states. */
-.brand-mark, .welcome-orb, .conversation-orb {
+.welcome-orb, .conversation-orb {
     background: var(--surface) !important;
     border: 1px solid var(--border) !important;
     box-shadow: none !important;
@@ -1341,7 +1359,7 @@
     box-shadow: none !important;
 }
 .primary-button:hover:not(:disabled), .new-task-button:hover:not(:disabled), .send-button:hover:not(:disabled) { opacity: .86; }
-.modal-scrim { background: #0008; }
+.modal-scrim { background: #00000059; }
 .settings-dialog, .task-center-dialog, .worktree-dialog { box-shadow: 0 18px 55px #0003; }
 .message-body, .composer textarea { font-size: 13px; }
 .code-block > code, .activity-title, .activity-output pre, .worktree-review-diff pre {
@@ -1420,7 +1438,10 @@
 .permission-picker, .model-picker { position: relative; min-width: 0; }
 .picker-trigger { display: inline-flex; align-items: center; gap: 5px; max-width: 225px; min-height: 31px; padding: 0 7px; border: 0; border-radius: 6px; background: transparent; color: var(--text); cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .picker-trigger span { color: var(--muted); }
-.picker-trigger svg { flex: 0 0 auto; transform: rotate(90deg); }
+.picker-trigger.warning { color: var(--warning); }
+.picker-trigger svg { flex: 0 0 auto; }
+.picker-trigger .picker-chevron { display: inline-flex; }
+.picker-trigger .picker-chevron svg { transform: rotate(90deg); }
 .picker-trigger:disabled { opacity: .5; cursor: default; }
 .composer-popover { position: absolute; z-index: 10; bottom: 39px; padding: 14px; border: 1px solid var(--border); border-radius: 13px; background: var(--surface); box-shadow: 0 15px 40px #0005; color: var(--text); }
 .model-popover { right: 0; width: 294px; }
@@ -1431,8 +1452,28 @@
 .permission-popover button strong { font-weight: 600; }
 .permission-popover button small { color: var(--muted); font-size: 12px; }
 .picker-check { color: var(--text); }
-.model-popover label { display: grid; gap: 6px; color: var(--muted); }
-.model-popover select { width: 100%; height: 33px; padding: 0 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--field); color: var(--text); }
+.context-picker { position: relative; min-width: 0; }
+.context-picker::after { content: ""; position: absolute; left: -8px; right: -8px; bottom: 100%; height: 12px; }
+.context-ring { display: block; }
+.context-ring-track { stroke: var(--border); fill: none; }
+.context-ring-arc { stroke: currentColor; fill: none; transition: stroke-dasharray .25s ease; }
+.context-popover { left: 50%; right: auto; transform: translateX(-50%); width: 302px; }
+.context-popover-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.context-popover-heading strong { color: var(--text); font-size: 14px; }
+.context-popover-heading span { color: var(--muted); font-size: 12px; }
+.context-popover-bar { height: 6px; margin: 11px 0 13px; border-radius: 4px; background: var(--field); overflow: hidden; }
+.context-popover-bar span { display: block; height: 100%; border-radius: 4px; background: var(--focus); }
+.context-popover-rows { display: grid; gap: 7px; }
+.context-popover-rows > div { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.context-popover-rows span { color: var(--muted); font-size: 12px; }
+.context-popover-rows strong { color: var(--text); font-size: 12px; font-weight: 600; }
+.context-popover-note { display: block; margin-top: 11px; color: var(--muted); font-size: 11px; line-height: 1.5; }
+.model-menu-list { display: grid; gap: 1px; }
+.model-menu-list button { display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%; min-height: 34px; padding: 8px 10px; border: 0; border-radius: 8px; background: transparent; color: var(--text); font-size: 14px; text-align: left; cursor: pointer; }
+.model-menu-list button:hover { background: var(--hover); }
+.model-menu-list button:disabled { opacity: .5; cursor: default; }
+.model-menu-empty { padding: 9px 2px 3px; color: var(--muted); font-size: 12px; }
+.model-menu-divider { height: 1px; margin: 12px -14px; background: var(--border); }
 .effort-heading, .effort-scale { display: flex; justify-content: space-between; align-items: center; }
 .effort-heading { margin: 15px 0 8px; color: var(--muted); }
 .effort-heading strong { color: var(--text); }
@@ -1445,7 +1486,7 @@
 .working-glint { display: inline-block; background: linear-gradient(105deg, var(--muted) 15%, #ffffff 48%, var(--muted) 82%); background-size: 230% 100%; color: transparent; background-clip: text; animation: working-glint 1.7s linear infinite; }
 @keyframes working-glint { from { background-position: 100% 0; } to { background-position: -100% 0; } }
 @media (prefers-reduced-motion: reduce) { .working-glint { animation: none; color: var(--text); } }
-:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .settings-dialog { display: grid; grid-template-columns: 230px minmax(0, 1fr); width: calc(100vw - 32px); height: calc(100vh - 32px); max-height: none; padding: 0; overflow: hidden; background: var(--canvas); }
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .settings-dialog { display: grid; grid-template-columns: 230px minmax(0, 1fr); width: calc(100vw - 48px); height: calc(100vh - 88px); max-height: none; padding: 0; overflow: hidden; background: var(--canvas); }
 .settings-sidebar { display: flex; flex-direction: column; gap: 10px; padding: 24px 13px; border-right: 1px solid var(--border); background: var(--sidebar); }
 .settings-sidebar > strong { margin: 0 10px 13px; color: var(--text); font-size: 17px; }
 .settings-sidebar > span { margin: 0 10px; color: var(--muted); font-size: 12px; font-weight: 650; }
@@ -1487,6 +1528,14 @@
 .settings-dialog, .inspector-tabs, .activity-title { font-size: calc(13px * var(--font-scale, 1.1)); }
 .empty-conversation h2 { font-size: calc(21px * var(--font-scale, 1.1)) !important; color: var(--text) !important; }
 .empty-conversation p { font-size: calc(15px * var(--font-scale, 1.1)) !important; color: var(--muted) !important; }
-.inspector-tabs button, .inspector-empty p, .detail-card small, .field-help, .field > span { font-size: calc(12px * var(--font-scale, 1.1)) !important; }
+.inspector-tabs button { font-size: calc(13px * var(--font-scale, 1.1)) !important; }
+.inspector-tabs button span { min-width: 18px; height: 18px; font-size: calc(11px * var(--font-scale, 1.1)) !important; }
 .inspector-tabs button.selected { color: var(--text) !important; }
-.section-head, .local-status, .settings-entry, .new-task-button, .session-state-label { font-size: calc(12px * var(--font-scale, 1.1)) !important; }
+.inspector-empty strong { font-size: calc(13px * var(--font-scale, 1.1)) !important; }
+.inspector-empty p, .detail-card small, .git-scope-note, .git-count-row, .git-clean-state, .git-panel-state, .git-commit-box small { font-size: calc(12px * var(--font-scale, 1.1)) !important; }
+.detail-card strong, .git-panel-state strong, .git-panel-heading strong { font-size: calc(13px * var(--font-scale, 1.1)) !important; }
+.detail-label, .detail-card code, .git-commit-box label, .git-commit-box textarea { font-size: calc(11px * var(--font-scale, 1.1)) !important; }
+.git-panel-heading small, .git-file-path, .git-diff-path { font-size: calc(12px * var(--font-scale, 1.1)) !important; }
+.review-tabs button, .git-file-filters button, .git-diff-sides button, .git-write-button, .review-restore-button, .git-file-mark, .activity-state-label, .activity-time, .activity-duration, .activity-output-heading > span { font-size: calc(12px * var(--font-scale, 1.1)) !important; }
+.git-side-badge, .review-restore-confirm strong, .review-restore-confirm p, .review-restore-success, .git-truncated-notice, .git-mutation-message { font-size: calc(11px * var(--font-scale, 1.1)) !important; }
+.section-head, .local-status, .settings-entry, .new-task-button, .session-state-label, .field-help, .field > span { font-size: calc(12px * var(--font-scale, 1.1)) !important; }

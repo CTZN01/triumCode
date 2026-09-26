@@ -32,6 +32,7 @@ export function TerminalPanel({
     workspacePath,
     onClose,
     onCopySelection,
+    confirm,
 }: {
     theme: "light" | "dark";
     workspaceId: string;
@@ -39,6 +40,7 @@ export function TerminalPanel({
     workspacePath: string;
     onClose: () => void;
     onCopySelection: (text: string) => void;
+    confirm: (message: string, confirmLabel?: string, danger?: boolean) => Promise<boolean>;
 }) {
     const surface = useRef<HTMLDivElement | null>(null);
     const terminalRef = useRef<Terminal | null>(null);
@@ -132,7 +134,7 @@ export function TerminalPanel({
     }, [theme]);
 
     const restart = async () => {
-        if (!window.confirm("重启 PowerShell 会结束当前 shell 和它启动的前台程序。继续吗？")) return;
+        if (!(await confirm("重启 PowerShell 会结束当前 shell 和它启动的前台程序。继续吗？", "继续"))) return;
         if (summary) {
             try { await window.desktop.closeTerminal(summary.id); }
             catch (failure) { setError(failure instanceof Error ? failure.message : String(failure)); return; }

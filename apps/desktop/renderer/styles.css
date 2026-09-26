@@ -17,17 +17,15 @@ button, input, textarea, select { font: inherit; }
 button { color: inherit; }
 button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible { outline: 2px solid #7779f7; outline-offset: 2px; }
 
-.app-shell { height: 100vh; min-height: 620px; display: grid; grid-template-columns: var(--sidebar-width, 262px) 5px minmax(460px, 1fr) 5px var(--inspector-width, 294px); background: #15171d; overflow: hidden; }
-.app-shell.no-inspector { grid-template-columns: var(--sidebar-width, 262px) 5px minmax(460px, 1fr) 0 0; }
+.app-shell { height: 100vh; min-height: 620px; display: flex; flex-direction: column; background: #15171d; overflow: hidden; }
+.app-columns { flex: 1; min-height: 0; display: grid; grid-template-columns: var(--sidebar-width, 262px) 5px minmax(460px, 1fr) 5px var(--inspector-width, 294px); border-top: 1px solid #262930; }
+.app-shell.no-inspector .app-columns { grid-template-columns: var(--sidebar-width, 262px) 5px minmax(460px, 1fr) 0 0; }
 .app-shell.no-inspector .inspector-resizer { display: none; }
 .column-resizer { position: relative; z-index: 2; width: 5px; min-width: 5px; cursor: col-resize; touch-action: none; outline: none; background: #17191f; }
 .column-resizer::after { content: ""; position: absolute; inset: 0 2px; background: #272a32; }
 .column-resizer:hover::after, .column-resizer:focus-visible::after { inset: 0 1px; background: #8072c6; }
 .sidebar { display: flex; flex-direction: column; background: #111318; border-right: 1px solid #272a32; min-width: 0; }
-.brand-row { height: 58px; padding: 0 17px; display: flex; align-items: center; gap: 9px; border-bottom: 1px solid #22252d; flex: 0 0 auto; }
-.brand-mark { width: 24px; height: 24px; display: grid; place-items: center; color: #c5baff; border: 1px solid #7164ba; border-radius: 8px; background: linear-gradient(145deg, #393151, #211d2b); box-shadow: 0 0 18px #7d64cd22; }
 .brand-name { font-weight: 650; letter-spacing: -.02em; color: #f4f2f8; font-size: 13px; }
-.brand-edition { color: #777c89; font-size: 8px; letter-spacing: .13em; border: 1px solid #30333c; border-radius: 4px; padding: 2px 4px; margin-left: auto; }
 .sidebar-primary { padding: 14px 11px 8px; display: grid; gap: 10px; }
 .new-task-button { height: 37px; width: 100%; display: flex; align-items: center; gap: 9px; padding: 0 10px; border-radius: 7px; border: 1px solid #7164bb; background: linear-gradient(135deg, #433b64, #302b45); color: #f0ecff; cursor: pointer; text-align: left; box-shadow: inset 0 1px #ffffff0a; }
 .new-task-button:hover:not(:disabled) { background: linear-gradient(135deg, #4b426f, #39314e); }
@@ -76,12 +74,13 @@ kbd { font-family: inherit; font-size: 10px; color: #a1a5b2; background: #1c1e24
 .settings-entry:hover, .settings-entry.active { color: #ececf4; background: #202229; border-color: #2c2e37; }
 .settings-shortcut { margin-left: auto; color: #707581; font-size: 10px; }
 
-.main-column { position: relative; min-width: 0; min-height: 0; height: 100vh; display: flex; flex-direction: column; background: #15171d; }
-.topbar { height: 58px; padding: 0 22px; border-bottom: 1px solid #262930; display: flex; align-items: center; justify-content: space-between; gap: 16px; flex: 0 0 auto; }
+.main-column { position: relative; min-width: 0; min-height: 0; height: 100%; display: flex; flex-direction: column; background: #15171d; }
+.titlebar { height: 40px; flex: 0 0 auto; display: flex; align-items: center; gap: 14px; padding: 0 158px 0 17px; background: #13151a; -webkit-app-region: drag; }
+.titlebar button, .titlebar input { -webkit-app-region: no-drag; }
 .breadcrumbs { display: flex; align-items: center; gap: 8px; min-width: 0; color: #757a86; }
 .crumb-project { color: #b2b5c0; max-width: 170px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .crumb-session { color: #e6e7ed; font-weight: 550; max-width: 240px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.topbar-actions { display: flex; align-items: center; gap: 7px; }
+.topbar-actions { display: flex; align-items: center; gap: 7px; margin-left: auto; }
 .topbar-chip, .permission-chip { display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 8px; border: 1px solid #30333b; border-radius: 6px; background: #1b1d23; color: #a5a9b4; font-size: 10px; white-space: nowrap; }
 .git-branch-icon { color: #a69be9; font-weight: 700; }
 .model-chip { max-width: 185px; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
@@ -224,7 +223,7 @@ kbd { font-family: inherit; font-size: 10px; color: #a1a5b2; background: #1c1e24
 .composer { padding: 11px 12px 9px; border: 1px solid #383a44; border-radius: 11px; background: #1b1d24; box-shadow: 0 7px 28px #0002, inset 0 1px #ffffff08; transition: border .15s, box-shadow .15s; }
 .composer:focus-within { border-color: #6a61a5; box-shadow: 0 0 0 2px #7568cc18, 0 7px 28px #0002; }
 .composer.is-busy { border-color: #514b75; }
-.composer textarea { display: block; width: 100%; min-height: 27px; max-height: 122px; resize: none; outline: none; background: transparent; border: 0; padding: 2px 1px 8px; color: #e5e6ec; line-height: 1.6; font-size: 12px; }
+.composer textarea { display: block; width: 100%; min-height: 72px; max-height: 122px; resize: none; outline: none; background: transparent; border: 0; padding: 2px 1px 8px; color: #e5e6ec; line-height: 1.6; font-size: 12px; }
 .composer textarea::placeholder { color: #7d828e; }
 .composer textarea:disabled { color: #989ba5; }
 .composer-bottom { display: flex; align-items: center; justify-content: space-between; min-height: 30px; }
@@ -249,7 +248,7 @@ kbd { font-family: inherit; font-size: 10px; color: #a1a5b2; background: #1c1e24
 .toast-error { position: absolute; z-index: 4; right: 22px; bottom: 20px; max-width: min(520px, 70%); display: flex; align-items: start; gap: 10px; padding: 10px 11px; border: 1px solid #704844; border-radius: 8px; background: #382625; color: #f0c2b8; line-height: 1.5; box-shadow: 0 10px 32px #0006; font-size: 11px; }
 .toast-error button { background: transparent; color: #c99d95; border: 0; padding: 0; cursor: pointer; }
 
-.inspector { display: flex; flex-direction: column; min-width: 0; height: 100vh; background: #13151a; border-left: 1px solid #292b33; }
+.inspector { display: flex; flex-direction: column; min-width: 0; height: 100%; background: #13151a; border-left: 1px solid #292b33; }
 .inspector-tabs { height: 58px; display: flex; align-items: stretch; gap: 19px; padding: 0 14px; border-bottom: 1px solid #262930; flex: 0 0 auto; }
 .inspector-tabs button { position: relative; display: inline-flex; align-items: center; gap: 6px; padding: 0 2px; background: transparent; border: 0; color: #858996; cursor: pointer; font-size: 10px; }
 .inspector-tabs button.selected { color: #e2e0eb; }
@@ -325,10 +324,10 @@ kbd { font-family: inherit; font-size: 10px; color: #a1a5b2; background: #1c1e24
 .review-tabs button span { margin-left: 4px; color: #aaa4d6; }
 .review-tabs button.selected { border-color: #49435f; background: #28253a; color: #dedaff; }
 .review-tabs button:disabled { opacity: .4; cursor: default; }
-.git-scope-note { margin: 8px 0 0; color: #787d89; font-size: 9px; line-height: 1.55; }
-.git-count-row { flex: 0 0 auto; display: flex; flex-wrap: wrap; gap: 4px 10px; padding: 8px 12px 4px; color: #858a96; font-size: 9px; }
+.git-scope-note { margin: 10px 12px 2px; color: #787d89; font-size: 9px; line-height: 1.55; }
+.git-count-row { flex: 0 0 auto; display: flex; flex-wrap: wrap; gap: 4px 10px; padding: 10px 12px 6px; color: #858a96; font-size: 9px; }
 .git-count-row span:first-child { color: #c4c6d0; }
-.git-commit-box { flex: 0 0 auto; display: grid; grid-template-columns: 1fr auto; gap: 5px 7px; padding: 6px 10px 8px; border-bottom: 1px solid #252730; }
+.git-commit-box { flex: 0 0 auto; display: grid; grid-template-columns: 1fr auto; gap: 6px 8px; padding: 10px 12px 12px; border-bottom: 1px solid #252730; }
 .git-commit-box label { grid-column: 1 / -1; color: #aeb1bc; font-size: 9px; }
 .git-commit-box textarea { grid-column: 1 / -1; width: 100%; min-height: 46px; resize: vertical; padding: 7px; border: 1px solid #32353f; border-radius: 5px; outline: none; background: #14161c; color: #d9dbe3; font-family: inherit; font-size: 10px; line-height: 1.45; }
 .git-commit-box textarea:focus { border-color: #625a81; }
@@ -336,18 +335,20 @@ kbd { font-family: inherit; font-size: 10px; color: #a1a5b2; background: #1c1e24
 .git-commit-box small { align-self: center; color: #777c88; font-size: 8px; line-height: 1.45; }
 .primary-button.compact { min-height: 27px; padding: 0 8px; font-size: 9px; }
 .git-mutation-message { flex: 0 0 auto; grid-column: 1 / -1; overflow-wrap: anywhere; color: #a7c6ae; font-size: 8px; line-height: 1.5; }
-.git-stage-note { flex: 0 0 auto; padding: 5px 9px; color: #8b8f9a; font-size: 8px; line-height: 1.45; }
+.git-stage-note { flex: 0 0 auto; padding: 6px 12px; color: #8b8f9a; font-size: 8px; line-height: 1.45; }
 .git-write-button { flex: 0 0 auto; min-height: 23px; padding: 0 7px; border: 1px solid #49435f; border-radius: 5px; background: #28253a; color: #d8d1ff; font-size: 9px; cursor: pointer; }
 .git-write-button:hover:not(:disabled) { background: #363149; }
 .git-write-button:disabled { opacity: .4; cursor: default; }
-.git-truncated-notice { flex: 0 0 auto; margin: 5px 10px; padding: 6px 7px; color: #d6b98a; background: #2c261a; border: 1px solid #4a3e27; border-radius: 5px; font-size: 9px; line-height: 1.5; }
-.git-file-filters { flex: 0 0 auto; display: flex; gap: 4px; padding: 4px 10px 7px; }
+.git-truncated-notice { flex: 0 0 auto; margin: 6px 12px; padding: 6px 8px; color: #d6b98a; background: #2c261a; border: 1px solid #4a3e27; border-radius: 5px; font-size: 9px; line-height: 1.5; }
+.git-file-filters { flex: 0 0 auto; display: flex; gap: 4px; padding: 4px 12px 8px; }
 .git-file-filters button, .git-diff-sides button { min-height: 23px; padding: 0 7px; border: 1px solid transparent; border-radius: 5px; background: transparent; color: #818692; font-size: 9px; cursor: pointer; }
 .git-file-filters button:hover, .git-diff-sides button:hover { color: #d8d6e2; background: #20222a; }
 .git-file-filters button.selected, .git-diff-sides button.selected { color: #d8d1ff; border-color: #49435f; background: #28253a; }
 .git-file-list { flex: 0 1 auto; min-height: 55px; max-height: 30vh; overflow: auto; padding: 0 7px 7px; }
-.git-file-list::-webkit-scrollbar, .git-diff-content::-webkit-scrollbar { width: 6px; height: 6px; }
-.git-file-list::-webkit-scrollbar-thumb, .git-diff-content::-webkit-scrollbar-thumb { background: #353842; border-radius: 9px; }
+.git-file-list::-webkit-scrollbar, .git-diff-content::-webkit-scrollbar { width: 8px; height: 10px; }
+.git-file-list::-webkit-scrollbar-thumb, .git-diff-content::-webkit-scrollbar-thumb { background: #454a58; border-radius: 9px; }
+.git-file-list::-webkit-scrollbar-thumb:hover, .git-diff-content::-webkit-scrollbar-thumb:hover { background: #5a6070; }
+.git-file-list::-webkit-scrollbar-corner, .git-diff-content::-webkit-scrollbar-corner { background: transparent; }
 .git-file-row { display: flex; align-items: center; gap: 6px; width: 100%; min-height: 27px; padding: 2px 5px; border: 1px solid transparent; border-radius: 5px; background: transparent; text-align: left; cursor: pointer; }
 .git-file-row:hover { background: #1d1f26; }
 .git-file-row.selected { background: #24232f; border-color: #393747; }
@@ -359,25 +360,23 @@ kbd { font-family: inherit; font-size: 10px; color: #a1a5b2; background: #1c1e24
 .git-side-badge.staged { background: #202e29; color: #8cbea5; }
 .git-list-empty, .git-clean-state { padding: 14px 11px; color: #767b87; font-size: 9px; line-height: 1.6; }
 .git-diff-section { flex: 1; min-height: 120px; display: flex; flex-direction: column; border-top: 1px solid #282a32; }
-.git-diff-heading { flex: 0 0 auto; min-height: 34px; display: flex; align-items: center; gap: 5px; padding: 4px 9px; border-bottom: 1px solid #252730; }
+.git-diff-heading { flex: 0 0 auto; min-height: 34px; display: flex; align-items: center; gap: 5px; padding: 4px 12px; border-bottom: 1px solid #252730; }
 .git-diff-path { flex: 1; min-width: 0; overflow: hidden; color: #b8bbc6; text-overflow: ellipsis; white-space: nowrap; font: 9px "Cascadia Code", Consolas, monospace; }
 .git-diff-sides { flex: 0 0 auto; display: flex; gap: 2px; }
 .review-restore-button { flex: 0 0 auto; min-height: 23px; padding: 0 7px; border: 1px solid #61413d; border-radius: 5px; background: #2a1f21; color: #e0a095; font-size: 9px; cursor: pointer; }
 .review-restore-button:hover:not(:disabled) { background: #3a2729; color: #f0b0a4; }
 .review-restore-button:disabled { opacity: .4; cursor: default; }
 .review-stale-badge { flex: 0 0 auto; color: #e0a095; font-size: 8px; }
-.review-restore-confirm { flex: 0 0 auto; padding: 9px 10px; border-bottom: 1px solid #493437; background: #21191b; }
+.review-restore-confirm { flex: 0 0 auto; padding: 10px 12px; border-bottom: 1px solid #493437; background: #21191b; }
 .review-restore-confirm strong { display: block; overflow: hidden; color: #e3d8d8; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
 .review-restore-confirm p { margin: 5px 0 8px; color: #b59692; font-size: 8px; line-height: 1.6; }
 .review-restore-confirm > div { display: flex; justify-content: flex-end; gap: 5px; }
 .danger-button.compact { min-height: 26px; padding: 0 8px; border: 1px solid #784741; border-radius: 5px; background: #522c2a; color: #f0c4bb; font-size: 9px; cursor: pointer; }
 .danger-button.compact:hover:not(:disabled) { background: #693a36; }
 .danger-button.compact:disabled { opacity: .4; cursor: default; }
-.review-restore-success { flex: 0 0 auto; margin: 5px 10px; padding: 6px 7px; border: 1px solid #345543; border-radius: 5px; background: #1c2922; color: #91c4a2; font-size: 9px; line-height: 1.5; }
+.review-restore-success { flex: 0 0 auto; margin: 6px 12px; padding: 6px 8px; border: 1px solid #345543; border-radius: 5px; background: #1c2922; color: #91c4a2; font-size: 9px; line-height: 1.5; }
 .git-diff-content { flex: 1; min-height: 0; overflow: auto; background: #111318; }
 .diff-viewer { width: max-content; min-width: 100%; padding: 5px 0 8px; color: #aeb2bd; font: 9px/1.6 "Cascadia Code", Consolas, monospace; }
-.diff-column-heading { position: sticky; top: 0; z-index: 1; display: grid; grid-template-columns: 4em 4em max-content; min-height: 22px; border-bottom: 1px solid #282a32; background: #111318; color: #737885; }
-.diff-column-heading span { padding: 3px 7px; }
 .diff-line { display: grid; grid-template-columns: 4em 4em max-content; min-height: 1.6em; }
 .diff-line-number { padding: 0 7px; border-right: 1px solid #24262e; color: #5f6470; text-align: right; user-select: none; }
 .diff-line-text { padding: 0 8px; white-space: pre; }
@@ -412,7 +411,12 @@ kbd { font-family: inherit; font-size: 10px; color: #a1a5b2; background: #1c1e24
 .terminal-status-row { flex: 0 0 auto; min-height: 21px; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 0 11px; border-top: 1px solid #24262e; color: #727783; font-size: 8px; }
 .terminal-error { min-width: 0; overflow: hidden; color: #de978c; text-overflow: ellipsis; white-space: nowrap; }
 
-.modal-scrim { position: fixed; z-index: 10; inset: 0; display: flex; align-items: center; justify-content: center; padding: 24px; background: #07080ab8; backdrop-filter: blur(7px); }
+.modal-scrim { position: fixed; z-index: 10; inset: 40px 0 0 0; display: flex; align-items: center; justify-content: center; padding: 24px; background: #07080a8c; backdrop-filter: blur(5px); }
+.confirm-dialog { width: min(440px, 100%); display: grid; gap: 14px; padding: 18px 19px; border: 1px solid #32353f; border-radius: 13px; background: #13151a; box-shadow: 0 25px 90px #0009; }
+.confirm-dialog strong { color: #e8e9f0; font-size: 13px; line-height: 1.65; font-weight: 600; overflow-wrap: anywhere; }
+.confirm-dialog input { height: 34px; padding: 0 10px; border: 1px solid #32353f; border-radius: 7px; outline: none; background: #14161c; color: #d9dbe3; font-size: 13px; }
+.confirm-dialog input:focus { border-color: #6a61a5; }
+.confirm-actions { display: flex; justify-content: flex-end; gap: 7px; }
 .task-center-scrim { z-index: 20; padding: clamp(12px, 3vh, 28px); }
 .task-center-dialog { width: min(760px, 100%); height: min(760px, 88vh); min-height: 300px; display: flex; flex-direction: column; overflow: hidden; border: 1px solid #393b46; border-radius: 13px; background: #191b22; box-shadow: 0 25px 90px #0009; padding: 20px 22px 13px; }
 .task-center-dialog .settings-heading { flex: 0 0 auto; margin-bottom: 14px; }
@@ -534,7 +538,7 @@ kbd { font-family: inherit; font-size: 10px; color: #a1a5b2; background: #1c1e24
 :root[data-theme="light"] { color: #292b35; background: #f4f5f8; color-scheme: light; }
 :root[data-theme="light"] body, :root[data-theme="light"] .app-shell { background: #f4f5f8; }
 :root[data-theme="light"] .sidebar { background: #eceef3; border-color: #d9dce5; }
-:root[data-theme="light"] .brand-row, :root[data-theme="light"] .sidebar-bottom { border-color: #d9dce5; }
+:root[data-theme="light"] .sidebar-bottom { border-color: #d9dce5; }
 :root[data-theme="light"] .brand-name, :root[data-theme="light"] .crumb-session,
 :root[data-theme="light"] .message-body, :root[data-theme="light"] .message-meta,
 :root[data-theme="light"] .inspector-empty strong, :root[data-theme="light"] .activity-title,
@@ -569,6 +573,7 @@ kbd { font-family: inherit; font-size: 10px; color: #a1a5b2; background: #1c1e24
 :root[data-theme="light"] .workspace-row.selected, :root[data-theme="light"] .session-row.selected { background: #dedcf0; color: #2d2b3d; }
 :root[data-theme="light"] .main-column, :root[data-theme="light"] .inspector { border-color: #dfe2e9; }
 :root[data-theme="light"] .inspector { background: #f1f3f7; }
+:root[data-theme="light"] .titlebar { background: #f1f3f7; }
 :root[data-theme="light"] .inspector-tabs button.selected { color: #39354c; }
 :root[data-theme="light"] .activity-row, :root[data-theme="light"] .activity-output,
 :root[data-theme="light"] .detail-card, :root[data-theme="light"] .activity-policy { border-color: #dfe2e9; }
@@ -590,6 +595,9 @@ kbd { font-family: inherit; font-size: 10px; color: #a1a5b2; background: #1c1e24
 :root[data-theme="light"] .suggestion-card, :root[data-theme="light"] .detail-card,
 :root[data-theme="light"] .task-center-dialog, :root[data-theme="light"] .worktree-dialog,
 :root[data-theme="light"] .settings-dialog { background: #fbfcfe; border-color: #d8dce5; }
+:root[data-theme="light"] .confirm-dialog { background: #fbfcfe; border-color: #d8dce5; }
+:root[data-theme="light"] .confirm-dialog strong { color: #2c2f3a; }
+:root[data-theme="light"] .confirm-dialog input { background: #ffffff; border-color: #ccd1dc; color: #24273a; }
 :root[data-theme="light"] .task-center-search, :root[data-theme="light"] .worktree-source,
 :root[data-theme="light"] .worktree-parent-field input, :root[data-theme="light"] .field input,
 :root[data-theme="light"] .field select, :root[data-theme="light"] .key-entry input,
@@ -609,14 +617,14 @@ kbd { font-family: inherit; font-size: 10px; color: #a1a5b2; background: #1c1e24
 :root[data-theme="light"] .launch-screen { background: #f4f5f8; color: #697080; }
 
 @media (max-width: 1190px) {
-    .app-shell { grid-template-columns: var(--sidebar-width, 230px) 5px minmax(420px, 1fr) 5px var(--inspector-width, 258px); }
-    .app-shell.no-inspector { grid-template-columns: var(--sidebar-width, 230px) 5px minmax(420px, 1fr) 0 0; }
-    .topbar { padding: 0 15px; }
+    .app-columns { grid-template-columns: var(--sidebar-width, 230px) 5px minmax(420px, 1fr) 5px var(--inspector-width, 258px); }
+    .app-shell.no-inspector .app-columns { grid-template-columns: var(--sidebar-width, 230px) 5px minmax(420px, 1fr) 0 0; }
+    .titlebar { padding: 0 158px 0 12px; }
     .conversation { padding-left: 20px; padding-right: 20px; }
     .decision-stack, .composer-wrap { width: min(calc(100% - 40px), 790px); }
 }
 @media (max-width: 1020px) {
-    .app-shell, .app-shell.no-inspector { grid-template-columns: var(--sidebar-width, 226px) 5px minmax(450px, 1fr); }
+    .app-columns, .app-shell.no-inspector .app-columns { grid-template-columns: var(--sidebar-width, 226px) 5px minmax(450px, 1fr); }
     .inspector-resizer { display: none; }
     .inspector { display: none; }
     .topbar-chip { display: none; }

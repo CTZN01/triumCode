@@ -297,6 +297,13 @@ export interface DesktopEvent {
     payload: DesktopEventPayload;
 }
 
+export interface DesktopDialogRequest {
+    id: string;
+    message: string;
+    confirmLabel: string;
+    danger: boolean;
+}
+
 export interface DesktopApi {
     getBootstrap(): Promise<BootstrapData>;
     listTasks(): Promise<DesktopTaskCenterData>;
@@ -315,6 +322,10 @@ export interface DesktopApi {
     openSession(workspaceId: string, sessionId: string): Promise<OpenSessionData>;
     updateSessionRoute(workspaceId: string, sessionId: string, modelPreset: string | null, effort: string): Promise<void>;
     updatePermissionMode(workspaceId: string, sessionId: string, mode: "desktopDefault" | "desktopAcceptEdits" | "bypassPermissions"): Promise<void>;
+    toggleWindowMaximize(): Promise<void>;
+    setTitleBarOverlay(theme: "dark" | "light"): Promise<void>;
+    onDialogRequest(callback: (request: DesktopDialogRequest) => void): () => void;
+    respondDialog(id: string, accepted: boolean): Promise<void>;
     renameSession(workspaceId: string, sessionId: string, title: string): Promise<SessionSummary>;
     deleteSession(workspaceId: string, sessionId: string): Promise<{ reviewRemoved: boolean }>;
     getGitSnapshot(workspaceId: string): Promise<GitSnapshot>;

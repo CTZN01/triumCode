@@ -1,10 +1,10 @@
-import { app, BrowserWindow, dialog, screen, session, shell } from "electron";
+import { app, BrowserWindow, dialog, Menu, screen, session, shell } from "electron";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { AgentHost } from "./agent-host.js";
 import { CredentialStore } from "./credential-store.js";
-import { registerIpcHandlers } from "./ipc.js";
+import { registerIpcHandlers, requestRendererDialog } from "./ipc.js";
 import { SettingsStore } from "./settings-store.js";
 import { TerminalService } from "./terminal-service.js";
 import { WorkspaceStore } from "./workspace-store.js";
@@ -106,6 +106,12 @@ function createWindow(): BrowserWindow {
         show: false,
         backgroundColor: "#111318",
         title: "TriumCode",
+        titleBarStyle: "hidden",
+        titleBarOverlay: {
+            color: "#13151a",
+            symbolColor: "#e8e8e8",
+            height: 40,
+        },
         webPreferences: {
             preload: join(here, "../preload/index.cjs"),
             contextIsolation: true,
@@ -139,23 +145,20 @@ function createWindow(): BrowserWindow {
         try {
             const parsed = new URL(url);
             if (parsed.protocol === "https:") {
-                void dialog.showMessageBox(window, {
-                    type: "question",
-                    title: "Open external link",
-                    message: "Open this link in your default browser?",
-                    detail: parsed.hostname,
-                    buttons: ["Open link", "Cancel"],
-                    defaultId: 1,
-                    cancelId: 1,
-                    noLink: true,
-                }).then(({ response }) => {
-                    if (response === 0 && !window.isDestroyed()) void shell.openExternal(url);
+                void requestRendererDialog(window, `在新浏览器窗口打开 ${parsed.hostname} 的链接？`, "打开链接").then((accepted) => {
+                    if (accepted && !window.isDestroyed()) void shell.openExternal(url);
                 });
             }
         } catch { /* non-URL windows are denied */ }
         return { action: "deny" };
     });
     window.webContents.on("will-navigate", (event) => event.preventDefault());
+    window.webContents.on("before-input-event", (_event, input) => {
+        if (input.type !== "keyDown") return;
+        if (input.key === "F12" || (input.control && input.shift && input.key.toLowerCase() === "i")) {
+            window.webContents.toggleDevTools();
+        }
+    });
     window.webContents.on("render-process-gone", () => {
         void host?.stopAll().catch((error: unknown) => {
             const message = error instanceof Error ? error.message : String(error);
@@ -171,24 +174,18 @@ function createWindow(): BrowserWindow {
         event.preventDefault();
         if (closePromptOpen) return;
         closePromptOpen = true;
-        void dialog.showMessageBox(window, {
-            type: "warning",
-            title: "A task or terminal is still open",
-            message: "Stop tasks, close terminals, and exit TriumCode?",
-            detail: "Completed file changes stay in your workspace. Pending approvals will be denied, and terminal processes will be stopped.",
-            buttons: ["Stop and exit", "Keep TriumCode open"],
-            defaultId: 1,
-            cancelId: 1,
-            noLink: true,
-        }).then(async ({ response }) => {
-            if (response !== 0) return;
-            await Promise.all([host?.stopAll(), terminals?.closeAll()]);
-            closeAfterStopping = true;
-            if (!window.isDestroyed()) window.close();
-        }).catch((error: unknown) => {
-            const message = error instanceof Error ? error.message : String(error);
-            dialog.showErrorBox("TriumCode could not exit cleanly", message);
-        }).finally(() => { closePromptOpen = false; });
+        void requestRendererDialog(window, "仍有任务或终端在运行；退出会停止它们，待审批的请求将被拒绝。已完成的文件改动会保留在本地。", "停止并退出", true)
+            .then(async (accepted) => {
+                if (!accepted) return;
+                await Promise.all([host?.stopAll(), terminals?.closeAll()]);
+                closeAfterStopping = true;
+                if (!window.isDestroyed()) window.close();
+            })
+            .catch((error: unknown) => {
+                const message = error instanceof Error ? error.message : String(error);
+                dialog.showErrorBox("TriumCode could not exit cleanly", message);
+            })
+            .finally(() => { closePromptOpen = false; });
     });
     window.on("closed", () => {
         if (mainWindow === window) mainWindow = null;
@@ -209,6 +206,7 @@ if (hasSingleInstanceLock) {
 
     app.whenReady().then(() => {
         app.setAppUserModelId("com.triumcode.desktop");
+        Menu.setApplicationMenu(null);
         session.defaultSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
         const userData = app.getPath("userData");
         windowStatePath = join(userData, "window-state.json");
