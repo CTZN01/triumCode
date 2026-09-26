@@ -78,7 +78,7 @@ function pathKey(path: string): string {
 
 function isInside(parent: string, candidate: string): boolean {
     const path = relative(pathKey(parent), pathKey(candidate));
-    return path === "" || path === ".." || path.startsWith(`..${sep}`) || isAbsolute(path);
+    return path === "" || (path !== ".." && !path.startsWith(`..${sep}`) && !isAbsolute(path));
 }
 
 function slug(value: string): string {
@@ -109,12 +109,16 @@ async function repositoryRoot(workspaceRoot: string): Promise<string> {
 
 async function inspect(root: string): Promise<WorktreeSetupData> {
     const [branchResult, currentResult, headResult, statusResult] = await Promise.all([
-        runGit(root, ["for-each-ref", "--format=%(refname:short)", "refs/heads"]),
+        runGit(root, ["for-each-ref", "--format=%(refname:short)%00%(symref)", "refs/heads", "refs/remotes"]),
         runGit(root, ["branch", "--show-current"]),
         runGit(root, ["rev-parse", "--verify", "--end-of-options", "HEAD^{commit}"]).catch(() => null),
         runGit(root, ["status", "--porcelain=v1", "--untracked-files=all"]),
     ]);
-    const branches = branchResult.stdout.split(/\r?\n/).map((value) => value.trim()).filter(Boolean).sort((a, b) => a.localeCompare(b));
+    const branches = branchResult.stdout.split(/\r?\n/)
+        .map((value) => value.split("\0"))
+        .filter(([name, symbolicTarget]) => Boolean(name) && !symbolicTarget)
+        .map(([name]) => name)
+        .sort((a, b) => a.localeCompare(b));
     const currentBranch = currentResult.stdout.trim() || null;
     const head = headResult?.stdout.trim() ?? "";
     if (!/^[a-f0-9]{40,64}$/i.test(head)) {
