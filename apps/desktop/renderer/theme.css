@@ -370,12 +370,28 @@
 :root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .message.user .message-meta {
     color: var(--text);
 }
-:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .copy-message {
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .message-copy {
     color: var(--muted);
 }
-:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .copy-message:hover {
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .message-copy:hover {
     background: var(--hover);
     color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .message-thumb {
+    color: var(--muted);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .message-thumb:hover {
+    background: var(--hover);
+    color: var(--text);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .message-thumb.active-up {
+    color: var(--success);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .message-thumb.active-down {
+    color: var(--danger);
+}
+:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .copy-button.copied {
+    color: var(--success);
 }
 :root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .message-body {
     color: var(--text);

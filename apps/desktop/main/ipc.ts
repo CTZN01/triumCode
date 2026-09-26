@@ -1,4 +1,4 @@
-import { dialog, ipcMain, type BrowserWindow, type IpcMainInvokeEvent } from "electron";
+import { clipboard, dialog, ipcMain, type BrowserWindow, type IpcMainInvokeEvent } from "electron";
 import type { CreateWorktreeRequest, PermissionChoice } from "../shared/contracts.js";
 import { AgentHost } from "./agent-host.js";
 import type { TerminalService } from "./terminal-service.js";
@@ -134,6 +134,9 @@ export function registerIpcHandlers({ host, terminals, workspaceWatch, getWindow
         if (!resolve) return;
         pendingDialogResponses.delete(key);
         resolve(accepted === true);
+    });
+    handle("desktop:copy-text", (text) => {
+        clipboard.writeText(stringArg(text, "text", 200_000));
     });
 
     handle("desktop:bootstrap", () => host.bootstrap());

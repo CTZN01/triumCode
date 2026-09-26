@@ -283,7 +283,7 @@ function MessageBody({ text }: { text: string }) {
         if (codeToken) {
             const [language, ...code] = codeBlocks[Number(codeToken[1])].split("\n");
             return <pre className="code-block" key={index}>
-                <div className="code-header"><span>{language || "code"}</span><button onClick={() => void navigator.clipboard.writeText(code.join("\n"))}>复制代码</button></div>
+                <div className="code-header"><span>{language || "code"}</span><CopyButton text={code.join("\n")} title="复制代码" textLabel="复制代码" /></div>
                 <code>{code.join("\n")}</code>
             </pre>;
         }
@@ -322,7 +322,7 @@ function MessageBody({ text }: { text: string }) {
 
 const MemoMessageBody = memo(MessageBody);
 
-function Icon({ name, size = 16 }: { name: "plus" | "folder" | "settings" | "search" | "more" | "close" | "trash" | "copy" | "arrow" | "spark" | "chevron" | "branch" | "alert"; size?: number }) {
+function Icon({ name, size = 16 }: { name: "plus" | "folder" | "settings" | "search" | "more" | "close" | "trash" | "copy" | "check" | "thumb-up" | "thumb-down" | "arrow" | "spark" | "chevron" | "branch" | "alert"; size?: number }) {
     const paths: Record<string, ReactNode> = {
         plus: <><path d="M12 5v14" /><path d="M5 12h14" /></>,
         folder: <><path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" /></>,
@@ -332,6 +332,9 @@ function Icon({ name, size = 16 }: { name: "plus" | "folder" | "settings" | "sea
         close: <><path d="m6 6 12 12" /><path d="M18 6 6 18" /></>,
         trash: <><path d="M4 7h16" /><path d="M10 11v6M14 11v6" /><path d="m5 7 1 13h12l1-13" /><path d="M9 7V4h6v3" /></>,
         copy: <><rect x="8" y="8" width="12" height="12" rx="2" /><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3" /></>,
+        check: <path d="m5 12.5 4.7 4.7L19 7.5" />,
+        "thumb-up": <><path d="M14 9V5a3 3 0 0 0-3-3l-4 9v11h11.28a2 2 0 0 0 2-1.7l1.38-9a2 2 0 0 0-2-2.3zM7 22H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3" /></>,
+        "thumb-down": <><path d="M10 15v4a3 3 0 0 0 3 3l4-9V2H5.72a2 2 0 0 0-2 1.7l-1.38 9a2 2 0 0 0 2 2.3zm7-13h2.67A2.31 2.31 0 0 1 22 4v7a2.31 2.31 0 0 1-2.33 2H17" /></>,
         arrow: <><path d="M5 12h14" /><path d="m13 6 6 6-6 6" /></>,
         spark: <><path d="m12 3 1.9 5.8L20 11l-6.1 2.2L12 19l-2-5.8L4 11l6-2.2z" /><path d="m19 15 .8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z" /></>,
         chevron: <path d="m9 18 6-6-6-6" />,
@@ -339,6 +342,39 @@ function Icon({ name, size = 16 }: { name: "plus" | "folder" | "settings" | "sea
         alert: <><circle cx="12" cy="12" r="9" /><path d="M12 7.5v5.5" /><path d="M12 16.5h.01" /></>,
     };
     return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name]}</svg>;
+}
+
+function CopyButton({ text, title, className, size = 13, textLabel }: { text: string; title: string; className?: string; size?: number; textLabel?: string }) {
+    const [copied, setCopied] = useState(false);
+    const resetTimer = useRef<number | null>(null);
+    useEffect(() => () => {
+        if (resetTimer.current !== null) window.clearTimeout(resetTimer.current);
+    }, []);
+    const copy = async () => {
+        try {
+            await window.desktop.copyText(text);
+        } catch {
+            return;
+        }
+        setCopied(true);
+        if (resetTimer.current !== null) window.clearTimeout(resetTimer.current);
+        resetTimer.current = window.setTimeout(() => setCopied(false), 1500);
+    };
+    const classes = ["copy-button", className, copied ? "copied" : ""].filter(Boolean).join(" ");
+    return <button type="button" className={classes} title={copied ? "已复制" : title} aria-label={title} onClick={() => void copy()}>
+        {copied ? <Icon name="check" size={size} /> : <Icon name="copy" size={size} />}
+        {textLabel != null && <span>{copied ? "已复制" : textLabel}</span>}
+    </button>;
+}
+
+function MessageActions({ text, showFeedback }: { text: string; showFeedback: boolean }) {
+    const [feedback, setFeedback] = useState<"up" | "down" | null>(null);
+    const toggle = (value: "up" | "down") => setFeedback((current) => (current === value ? null : value));
+    return <div className="message-actions">
+        <CopyButton text={text} title="复制消息" className="message-copy" />
+        {showFeedback && <button type="button" className={`message-thumb${feedback === "up" ? " active-up" : ""}`} title="赞" aria-label="赞" aria-pressed={feedback === "up"} onClick={() => toggle("up")}><Icon name="thumb-up" size={13} /></button>}
+        {showFeedback && <button type="button" className={`message-thumb${feedback === "down" ? " active-down" : ""}`} title="踩" aria-label="踩" aria-pressed={feedback === "down"} onClick={() => toggle("down")}><Icon name="thumb-down" size={13} /></button>}
+    </div>;
 }
 
 function ContextRing({ utilization }: { utilization: number | null }) {
@@ -1715,8 +1751,9 @@ export function App() {
                         {messageCursor !== null && <button type="button" className="older-messages" disabled={olderLoading} onClick={() => void loadOlderMessages()}>{olderLoading ? "正在加载更早消息..." : "加载更早消息"}</button>}
                         {messages.map((message) => <article className={`message ${message.role}`} key={message.id} data-message-id={message.id}>
                             <div className="message-content">
-                                <div className="message-meta"><span>{message.role === "user" ? "你" : "TriumCode"}</span>{message.role === "assistant" && <button className="copy-message" title="复制消息" aria-label="复制消息" onClick={() => void navigator.clipboard.writeText(message.text)}><Icon name="copy" size={13} /></button>}</div>
+                                <div className="message-meta"><span>{message.role === "user" ? "你" : "TriumCode"}</span></div>
                                 {message.text ? <MemoMessageBody text={message.text} /> : <div className="thinking-placeholder" role="status">正在准备回复</div>}
+                                {message.text && <MessageActions text={message.text} showFeedback={message.role === "assistant"} />}
                             </div>
                         </article>)}
                         {busy && <div className="agent-working" role="status"><span className="working-glint">{statusLabel}</span></div>}
@@ -1881,7 +1918,7 @@ export function App() {
                             <div className="activity-policy outcome"><span>授权状态</span><strong>已撤销，不再放行后续匹配操作</strong></div>
                         )}
                         {activity.output && <div className="activity-output">
-                            <div className="activity-output-heading"><span>结果</span><button type="button" className="activity-copy" title="复制当前结果" aria-label="复制当前结果" onClick={() => void navigator.clipboard.writeText(activity.output!)}><Icon name="copy" size={12} /></button></div>
+                            <div className="activity-output-heading"><span>结果</span><CopyButton text={activity.output!} title="复制当前结果" className="activity-copy" size={12} /></div>
                             <pre>{activity.output}</pre>
                         </div>}
                     </div>

@@ -76,6 +76,7 @@ const api: DesktopApi = {
         return () => ipcRenderer.removeListener("desktop:dialog-request", listener);
     },
     respondDialog: (id, accepted) => ipcRenderer.invoke("desktop:dialog-response", id, accepted),
+    copyText: (text) => ipcRenderer.invoke("desktop:copy-text", text),
 };
 
 contextBridge.exposeInMainWorld("desktop", api);

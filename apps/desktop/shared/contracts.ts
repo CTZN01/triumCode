@@ -333,6 +333,7 @@ export interface DesktopApi {
     setTitleBarOverlay(theme: "dark" | "light"): Promise<void>;
     onDialogRequest(callback: (request: DesktopDialogRequest) => void): () => void;
     respondDialog(id: string, accepted: boolean): Promise<void>;
+    copyText(text: string): Promise<void>;
     renameSession(workspaceId: string, sessionId: string, title: string): Promise<SessionSummary>;
     deleteSession(workspaceId: string, sessionId: string): Promise<{ reviewRemoved: boolean }>;
     getGitSnapshot(workspaceId: string): Promise<GitSnapshot>;

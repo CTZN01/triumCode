@@ -141,9 +141,12 @@ kbd { font-family: inherit; font-size: 10px; color: #a1a5b2; background: #1c1e24
 .message-content { flex: 1; min-width: 0; }
 .message-meta { height: 24px; display: flex; align-items: center; gap: 9px; color: #aaaebb; font-size: 10px; font-weight: 650; }
 .message.user .message-meta { color: #d4d6de; }
-.copy-message { opacity: 0; display: grid; place-items: center; width: 23px; height: 21px; border: 0; background: transparent; color: #888d99; cursor: pointer; border-radius: 4px; }
-.message:hover .copy-message, .message:focus-within .copy-message { opacity: 1; }
-.copy-message:hover { background: #292c34; color: #dddfe6; }
+.message-actions { display: flex; align-items: center; gap: 2px; margin-top: -6px; opacity: 0; }
+.message:hover .message-actions, .message:focus-within .message-actions, .message-actions:has(.copied), .message-actions:has(.active-up), .message-actions:has(.active-down) { opacity: 1; }
+.message-copy, .message-thumb { display: grid; place-items: center; width: 24px; height: 20px; border: 0; background: transparent; color: #7c8290; cursor: pointer; border-radius: 4px; }
+.message-copy:hover, .message-thumb:hover { background: #292c34; color: #dddfe6; }
+.message-thumb.active-up { color: #92c8a4; }
+.message-thumb.active-down { color: #e58d84; }
 .message-body { color: #d6d8e0; font-size: 12px; line-height: 1.72; overflow-wrap: anywhere; }
 .message-body p { margin: 3px 0 11px; }
 .message-body h3, .message-body h4, .message-body h5 { color: #f0eff5; letter-spacing: -.01em; margin: 17px 0 8px; }
