@@ -38,6 +38,7 @@ import type {
     WorktreeSetupData,
     WorkspaceSummary,
 } from "../shared/contracts.js";
+import { updateQuestionActivity } from "../shared/question-activity.js";
 import { desktopTaskStatus } from "./task-status.js";
 import { connectionFailureMessage } from "./connection-result.js";
 import { RunShutdown } from "./run-shutdown.js";
@@ -1129,11 +1130,14 @@ export class AgentHost {
         this.questions.delete(requestId);
         const runtime = this.sessions.get(sessionKey(pending.workspaceId, pending.sessionId));
         if (runtime) {
+            const outcome = answer.trim() ? "answered" : "skipped";
+            runtime.activities = updateQuestionActivity(runtime.activities, requestId, runtime.currentRunId,
+                pending.question, new Date().toISOString(), outcome);
             this.persistSession(runtime);
             this.publish(runtime, {
                 type: "question.resolved",
                 requestId,
-                outcome: answer.trim() ? "answered" : "skipped",
+                outcome,
             });
         }
         pending.resolve(answer.trim() ? answer : "The user skipped this question. Do not treat this as a response.");
@@ -1590,16 +1594,12 @@ export class AgentHost {
         const requestId = randomUUID();
         const safeQuestion = redact(question, runtime.apiKey);
         const safeOptions = options?.map((option) => redact(option, runtime.apiKey));
-        this.publish(runtime, {
-            type: "question.requested",
-            requestId,
-            question: safeQuestion,
-            options: safeOptions,
-        });
         return new Promise((resolve) => {
             const timer = setTimeout(() => {
                 if (!this.questions.has(requestId)) return;
                 this.questions.delete(requestId);
+                runtime.activities = updateQuestionActivity(runtime.activities, requestId, runtime.currentRunId,
+                    safeQuestion, new Date().toISOString(), "expired");
                 this.persistSession(runtime);
                 this.publish(runtime, { type: "question.resolved", requestId, outcome: "expired" });
                 resolve("The user did not answer before this question expired. Do not treat this as a response.");
@@ -1613,7 +1613,15 @@ export class AgentHost {
                 resolve,
                 timer,
             });
+            runtime.activities = updateQuestionActivity(runtime.activities, requestId, runtime.currentRunId,
+                safeQuestion, new Date().toISOString());
             this.persistSession(runtime);
+            this.publish(runtime, {
+                type: "question.requested",
+                requestId,
+                question: safeQuestion,
+                options: safeOptions,
+            });
         });
     }
 
@@ -1638,6 +1646,8 @@ export class AgentHost {
             if (pending.workspaceId !== runtime.workspaceId || pending.sessionId !== runtime.sessionId) continue;
             clearTimeout(pending.timer);
             this.questions.delete(id);
+            runtime.activities = updateQuestionActivity(runtime.activities, id, runtime.currentRunId,
+                pending.question, new Date().toISOString(), "cancelled");
             this.persistSession(runtime);
             this.publish(runtime, { type: "question.resolved", requestId: id, outcome: "cancelled" });
             pending.resolve("The task was stopped before the user answered this question.");

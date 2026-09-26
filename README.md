@@ -31,6 +31,8 @@ staged/unstaged file diffs with old/new line numbers and collapsible hunks,
 selected-file stage/unstage actions, commits that contain staged content only,
 and a workspace-bound Windows PowerShell terminal. Creating a commit can run
 the repository's local Git hooks.
+User-question activity records answered, skipped, expired, and cancelled
+outcomes without saving the answer text.
 Closing the window with a running task or open terminal asks whether to stop
 them or stay in the app. Exit waits for task cancellation and PowerShell's exit
 event; if the shell does not exit, the app reports the failure and stays open.

@@ -26,6 +26,7 @@ import { GitChangesPanel } from "./GitChangesPanel.js";
 import { NewWorktreeDialog, WorktreeManagementDialog } from "./NewWorktreeDialog.js";
 import { TaskCenterDialog } from "./TaskCenterDialog.js";
 import { TerminalPanel } from "./TerminalPanel.js";
+import { updateQuestionActivity } from "../shared/question-activity.js";
 
 type ActivityRow = SessionActivity;
 
@@ -761,11 +762,15 @@ export function App() {
             }]);
             setBusy(true);
             setStatusLabel("等待你的回答");
+            setActivities((items) => updateQuestionActivity(items, payload.requestId, event.runId,
+                payload.question, event.timestamp));
             return;
         }
         if (payload.type === "question.resolved") {
             setQuestions((items) => items.filter((item) => item.requestId !== payload.requestId));
             setQuestionDraft("");
+            setActivities((items) => updateQuestionActivity(items, payload.requestId, event.runId,
+                undefined, event.timestamp, payload.outcome));
             return;
         }
         const agentEvent = payload.event;
@@ -1297,9 +1302,11 @@ export function App() {
     };
 
     const respondQuestion = async (question: PendingUserQuestion, answer: string) => {
-        setQuestions((current) => current.filter((item) => item.requestId !== question.requestId));
-        setQuestionDraft("");
-        try { await window.desktop.respondToQuestion(question.requestId, answer); }
+        try {
+            await window.desktop.respondToQuestion(question.requestId, answer);
+            setQuestions((current) => current.filter((item) => item.requestId !== question.requestId));
+            setQuestionDraft("");
+        }
         catch (failure) { setError(displayError(failure)); }
     };
 
