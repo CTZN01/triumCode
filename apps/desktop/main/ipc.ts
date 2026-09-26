@@ -202,6 +202,12 @@ export function registerIpcHandlers({ host, terminals, workspaceWatch, getWindow
     handle("desktop:list-sessions", (id) => host.listSessions(workspaceId(id)));
     handle("desktop:create-session", (id) => host.createSession(workspaceId(id)));
     handle("desktop:open-session", (workspace, session) => host.openSession(workspaceId(workspace), sessionId(session)));
+    handle("desktop:earlier-messages", (workspace, session, before) => {
+        if (typeof before !== "number" || !Number.isSafeInteger(before) || before < 0) {
+            throw new DesktopServiceError("INVALID_ARGUMENT", "Message cursor is invalid.");
+        }
+        return host.getEarlierMessages(workspaceId(workspace), sessionId(session), before);
+    });
     handle("desktop:rename-session", (workspace, session, title) =>
         host.renameSession(workspaceId(workspace), sessionId(session), stringArg(title, "title", 120)));
     handle("desktop:delete-session", (workspace, session) => host.deleteSession(workspaceId(workspace), sessionId(session)));

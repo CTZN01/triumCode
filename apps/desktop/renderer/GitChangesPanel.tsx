@@ -125,16 +125,22 @@ export function GitChangesPanel({
             return;
         }
         let live = true;
+        let checking = false;
         const check = () => {
+            if (document.hidden || checking) return;
+            checking = true;
             void window.desktop.checkReviewFile(workspaceId, review.runId!, selectedReviewFile.path, selectedReviewFile.currentHash).then((matches) => {
                 if (live) setFileStale(!matches);
             }).catch(() => {
                 if (live) setFileStale(true);
+            }).finally(() => {
+                checking = false;
             });
         };
         check();
         const timer = window.setInterval(check, 1800);
-        return () => { live = false; window.clearInterval(timer); };
+        document.addEventListener("visibilitychange", check);
+        return () => { live = false; window.clearInterval(timer); document.removeEventListener("visibilitychange", check); };
     }, [view, workspaceId, review?.runId, selectedReviewFile?.path, selectedReviewFile?.currentHash]);
 
     const selectFile = (file: GitFileChange) => {

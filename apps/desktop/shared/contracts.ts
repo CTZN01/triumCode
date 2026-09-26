@@ -184,6 +184,11 @@ export interface ConversationMessage {
     text: string;
 }
 
+export interface ConversationPage {
+    messages: ConversationMessage[];
+    nextCursor: number | null;
+}
+
 export interface DesktopAttachment {
     path: string;
     content: string;
@@ -225,6 +230,7 @@ export interface OpenSessionData {
     session: SessionSummary;
     route: DesktopSessionSettings;
     messages: ConversationMessage[];
+    messageCursor: number | null;
     activities: SessionActivity[];
     usage: AgentUsage;
     contextUsage: AgentContextUsage | null;
@@ -320,6 +326,7 @@ export interface DesktopApi {
     listSessions(workspaceId: string): Promise<SessionSummary[]>;
     createSession(workspaceId: string): Promise<OpenSessionData>;
     openSession(workspaceId: string, sessionId: string): Promise<OpenSessionData>;
+    getEarlierMessages(workspaceId: string, sessionId: string, before: number): Promise<ConversationPage>;
     updateSessionRoute(workspaceId: string, sessionId: string, modelPreset: string | null, effort: string): Promise<void>;
     updatePermissionMode(workspaceId: string, sessionId: string, mode: "desktopDefault" | "desktopAcceptEdits" | "bypassPermissions"): Promise<void>;
     toggleWindowMaximize(): Promise<void>;

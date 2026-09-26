@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type CSSProperties, type FormEvent, type KeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type CSSProperties, type FormEvent, type KeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type UIEvent } from "react";
 import type {
     BootstrapData,
     ConversationMessage,
@@ -320,6 +320,8 @@ function MessageBody({ text }: { text: string }) {
     })}</div>;
 }
 
+const MemoMessageBody = memo(MessageBody);
+
 function Icon({ name, size = 16 }: { name: "plus" | "folder" | "settings" | "search" | "more" | "close" | "trash" | "copy" | "arrow" | "spark" | "chevron" | "branch" | "alert"; size?: number }) {
     const paths: Record<string, ReactNode> = {
         plus: <><path d="M12 5v14" /><path d="M5 12h14" /></>,
@@ -361,6 +363,8 @@ export function App() {
     const [effortChoice, setEffortChoice] = useState("high");
     const [sessionCredentialState, setSessionCredentialState] = useState<CredentialState | null>(null);
     const [messages, setMessages] = useState<ConversationMessage[]>([]);
+    const [messageCursor, setMessageCursor] = useState<number | null>(null);
+    const [olderLoading, setOlderLoading] = useState(false);
     const [activities, setActivities] = useState<ActivityRow[]>([]);
     const [tokenUsage, setTokenUsage] = useState<AgentUsage | null>(null);
     const [contextUsage, setContextUsage] = useState<AgentContextUsage | null>(null);
@@ -410,6 +414,13 @@ export function App() {
     const appShellRef = useRef<HTMLDivElement | null>(null);
     const resizingPanel = useRef<"sidebar" | "inspector" | null>(null);
     const endOfMessages = useRef<HTMLDivElement | null>(null);
+    const conversationRef = useRef<HTMLDivElement | null>(null);
+    const historyRequestSequence = useRef(0);
+    const olderRequestPending = useRef(false);
+    const recentRequestPending = useRef(false);
+    const stickToBottom = useRef(true);
+    const historyCompacted = useRef(false);
+    const scrollAnchor = useRef<{ id: string; top: number } | null>(null);
     const activityList = useRef<HTMLDivElement | null>(null);
     const composerInput = useRef<HTMLTextAreaElement | null>(null);
     const attachmentInput = useRef<HTMLInputElement | null>(null);
@@ -420,6 +431,43 @@ export function App() {
     const reviewRequestSequence = useRef(0);
     const taskRequestSequence = useRef(0);
     const worktreeRequestSequence = useRef(0);
+    const pendingAssistantDelta = useRef<{ key: string; runId: string; text: string } | null>(null);
+    const assistantDeltaFrame = useRef<number | null>(null);
+
+    const invalidateMessageRequests = useCallback(() => {
+        historyRequestSequence.current++;
+        olderRequestPending.current = false;
+        recentRequestPending.current = false;
+        setOlderLoading(false);
+    }, []);
+
+    const resetMessageHistory = useCallback((cursor: number | null) => {
+        invalidateMessageRequests();
+        stickToBottom.current = true;
+        historyCompacted.current = false;
+        scrollAnchor.current = null;
+        setMessageCursor(cursor);
+    }, [invalidateMessageRequests]);
+
+    const flushAssistantDelta = useCallback(() => {
+        if (assistantDeltaFrame.current !== null) window.cancelAnimationFrame(assistantDeltaFrame.current);
+        assistantDeltaFrame.current = null;
+        const pending = pendingAssistantDelta.current;
+        pendingAssistantDelta.current = null;
+        if (!pending || `${activeRef.current.workspaceId}:${activeRef.current.sessionId}` !== pending.key) return;
+        setMessages((current) => {
+            const id = `assistant-${pending.runId}`;
+            const index = current.findIndex((message) => message.id === id);
+            if (index < 0) return [...current, { id, role: "assistant", text: pending.text }];
+            const next = [...current];
+            next[index] = { ...next[index], text: next[index].text + pending.text };
+            return next;
+        });
+    }, []);
+
+    useEffect(() => () => {
+        if (assistantDeltaFrame.current !== null) window.cancelAnimationFrame(assistantDeltaFrame.current);
+    }, []);
 
     useEffect(() => {
         const timer = window.setTimeout(() => {
@@ -617,6 +665,10 @@ export function App() {
         const routeCredentialState = await window.desktop.getCredentialState(opened.route.modelPreset);
         const key = `${workspaceId}:${sessionId}`;
         eventTracker.openSession(key, opened.eventSequence, opened.runId);
+        if (assistantDeltaFrame.current !== null) window.cancelAnimationFrame(assistantDeltaFrame.current);
+        assistantDeltaFrame.current = null;
+        pendingAssistantDelta.current = null;
+        resetMessageHistory(opened.messageCursor);
         activeRef.current = { workspaceId, sessionId };
         setActiveSession(opened.session);
         setSessionRoute(opened.route);
@@ -646,7 +698,57 @@ export function App() {
                     : opened.session.status === "running" ? "任务运行中" : "就绪");
         setError("");
         void refreshCodeReview(workspaceId, sessionId);
-    }, [eventTracker, refreshCodeReview]);
+    }, [eventTracker, refreshCodeReview, resetMessageHistory]);
+
+    const loadOlderMessages = useCallback(async () => {
+        const before = messageCursor;
+        const { workspaceId, sessionId } = activeRef.current;
+        if (before === null || olderRequestPending.current || recentRequestPending.current || !workspaceId || !sessionId) return;
+        const request = ++historyRequestSequence.current;
+        olderRequestPending.current = true;
+        setOlderLoading(true);
+        try {
+            const page = await window.desktop.getEarlierMessages(workspaceId, sessionId, before);
+            if (request !== historyRequestSequence.current
+                || activeRef.current.workspaceId !== workspaceId || activeRef.current.sessionId !== sessionId) return;
+            if (page.messages.length) {
+                const first = conversationRef.current?.querySelector<HTMLElement>("[data-message-id]");
+                scrollAnchor.current = first?.dataset.messageId
+                    ? { id: first.dataset.messageId, top: first.getBoundingClientRect().top } : null;
+                setMessages((current) => {
+                    const existing = new Set(current.map((message) => message.id));
+                    return [...page.messages.filter((message) => !existing.has(message.id)), ...current];
+                });
+            }
+            setMessageCursor(page.nextCursor);
+        } catch (failure) {
+            if (request === historyRequestSequence.current) setError(displayError(failure));
+        } finally {
+            if (request === historyRequestSequence.current) {
+                olderRequestPending.current = false;
+                setOlderLoading(false);
+            }
+        }
+    }, [messageCursor]);
+
+    const refreshRecentMessages = useCallback(async () => {
+        const { workspaceId, sessionId } = activeRef.current;
+        if (!workspaceId || !sessionId || recentRequestPending.current || olderRequestPending.current) return;
+        const request = ++historyRequestSequence.current;
+        recentRequestPending.current = true;
+        try {
+            const page = await window.desktop.getEarlierMessages(workspaceId, sessionId, Number.MAX_SAFE_INTEGER);
+            if (request !== historyRequestSequence.current || !stickToBottom.current
+                || activeRef.current.workspaceId !== workspaceId || activeRef.current.sessionId !== sessionId) return;
+            historyCompacted.current = false;
+            setMessages(page.messages);
+            setMessageCursor(page.nextCursor);
+        } catch (failure) {
+            if (request === historyRequestSequence.current) setError(displayError(failure));
+        } finally {
+            if (request === historyRequestSequence.current) recentRequestPending.current = false;
+        }
+    }, []);
 
     const changeSessionRoute = async (modelPreset: string | null, effort: string) => {
         if (!activeWorkspace || !activeSession || !sessionRoute || busy || externalRun || quickSettingsSaving) return;
@@ -664,6 +766,7 @@ export function App() {
             const wasCurrent = activeRef.current.workspaceId === selected.id;
             setActiveWorkspace(selected);
             activeRef.current = { workspaceId: selected.id, sessionId: "" };
+            resetMessageHistory(null);
             setBusy(false);
             setExternalRun(false);
             setRunId(null);
@@ -709,7 +812,7 @@ export function App() {
         } catch (failure) {
             setError(displayError(failure));
         }
-    }, [openSession, refreshGitSnapshot, refreshSessions]);
+    }, [openSession, refreshGitSnapshot, refreshSessions, resetMessageHistory]);
 
     const openTask = useCallback(async (task: DesktopTaskSummary) => {
         setTaskCenterOpen(false);
@@ -749,9 +852,16 @@ export function App() {
 
     useEffect(() => {
         if (!taskCenterOpen) return;
-        void refreshTaskCenter();
-        const timer = window.setInterval(() => void refreshTaskCenter(), 5_000);
-        return () => window.clearInterval(timer);
+        const refreshWhenVisible = () => {
+            if (!document.hidden) void refreshTaskCenter();
+        };
+        refreshWhenVisible();
+        const timer = window.setInterval(refreshWhenVisible, 5_000);
+        document.addEventListener("visibilitychange", refreshWhenVisible);
+        return () => {
+            window.clearInterval(timer);
+            document.removeEventListener("visibilitychange", refreshWhenVisible);
+        };
     }, [refreshTaskCenter, taskCenterOpen]);
 
     useEffect(() => window.desktop.onEvent((event) => {
@@ -770,6 +880,8 @@ export function App() {
             }
         }
         if (event.workspaceId !== activeRef.current.workspaceId || event.sessionId !== activeRef.current.sessionId) return;
+        if (payload.type !== "agent" || payload.event.type !== "assistant.delta") flushAssistantDelta();
+        if (isRunStart) invalidateMessageRequests();
         if (event.runId) {
             setRunId(event.runId);
             setExternalRun(false);
@@ -844,6 +956,11 @@ export function App() {
         }
         const agentEvent = payload.event;
         if (agentEvent.type === "tool.completed") void refreshCodeReview(event.workspaceId, event.sessionId);
+        if (agentEvent.type === "context.compaction.completed") {
+            invalidateMessageRequests();
+            historyCompacted.current = true;
+            setMessageCursor(null);
+        }
         if (agentEvent.type === "context.updated") {
             setContextUsage(agentEvent.context);
         } else if (agentEvent.type === "usage.updated") {
@@ -857,12 +974,11 @@ export function App() {
                 : [...current, { id: `assistant-${event.runId}`, role: "assistant", text: "" }]);
         } else if (agentEvent.type === "assistant.delta") {
             if (!event.runId) return;
-            setMessages((current) => {
-                const id = `assistant-${event.runId}`;
-                const index = current.findIndex((message) => message.id === id);
-                if (index < 0) return [...current, { id, role: "assistant", text: agentEvent.text }];
-                return current.map((message, at) => at === index ? { ...message, text: message.text + agentEvent.text } : message);
-            });
+            const pending = pendingAssistantDelta.current;
+            if (pending && (pending.key !== key || pending.runId !== event.runId)) flushAssistantDelta();
+            if (pendingAssistantDelta.current) pendingAssistantDelta.current.text += agentEvent.text;
+            else pendingAssistantDelta.current = { key, runId: event.runId, text: agentEvent.text };
+            if (assistantDeltaFrame.current === null) assistantDeltaFrame.current = window.requestAnimationFrame(flushAssistantDelta);
         } else if (agentEvent.type === "status.changed") {
             setStatusLabel(agentEvent.status === "thinking" ? "正在思考"
                 : agentEvent.status === "running-tools" ? agentEvent.label || "正在运行工具"
@@ -1046,7 +1162,7 @@ export function App() {
         } else if (agentEvent.type === "turn.cancel_requested") {
             setStatusLabel("正在停止...");
         }
-    }), [eventTracker, refreshCodeReview, refreshGitSnapshot, refreshPermissionGrants, refreshSessions]);
+    }), [eventTracker, flushAssistantDelta, invalidateMessageRequests, refreshCodeReview, refreshGitSnapshot, refreshPermissionGrants, refreshSessions]);
 
     useEffect(() => window.desktop.onWorkspaceChanged(({ workspaceId }) => {
         if (workspaceId !== activeRef.current.workspaceId || rightPanel !== "changes") return;
@@ -1087,7 +1203,45 @@ export function App() {
         return () => { if (worktreeRequestSequence.current === request) worktreeRequestSequence.current++; };
     }, [activeWorkspace?.id, activeWorkspace?.available]);
 
-    useEffect(() => { endOfMessages.current?.scrollIntoView({ behavior: "smooth", block: "end" }); }, [messages, approvals, questions, busy, statusLabel]);
+    useLayoutEffect(() => {
+        const container = conversationRef.current;
+        if (!container) return;
+        const anchor = scrollAnchor.current;
+        if (anchor) {
+            scrollAnchor.current = null;
+            const item = [...container.querySelectorAll<HTMLElement>("[data-message-id]")]
+                .find((element) => element.dataset.messageId === anchor.id);
+            if (item) container.scrollTo({ top: container.scrollTop + item.getBoundingClientRect().top - anchor.top, behavior: "instant" });
+        } else if (stickToBottom.current) {
+            endOfMessages.current?.scrollIntoView({ behavior: "instant", block: "end" });
+        }
+    }, [messages, approvals, questions, busy, statusLabel]);
+
+    const handleConversationScroll = (event: UIEvent<HTMLDivElement>) => {
+        const container = event.currentTarget;
+        stickToBottom.current = container.scrollHeight - container.scrollTop - container.clientHeight < 80;
+        if (container.scrollTop < 180 && messageCursor !== null) void loadOlderMessages();
+        if (!stickToBottom.current || messages.length <= 160 || olderRequestPending.current) return;
+        if (historyCompacted.current) {
+            if (!busy && !runId) void refreshRecentMessages();
+            return;
+        }
+        const recent = messages.slice(-120);
+        const firstHistory = recent.find((message) => /^history-\d+$/.test(message.id));
+        if (!firstHistory) {
+            if (!busy && !runId) void refreshRecentMessages();
+            return;
+        }
+        setMessages(recent);
+        setMessageCursor(Number(firstHistory.id.slice("history-".length)));
+    };
+
+    useEffect(() => {
+        if (!busy && !runId && stickToBottom.current && messages.length > 160
+            && (historyCompacted.current || !messages.some((message) => /^history-\d+$/.test(message.id)))) {
+            void refreshRecentMessages();
+        }
+    }, [busy, runId, messages, refreshRecentMessages]);
 
     useEffect(() => {
         if (!sessionMenuId) return;
@@ -1156,6 +1310,7 @@ export function App() {
         const sessionId = activeSession.id;
         const sessionKey = `${workspaceId}:${sessionId}`;
         pendingStartStops.current.delete(sessionKey);
+        invalidateMessageRequests();
         setRetryNotice("");
         setBusy(true);
         setExternalRun(false);
@@ -1209,6 +1364,7 @@ export function App() {
             setSessions((current) => [created.session, ...current]);
             eventTracker.openSession(`${activeWorkspace.id}:${created.session.id}`, created.eventSequence, created.runId);
             activeRef.current = { workspaceId: activeWorkspace.id, sessionId: created.session.id };
+            resetMessageHistory(null);
             setActiveSession(created.session);
             setSessionRoute(created.route);
             setSessionCredentialState(await window.desktop.getCredentialState(created.route.modelPreset));
@@ -1229,7 +1385,7 @@ export function App() {
             setStatusLabel("就绪");
             setError("");
         } catch (failure) { setError(displayError(failure)); }
-    }, [activeWorkspace, eventTracker]);
+    }, [activeWorkspace, eventTracker, resetMessageHistory]);
 
     useEffect(() => {
         const onShortcut = (event: globalThis.KeyboardEvent): void => {
@@ -1267,6 +1423,7 @@ export function App() {
         const sessionKey = `${workspaceId}:${sessionId}`;
         setRetryNotice("");
         pendingStartStops.current.delete(sessionKey);
+        invalidateMessageRequests();
         const optimistic: ConversationMessage = { id: `user-${crypto.randomUUID()}`, role: "user", text };
         setMessages((current) => [...current, optimistic]);
         setDraft("");
@@ -1375,6 +1532,7 @@ export function App() {
                 setActiveWorkspace(null);
                 setActiveSession(null);
                 setSessions([]);
+                resetMessageHistory(null);
                 setMessages([]);
                 setTokenUsage(null);
                 setContextUsage(null);
@@ -1408,6 +1566,7 @@ export function App() {
             const remaining = await refreshSessions(activeWorkspace.id);
             if (activeSession?.id === session.id) {
                 setActiveSession(null);
+                resetMessageHistory(null);
                 setMessages([]);
                 setActivities([]);
                 setPermissionGrants([]);
@@ -1546,17 +1705,18 @@ export function App() {
                 </div>}
                 <div className="welcome-footnote">文件留在本机 · 写入和命令逐项审批</div>
             </div> : !activeWorkspace.available ? <div className="missing-workspace"><div className="missing-icon">!</div><h2>找不到这个项目文件夹</h2><p>{activeWorkspace.path}</p><button className="secondary-button" onClick={() => void handleChooseWorkspace()}>打开其他项目</button></div> : <>
-                <div className="conversation" key={activeSession?.id || "none"}>
+                <div className="conversation" key={activeSession?.id || "none"} ref={conversationRef} onScroll={handleConversationScroll}>
                     {!activeSession ? <div className="empty-conversation">
                         <h2>在 {activeWorkspace.name} 中开始新任务</h2>
                         <p>描述一个问题、功能或代码问题。所有写入和命令都会先等待你的确认。</p>
                         <button className="suggestion-card" onClick={() => setDraft("先熟悉这个项目的结构，并告诉我主要模块之间的关系。")}><span className="suggestion-icon"><Icon name="search" size={15} /></span><span><strong>了解项目</strong><small>先阅读代码，再概述主要模块</small></span><Icon name="arrow" size={14} /></button>
                     </div> : <div className="message-list">
                         {messages.length === 0 && <div className="empty-conversation compact-empty"><h2>准备好开始了</h2><p>用自然语言描述你想完成的任务。</p></div>}
-                        {messages.map((message) => <article className={`message ${message.role}`} key={message.id}>
+                        {messageCursor !== null && <button type="button" className="older-messages" disabled={olderLoading} onClick={() => void loadOlderMessages()}>{olderLoading ? "正在加载更早消息..." : "加载更早消息"}</button>}
+                        {messages.map((message) => <article className={`message ${message.role}`} key={message.id} data-message-id={message.id}>
                             <div className="message-content">
                                 <div className="message-meta"><span>{message.role === "user" ? "你" : "TriumCode"}</span>{message.role === "assistant" && <button className="copy-message" title="复制消息" aria-label="复制消息" onClick={() => void navigator.clipboard.writeText(message.text)}><Icon name="copy" size={13} /></button>}</div>
-                                {message.text ? <MessageBody text={message.text} /> : <div className="thinking-placeholder" role="status">正在准备回复</div>}
+                                {message.text ? <MemoMessageBody text={message.text} /> : <div className="thinking-placeholder" role="status">正在准备回复</div>}
                             </div>
                         </article>)}
                         {busy && <div className="agent-working" role="status"><span className="working-glint">{statusLabel}</span></div>}

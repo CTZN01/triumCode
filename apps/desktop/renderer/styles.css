@@ -131,7 +131,10 @@ kbd { font-family: inherit; font-size: 10px; color: #a1a5b2; background: #1c1e24
 
 .conversation { flex: 1; min-height: 0; overflow-y: auto; padding: 16px 28px 10px; scroll-behavior: smooth; }
 .message-list { width: min(100%, 790px); margin: 0 auto; padding: 19px 0 30px; }
-.message { display: flex; gap: 13px; padding: 17px 0 21px; }
+.older-messages { display: block; margin: 0 auto 12px; padding: 6px 12px; border: 0; background: transparent; color: var(--muted); cursor: pointer; }
+.older-messages:hover { color: var(--text); }
+.older-messages:disabled { cursor: default; }
+.message { display: flex; gap: 13px; padding: 17px 0 21px; content-visibility: auto; contain-intrinsic-size: auto 120px; }
 .message + .message { border-top: 1px solid #252830; }
 .message-avatar { width: 25px; height: 25px; flex: 0 0 auto; display: grid; place-items: center; border-radius: 8px; color: #c2b7ff; background: #27243a; border: 1px solid #44405e; font-size: 10px; }
 .message.user .message-avatar { color: #d4d7df; background: #292c32; border-color: #3a3d46; }

@@ -17,6 +17,7 @@ const api: DesktopApi = {
     listSessions: (workspaceId) => ipcRenderer.invoke("desktop:list-sessions", workspaceId),
     createSession: (workspaceId) => ipcRenderer.invoke("desktop:create-session", workspaceId),
     openSession: (workspaceId, sessionId) => ipcRenderer.invoke("desktop:open-session", workspaceId, sessionId),
+    getEarlierMessages: (workspaceId, sessionId, before) => ipcRenderer.invoke("desktop:earlier-messages", workspaceId, sessionId, before),
     updateSessionRoute: (workspaceId, sessionId, modelPreset, effort) => ipcRenderer.invoke("desktop:session-route", workspaceId, sessionId, modelPreset, effort),
     updatePermissionMode: (workspaceId, sessionId, mode) => ipcRenderer.invoke("desktop:permission-mode", workspaceId, sessionId, mode),
     toggleWindowMaximize: () => ipcRenderer.invoke("desktop:toggle-window-maximize"),

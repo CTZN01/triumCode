@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { memo, useMemo } from "react";
 import hljs from "highlight.js/lib/core";
 import bash from "highlight.js/lib/languages/bash";
 import css from "highlight.js/lib/languages/css";
@@ -126,7 +126,7 @@ function renderLine(line: DiffLine, key: number, language: string | null) {
     </div>;
 }
 
-export function DiffViewer({ diff }: { diff: string }) {
+export const DiffViewer = memo(function DiffViewer({ diff }: { diff: string }) {
     const parsed = useMemo(() => parseDiff(diff), [diff]);
     const language = useMemo(() => languageFromPreamble(parsed.preamble), [parsed]);
     return <div className="diff-viewer" role="group" aria-label="代码差异，包含旧版和新版行号">
@@ -146,4 +146,4 @@ export function DiffViewer({ diff }: { diff: string }) {
             </div>
         </details>)}
     </div>;
-}
+});

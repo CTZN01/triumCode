@@ -39,6 +39,8 @@ import type {
     WorkspaceSummary,
 } from "../shared/contracts.js";
 import { updateQuestionActivity } from "../shared/question-activity.js";
+import { pageConversationMessages } from "./conversation-history.js";
+import { pruneIdleRuntimes } from "./runtime-cache.js";
 import { desktopTaskStatus } from "./task-status.js";
 import { connectionFailureMessage } from "./connection-result.js";
 import { RunShutdown } from "./run-shutdown.js";
@@ -425,24 +427,7 @@ function activityFromEvent(
 }
 
 function projectMessages(messages: unknown[], apiKey: RedactionKeys = ""): ConversationMessage[] {
-    const visible: ConversationMessage[] = [];
-    for (const [index, value] of messages.entries()) {
-        if (!value || typeof value !== "object") continue;
-        const message = value as { role?: unknown; content?: unknown };
-        if (message.role !== "user" && message.role !== "assistant") continue;
-        const blocks = typeof message.content === "string"
-            ? [message.content]
-            : Array.isArray(message.content)
-                ? message.content.flatMap((block: unknown) =>
-                    block && typeof block === "object" && (block as { type?: unknown }).type === "text"
-                        && typeof (block as { text?: unknown }).text === "string"
-                        ? [(block as { text: string }).text] : [])
-                : [];
-        let text = blocks.join("");
-        if (message.role === "user") text = text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, " ").trim();
-        if (text.trim()) visible.push({ id: `history-${index}`, role: message.role, text: redact(text, apiKey) });
-    }
-    return visible;
+    return pageConversationMessages(messages, messages.length, (text) => redact(text, apiKey), messages.length).messages;
 }
 
 function checkpointAssistantText(
@@ -519,6 +504,7 @@ export class AgentHost {
     private readonly worktreeStore: WorktreeStore;
     private readonly emitToRenderer: (event: DesktopEvent) => void;
     private readonly sessions = new Map<string, SessionRuntime>();
+    private viewedSessionKey: string | null = null;
     private readonly gitMutations = new Set<string>();
     private readonly eventSequences = new DesktopEventSequencer();
     private readonly recoveredWorkspaceRoots = new Set<string>();
@@ -571,11 +557,19 @@ export class AgentHost {
     }
 
     openWorkspace(path: string): WorkspaceSummary {
-        return this.workspaces.open(path);
+        const workspace = this.workspaces.open(path);
+        this.viewedSessionKey = null;
+        this.pruneRuntimes();
+        return workspace;
     }
 
     activateWorkspace(workspaceId: string): WorkspaceSummary {
-        return this.workspaces.activate(workspaceId);
+        const workspace = this.workspaces.activate(workspaceId);
+        if (this.viewedSessionKey && !this.viewedSessionKey.startsWith(`${workspaceId}:`)) {
+            this.viewedSessionKey = null;
+            this.pruneRuntimes();
+        }
+        return workspace;
     }
 
     removeWorkspace(workspaceId: string): void {
@@ -812,10 +806,13 @@ export class AgentHost {
         const store = this.storeFor(workspaceId);
         const settings = this.currentSettings();
         const item = store.create(settings.model, desktopSettingsSnapshot(settings));
+        this.viewedSessionKey = sessionKey(workspaceId, item.id);
+        this.pruneRuntimes();
         return {
             session: toSummary({ ...item, messageCount: 0 }),
             route: desktopSettingsSnapshot(settings),
             messages: [],
+            messageCursor: null,
             activities: [],
             usage: emptyAgentUsage(),
             contextUsage: null,
@@ -835,6 +832,7 @@ export class AgentHost {
         const item = store.load(sessionId);
         if (!item) throw new DesktopServiceError("SESSION_NOT_FOUND", "This conversation could not be found.");
         const key = sessionKey(workspaceId, sessionId);
+        this.viewedSessionKey = key;
         const prior = this.sessions.get(key);
         if (prior && !prior.currentRunId
             && (prior.sessionRevisionConflict || prior.revision !== (item.revision ?? 0))) {
@@ -843,7 +841,10 @@ export class AgentHost {
         const runtime = this.runtimeFor(workspaceId, sessionId, item, store);
         const current = store.list().find((entry) => entry.id === sessionId)!;
         const isRunning = Boolean(runtime.currentRunId || store.isRunActive(sessionId));
-        const messages = projectMessages(runtime.agent.history(), runtime.redactionKeys);
+        const history = runtime.agent.history();
+        const page = pageConversationMessages(history, history.length,
+            (text) => redact(text, runtime.redactionKeys));
+        const messages = page.messages;
         if (runtime.currentRunId && runtime.partialAssistantText) {
             messages.push({ id: `assistant-${runtime.currentRunId}`, role: "assistant", text: redact(runtime.partialAssistantText, runtime.redactionKeys) });
         }
@@ -851,6 +852,7 @@ export class AgentHost {
             session: toSummary(isRunning ? { ...current, status: "running" } : current),
             route: { ...runtime.desktopSettings },
             messages,
+            messageCursor: page.nextCursor,
             activities: safeSessionActivities(runtime.activities, runtime.redactionKeys),
             usage: runtime.agent.getUsage(),
             contextUsage: runtime.agent.getContextUsage(),
@@ -868,6 +870,18 @@ export class AgentHost {
             })),
             eventSequence: this.eventSequences.current(key),
         };
+    }
+
+    getEarlierMessages(workspaceId: string, sessionId: string, before: number) {
+        const key = sessionKey(workspaceId, sessionId);
+        const runtime = this.sessions.get(key);
+        if (runtime) return pageConversationMessages(runtime.agent.history(), before,
+            (text) => redact(text, runtime.redactionKeys));
+        const item = this.storeFor(workspaceId).load(sessionId);
+        if (!item) throw new DesktopServiceError("SESSION_NOT_FOUND", "This conversation could not be found.");
+        const route = safeDesktopSettingsSnapshot(item.desktopSettings) ?? desktopSettingsSnapshot(this.currentSettings());
+        const apiKey = this.apiKeyForSettings(route);
+        return pageConversationMessages(item.messages, before, (text) => redact(text, apiKey));
     }
 
     updateSessionRoute(workspaceId: string, sessionId: string, modelPreset: string | null, effort: EffortLevel): void {
@@ -984,6 +998,7 @@ export class AgentHost {
         }
         this.sessions.delete(key);
         this.eventSequences.delete(key);
+        if (this.viewedSessionKey === key) this.viewedSessionKey = null;
         try {
             this.reviews.removeSession(workspaceId, sessionId);
             return { reviewRemoved: true };
@@ -1114,6 +1129,7 @@ export class AgentHost {
             runtime.releaseRunLease?.();
             runtime.releaseRunLease = null;
             this.publish(runtime, { type: "session.status", status: finalStatus }, runId);
+            this.pruneRuntimes();
         });
         return { runId };
     }
@@ -1266,6 +1282,7 @@ export class AgentHost {
 
     private removeWorkspaceRecord(workspaceId: string): void {
         this.workspaces.remove(workspaceId);
+        if (this.viewedSessionKey?.startsWith(`${workspaceId}:`)) this.viewedSessionKey = null;
         for (const [key, runtime] of this.sessions) {
             if (runtime.workspaceId === workspaceId) this.sessions.delete(key);
         }
@@ -1417,7 +1434,11 @@ export class AgentHost {
     private runtimeFor(workspaceId: string, sessionId: string, data: SessionData, store: SessionStore): SessionRuntime {
         const key = sessionKey(workspaceId, sessionId);
         const existing = this.sessions.get(key);
-        if (existing) return existing;
+        if (existing) {
+            this.sessions.delete(key);
+            this.sessions.set(key, existing);
+            return existing;
+        }
         const workspaceRoot = this.workspaces.getPath(workspaceId);
         const currentSettings = this.currentSettings();
         const restoredDesktopSettings = safeDesktopSettingsSnapshot(data.desktopSettings);
@@ -1510,7 +1531,13 @@ export class AgentHost {
         agent.setAskUserCallback((question, options) => this.askUser(runtime, question, options));
         this.sessions.set(key, runtime);
         if (!restoredDesktopSettings) this.persistSession(runtime);
+        this.pruneRuntimes();
         return runtime;
+    }
+
+    private pruneRuntimes(): void {
+        pruneIdleRuntimes(this.sessions, 8, this.viewedSessionKey,
+            (runtime) => runtime.currentRunId !== null || runtime.runPromise !== null);
     }
 
     private persistSession(

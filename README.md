@@ -68,6 +68,12 @@ conversation menu provides Rename and Delete actions. Settings has Appearance,
 current-conversation Usage, and Model sections; Appearance includes a saved
 interface text-size choice. Usage is based on tokens reported by the model
 and does not represent the provider account's remaining quota.
+Opening a conversation loads its latest 40 visible messages; scroll upward or
+use Load earlier messages to fetch older history. Returning to the bottom keeps
+only recent messages in the view; earlier messages still present in the session
+can be fetched again. The
+desktop process also releases older idle conversation runtimes as more sessions
+are opened; the visible conversation and running tasks remain loaded.
 Each preset and the custom route has its own protected API key slot. A
 conversation keeps its selected model route and reasoning settings. Changing
 global preferences applies to new conversations; the composer changes the current
