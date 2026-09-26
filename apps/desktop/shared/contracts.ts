@@ -1,5 +1,5 @@
 import type { AgentContextUsage, AgentEvent, AgentUsage } from "../../../src/agent.js";
-import type { SessionActivity } from "../../../src/session.js";
+import type { DesktopSessionSettings, SessionActivity } from "../../../src/session.js";
 import type { PermissionOutcome, PermissionSource, SessionPermissionGrantSummary } from "../../../src/permissions.js";
 
 export type { SessionActivity };
@@ -218,6 +218,7 @@ export interface BootstrapData {
 
 export interface OpenSessionData {
     session: SessionSummary;
+    route: DesktopSessionSettings;
     messages: ConversationMessage[];
     activities: SessionActivity[];
     usage: AgentUsage;
@@ -307,6 +308,7 @@ export interface DesktopApi {
     listSessions(workspaceId: string): Promise<SessionSummary[]>;
     createSession(workspaceId: string): Promise<OpenSessionData>;
     openSession(workspaceId: string, sessionId: string): Promise<OpenSessionData>;
+    updateSessionRoute(workspaceId: string, sessionId: string, modelPreset: string | null, effort: string): Promise<void>;
     renameSession(workspaceId: string, sessionId: string, title: string): Promise<SessionSummary>;
     deleteSession(workspaceId: string, sessionId: string): Promise<void>;
     getGitSnapshot(workspaceId: string): Promise<GitSnapshot>;

@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Agent } from "./agent.js";
@@ -95,6 +95,7 @@ async function runChat(
         maxTokens?: number;
         permissionMode?: PermissionMode;
         askUser?: (question: string, options?: string[]) => Promise<string>;
+        onBeforeFileWrite?: (absolutePath: string) => void | Promise<void>;
         failOn?: Set<number>;
     } = {},
 ): Promise<{ agent: Agent; api: FakeApi; output: string; error: any }> {
@@ -118,6 +119,7 @@ async function runChat(
         permissionMode: options.permissionMode,
         maxTurns: options.maxTurns ?? 5,
         maxTokens: options.maxTokens,
+        onBeforeFileWrite: options.onBeforeFileWrite,
     });
     if (options.askUser) agent.setAskUserCallback(options.askUser);
 
@@ -149,6 +151,40 @@ async function runChat(
 
 const assistantTurns = (agent: Agent) => agent.history().filter((m) => m.role === "assistant");
 const stripAnsi = (text: string): string => text.replace(/\x1B\[[0-?]*[ -\/]*[@-~]/g, "");
+
+test("the main agent captures a file baseline before its write tool runs", async () => {
+    let capturedPath = "";
+    let existedAtCapture = true;
+    const { error, agent } = await runChat([
+        (write) => {
+            write(start(0, { type: "tool_use", id: "write-1", name: "write_file", input: {} }));
+            write(jsonDelta(0, JSON.stringify({ file_path: "review-smoke.txt", content: "saved\n" })));
+            write(stop(0));
+            write(finish("tool_use"));
+        },
+        (write) => {
+            write(start(0, { type: "text", text: "" }));
+            write(textDelta(0, "done"));
+            write(stop(0));
+            write(finish("end_turn"));
+        },
+    ], {
+        permissionMode: "bypassPermissions",
+        onBeforeFileWrite: (path) => {
+            capturedPath = path;
+            existedAtCapture = existsSync(path);
+        },
+    });
+    try {
+        assert.equal(error, null);
+        assert.ok(capturedPath);
+        assert.equal(existedAtCapture, false);
+        assert.equal(readFileSync(capturedPath, "utf8"), "saved\n");
+        assert.equal(agent.history().filter((message) => message.role === "assistant").length, 2);
+    } finally {
+        if (capturedPath) rmSync(capturedPath, { force: true });
+    }
+});
 
 // ── Empty / truncated turns ─────────────────────────────────
 

@@ -21,8 +21,8 @@ export class CredentialStore {
         const encryptionAvailable = safeStorage.isEncryptionAvailable();
         if (encryptionAvailable && existsSync(this.filePath) && this.readStoredKey(presetName)) return "secure-key";
         const bundle = resolveConfigDetailed({});
+        if (process.env.ANTHROPIC_API_KEY) return "environment-key";
         if (presetApiKeyAvailable) return encryptionAvailable ? "cli-key-available" : "unsupported";
-        if (bundle.sources.apiKey === "env") return "environment-key";
         if (!encryptionAvailable) return "unsupported";
         if (bundle.sources.apiKey === "config" && bundle.config.apiKey) return "cli-key-available";
         return "missing";

@@ -10,7 +10,7 @@
   "scripts": {
     "build": "tsc",
     "test": "tsc && node --test dist/ && npm run test:desktop",
-    "test:desktop": "tsc -p tsconfig.desktop-tests.json && node --test dist-desktop-tests/apps/desktop/main/git-service.test.js dist-desktop-tests/apps/desktop/main/task-status.test.js",
+    "test:desktop": "tsc -p tsconfig.desktop-tests.json && node --test dist-desktop-tests/apps/desktop/main/connection-result.test.js dist-desktop-tests/apps/desktop/main/git-service.test.js dist-desktop-tests/apps/desktop/main/task-status.test.js dist-desktop-tests/apps/desktop/main/run-shutdown.test.js dist-desktop-tests/apps/desktop/main/terminal-service.test.js",
     "start": "node dist/cli.js",
     "dev": "tsc && node dist/cli.js",
     "desktop:setup": "install-electron",

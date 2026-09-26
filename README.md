@@ -31,6 +31,9 @@ staged/unstaged file diffs with old/new line numbers and collapsible hunks,
 selected-file stage/unstage actions, commits that contain staged content only,
 and a workspace-bound Windows PowerShell terminal. Creating a commit can run
 the repository's local Git hooks.
+Closing the window with a running task or open terminal asks whether to stop
+them or stay in the app. Exit waits for task cancellation and PowerShell's exit
+event; if the shell does not exit, the app reports the failure and stays open.
 The global task center aggregates recent tasks across saved workspaces, supports
 search and jumps to a session's latest activity, and can stop runs owned by the
 current desktop process. Tasks owned by another CLI or desktop process can only
@@ -41,11 +44,19 @@ The desktop settings page controls the concurrent-run limit (1–8, default 3).
 When the limit is reached, the draft stays in the composer and the app explains
 that a running task must finish before retrying.
 Named model presets from the CLI config can be selected in desktop settings.
+The composer offers model-preset and reasoning-effort choices for the current
+conversation; they apply to its next request and persist after restart. Changes
+are unavailable while a request is running. Settings has a separate Appearance section with System, Light,
+and Dark choices. The context-window field accepts exact token counts such as
+1,000,000.
 Each preset and the custom route has its own protected API key slot. A
-conversation keeps the model route and reasoning settings it was created with,
-so changing preferences applies to new conversations without silently moving an
-existing one to another provider. The saved route snapshot never contains an
+conversation keeps its selected model route and reasoning settings. Changing
+global preferences applies to new conversations; the composer changes the current
+conversation only when selected explicitly. The saved route snapshot never contains an
 API key.
+The short connection test reports whether a failure points to credentials,
+rate limits, network access, the model route, or a timeout, without showing
+raw provider error text.
 The desktop restores the main window's size and position and panel widths. Its
 neutral light and dark themes follow the system appearance by default, including
 changes while the app is open; you can also choose either theme in Settings. Drag
@@ -111,9 +122,10 @@ npm run desktop:package # creates a Windows x64 portable zip under out/desktop-r
 
 The portable app does not need Node.js at runtime. It supports Windows x64 only
 and currently has no installer, code signing, or automatic updates. Packaging
-downloads locked production dependencies. Extract the archive and run
-`TriumCode.exe`. Removing the extracted folder does not remove desktop settings,
-credentials, or project sessions from `%APPDATA%`.
+downloads locked production dependencies. Extract the archive with Windows
+Explorer and run `TriumCode.exe`. Removing the extracted folder does not remove
+desktop settings and protected credentials from `%APPDATA%\triumcode`, or project
+sessions from the TriumCode session directory.
 
 For a fresh development checkout, install dependencies with Node.js 22.12 or
 later, then run `npm run desktop:setup` once to download the matching Electron
@@ -123,9 +135,10 @@ opening the app.
 The CLI commands above remain available. Existing CLI credentials are not
 copied automatically; the desktop settings page can import them into the
 operating system's protected credential store. API keys are not returned to
-the renderer. If no credential is ready, the desktop points to setup and keeps
-the draft without starting a request. Desktop settings and workspace recents live in Electron's local
-user-data folder; conversation files stay in the existing local TriumCode
+the renderer. A key saved in `desktop:dev` is reused after restart and by the
+portable app under the same Windows profile. If no credential is ready, the
+desktop points to setup and keeps the draft without starting a request. Desktop
+settings and workspace recents live in `%APPDATA%\triumcode`; conversation files stay in the existing local TriumCode
 session store, including a bounded history of desktop tool and sub-agent
 activity that remains visible when a conversation is reopened. Tool activity
 shows explicit completed, failed, denied, or cancelled states alongside its
@@ -137,7 +150,7 @@ matching calls but does not stop a process that has already started. Code review
 preimages are encrypted with the operating system's protected storage so files
 can be restored after a task ends; older snapshots are pruned after the most
 recent 20 completed runs per workspace.
-The top bar shows an estimate of context use and remaining usable window for the
+The conversation details show an estimate of context use and remaining usable window for the
 last request. Input, output, and cache token totals appear only when the
 provider actually reports those fields. Automatic context compaction is recorded
 in the activity timeline. Context figures are local estimates, not exact

@@ -95,7 +95,7 @@ function briefApiError(error: any): string {
 
 export type AgentFailureCategory = "network" | "authentication" | "rate-limit" | "provider" | "internal";
 
-function classifyAgentFailure(error: unknown): { category: AgentFailureCategory; retryable: boolean } {
+export function classifyAgentFailure(error: unknown): { category: AgentFailureCategory; retryable: boolean } {
     const networkCodes = new Set([
         "ECONNABORTED", "ECONNREFUSED", "ECONNRESET", "EHOSTUNREACH", "ENETUNREACH", "ENOTFOUND",
         "EAI_AGAIN", "ETIMEDOUT", "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_SOCKET",
@@ -1347,6 +1347,7 @@ export class Agent {
                 },
                 enterPlanMode: () => this.enterPlanModeFromTool(),
                 exitPlanMode: () => this.exitPlanModeFromTool(),
+                onBeforeFileWrite: this.onBeforeFileWrite,
                 todos: [],
             };
             const executor = new ToolExecutor(context, this.customToolNames);

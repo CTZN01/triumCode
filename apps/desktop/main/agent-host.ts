@@ -13,6 +13,7 @@ import {
     type SessionPermissionGrant,
 } from "../../../src/permissions.js";
 import { SessionBusyError, SessionConflictError, SessionStore, type DesktopSessionSettings, type DesktopUsageSnapshot, type SessionActivity, type SessionData, type SessionIndex } from "../../../src/session.js";
+import type { EffortLevel } from "../../../src/thinking.js";
 import type {
     BootstrapData,
     ConversationMessage,
@@ -38,6 +39,8 @@ import type {
     WorkspaceSummary,
 } from "../shared/contracts.js";
 import { desktopTaskStatus } from "./task-status.js";
+import { connectionFailureMessage } from "./connection-result.js";
+import { RunShutdown } from "./run-shutdown.js";
 import { CredentialStore } from "./credential-store.js";
 import {
     commitGitChanges as createGitCommit,
@@ -516,6 +519,7 @@ export class AgentHost {
     private readonly permissions = new Map<string, PendingPermission>();
     private readonly questions = new Map<string, PendingQuestion>();
     private readonly requestRuns = new Map<string, string>();
+    private readonly runShutdown = new RunShutdown();
 
     constructor(
         workspaces: WorkspaceStore,
@@ -804,6 +808,7 @@ export class AgentHost {
         const item = store.create(settings.model, desktopSettingsSnapshot(settings));
         return {
             session: toSummary({ ...item, messageCount: 0 }),
+            route: desktopSettingsSnapshot(settings),
             messages: [],
             activities: [],
             usage: emptyAgentUsage(),
@@ -838,6 +843,7 @@ export class AgentHost {
         }
         return {
             session: toSummary(isRunning ? { ...current, status: "running" } : current),
+            route: { ...runtime.desktopSettings },
             messages,
             activities: runtime.activities,
             usage: runtime.agent.getUsage(),
@@ -853,6 +859,44 @@ export class AgentHost {
             })),
             eventSequence: this.eventSequences.current(key),
         };
+    }
+
+    updateSessionRoute(workspaceId: string, sessionId: string, modelPreset: string | null, effort: EffortLevel): void {
+        const store = this.storeFor(workspaceId);
+        const data = store.load(sessionId);
+        if (!data) throw new DesktopServiceError("SESSION_NOT_FOUND", "找不到这段会话。");
+        if (store.isRunActive(sessionId)) throw new DesktopServiceError("SESSION_BUSY", "请等待当前任务结束后再切换模型。");
+        const preset = modelPreset ? getModelPresets()[modelPreset] : undefined;
+        if (modelPreset && !preset) throw new DesktopServiceError("MODEL_PRESET_NOT_FOUND", "这个模型预设已不存在，请刷新设置。");
+        const runtime = this.runtimeFor(workspaceId, sessionId, data, store);
+        if (runtime.currentRunId) throw new DesktopServiceError("SESSION_BUSY", "请等待当前任务结束后再切换模型。");
+        const route: DesktopSessionSettings = {
+            ...runtime.desktopSettings,
+            ...(preset ? {
+                modelPreset,
+                model: preset.model,
+                apiBase: preset.apiBase ?? runtime.desktopSettings.apiBase,
+                protocol: preset.protocol ?? runtime.desktopSettings.protocol,
+                auth: preset.auth ?? runtime.desktopSettings.auth,
+                contextWindow: preset.contextWindow ?? runtime.desktopSettings.contextWindow,
+            } : {}),
+            effort,
+        };
+        try {
+            const saved = store.updateDesktopSettings(sessionId, runtime.revision, route);
+            if (!saved) throw new DesktopServiceError("SESSION_NOT_FOUND", "找不到这段会话。");
+            runtime.revision = saved.revision ?? runtime.revision + 1;
+        } catch (error) {
+            if (error instanceof SessionBusyError || error instanceof SessionConflictError) {
+                throw new DesktopServiceError("SESSION_BUSY", "会话已在其他进程中更改，请重新打开后再切换模型。");
+            }
+            throw error;
+        }
+        runtime.desktopSettings = route;
+        runtime.agent.setModel({ model: route.model, label: route.modelPreset ?? "", apiBase: route.apiBase,
+            apiKey: this.apiKeyForSettings(route), protocol: route.protocol, auth: route.auth,
+            contextWindow: route.contextWindow });
+        runtime.agent.setEffort(effort);
     }
 
     listPermissionGrants(workspaceId: string, sessionId: string): OpenSessionData["permissionGrants"] {
@@ -913,11 +957,17 @@ export class AgentHost {
         const prompt = text.trim();
         if (!prompt) throw new DesktopServiceError("EMPTY_MESSAGE", "Write a message before sending it.");
         if (prompt.length > 100_000) throw new DesktopServiceError("MESSAGE_TOO_LARGE", "Messages must be shorter than 100,000 characters.");
-        return this.startSessionRun(workspaceId, sessionId, requestId, prompt, false);
+        return this.runShutdown.trackStart(
+            () => this.startSessionRun(workspaceId, sessionId, requestId, prompt, false),
+            () => new DesktopServiceError("APP_STOPPING", "Wait for TriumCode to finish stopping its current tasks."),
+        );
     }
 
     async retryRun(workspaceId: string, sessionId: string, requestId: string): Promise<{ runId: string }> {
-        return this.startSessionRun(workspaceId, sessionId, requestId, "", true);
+        return this.runShutdown.trackStart(
+            () => this.startSessionRun(workspaceId, sessionId, requestId, "", true),
+            () => new DesktopServiceError("APP_STOPPING", "Wait for TriumCode to finish stopping its current tasks."),
+        );
     }
 
     private async startSessionRun(
@@ -940,6 +990,9 @@ export class AgentHost {
             throw new DesktopServiceError("SESSION_CONFLICT", "会话已被其他进程修改。请重新打开此会话后再开始任务。");
         }
         if (runtime.currentRunId) throw new DesktopServiceError("SESSION_BUSY", "此会话已有正在运行的任务。");
+        if (!this.apiKeyForSettings(runtime.desktopSettings)) {
+            throw new DesktopServiceError("CREDENTIAL_MISSING", "当前会话没有可用的 API Key。请先在设置中保存或导入此模型的密钥。");
+        }
         let prompt = submittedPrompt;
         if (retryFailedRequest) {
             const failedTurn = [...runtime.activities].reverse().find((activity) => activity.failureCategory !== undefined);
@@ -1098,28 +1151,7 @@ export class AgentHost {
             auth: preset.auth ?? settings.auth,
             contextWindow: preset.contextWindow ?? settings.contextWindow,
         } : settings;
-        const storedPresetKey = Boolean(preset?.apiKey);
-        const previousPresetKey = storedPresetKey
-            ? this.credentials.getStoredApiKey(effectiveSettings.modelPreset)
-            : "";
-        if (preset?.apiKey) this.credentials.save(preset.apiKey, effectiveSettings.modelPreset);
-        let saved: DesktopSettings;
-        try {
-            saved = this.settings.save(effectiveSettings);
-        } catch (error) {
-            if (storedPresetKey) {
-                try {
-                    if (previousPresetKey) this.credentials.save(previousPresetKey, effectiveSettings.modelPreset);
-                    else this.credentials.clearStoredApiKey(effectiveSettings.modelPreset);
-                } catch (restoreError) {
-                    throw new DesktopServiceError(
-                        "SETTINGS_SAVE_RECOVERY_FAILED",
-                        `设置保存失败，且未能恢复该模型预设的原 API Key。请检查系统凭据存储后再继续。设置错误：${errorMessage(error)}；恢复错误：${errorMessage(restoreError)}`,
-                    );
-                }
-            }
-            throw error;
-        }
+        const saved = this.settings.save(effectiveSettings);
         const apiKey = this.apiKeyForSettings(saved);
         for (const runtime of this.sessions.values()) {
             if (!runtime.currentRunId && runtime.desktopSettings.modelPreset === saved.modelPreset) {
@@ -1148,11 +1180,7 @@ export class AgentHost {
     }
 
     private apiKeyForSettings(settings: Pick<DesktopSessionSettings, "modelPreset">): string {
-        const presets = getModelPresets();
-        const preset = settings.modelPreset && Object.hasOwn(presets, settings.modelPreset)
-            ? presets[settings.modelPreset] : undefined;
         return this.credentials.getStoredApiKey(settings.modelPreset)
-            || preset?.apiKey
             || this.credentials.getApiKey(settings.modelPreset);
     }
 
@@ -1263,7 +1291,7 @@ export class AgentHost {
     async testConnection(): Promise<{ ok: boolean; message: string }> {
         const settings = this.currentSettings();
         const apiKey = this.apiKeyForSettings(settings);
-        if (!apiKey) return { ok: false, message: "No API key is configured." };
+        if (!apiKey) return { ok: false, message: "当前路由没有可用的 API Key。请先安全保存或导入密钥。" };
         const provider = createProvider(settings.protocol, { apiBase: settings.apiBase, apiKey, auth: settings.auth });
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), 20_000);
@@ -1280,21 +1308,23 @@ export class AgentHost {
             for await (const _event of stream) { /* consume the short response */ }
             return { ok: true, message: "Connection succeeded." };
         } catch (error) {
-            const message = errorMessage(error).replaceAll(apiKey, "[redacted]");
-            return { ok: false, message: message.slice(0, 500) };
+            return { ok: false, message: connectionFailureMessage(error, controller.signal.aborted) };
         } finally {
             clearTimeout(timer);
         }
     }
 
     async stopAll(): Promise<void> {
-        const active = [...this.sessions.values()].filter((runtime) => runtime.currentRunId);
-        for (const runtime of active) {
-            runtime.cancelRequested = true;
-            runtime.agent.abort();
-            this.dismissPending(runtime);
-        }
-        await Promise.allSettled(active.map((runtime) => runtime.runPromise).filter((promise): promise is Promise<void> => Boolean(promise)));
+        return this.runShutdown.stopAll(() => {
+            for (const runtime of this.sessions.values()) {
+                if (!runtime.currentRunId) continue;
+                runtime.cancelRequested = true;
+                runtime.agent.abort();
+                this.dismissPending(runtime);
+            }
+        }, () => [...this.sessions.values()]
+            .map((runtime) => runtime.runPromise)
+            .filter((promise): promise is Promise<void> => Boolean(promise)));
     }
 
     hasRunningTasks(): boolean {

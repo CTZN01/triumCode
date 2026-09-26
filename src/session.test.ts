@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { homedir, tmpdir } from "node:os";
-import { projectRoot, SessionBusyError, SessionStore } from "./session.js";
+import { projectRoot, SessionBusyError, SessionConflictError, SessionStore } from "./session.js";
 
 // ── projectRoot ─────────────────────────────────────────────
 //
@@ -146,5 +146,45 @@ test("workspace leases serialize runs and Git mutations without blocking another
         rmSync(workspaceB, { recursive: true, force: true });
         rmSync(sessionDirectoryA, { recursive: true, force: true });
         rmSync(sessionDirectoryB, { recursive: true, force: true });
+    }
+});
+
+test("desktop route changes preserve history and cannot race a run or stale writer", () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "triumcode-route-"));
+    const store = new SessionStore(workspaceRoot);
+    const created = store.create("old-model");
+    const hash = createHash("sha256").update(resolve(workspaceRoot).toLowerCase()).digest("hex").slice(0, 12);
+    const sessionDirectory = join(homedir(), ".triumcode", "sessions", hash);
+    const messages = [{ role: "user", content: "Keep this request" }];
+    const saved = store.save(created.id, messages, created.model, created.revision ?? 0, "failed");
+    const route = {
+        modelPreset: "new-preset",
+        model: "new-model",
+        apiBase: "https://example.test",
+        protocol: "openai-chat" as const,
+        auth: "bearer" as const,
+        thinking: true,
+        effort: "medium",
+        contextWindow: 128_000,
+    };
+    let releaseRun: (() => void) | null = null;
+    try {
+        releaseRun = store.acquireRun(created.id, saved!.revision);
+        assert.throws(() => store.updateDesktopSettings(created.id, saved!.revision!, route), SessionBusyError);
+        releaseRun();
+        releaseRun = null;
+
+        const updated = store.updateDesktopSettings(created.id, saved!.revision!, route);
+        assert.equal(updated?.model, "new-model");
+        assert.equal(updated?.status, "failed");
+        assert.deepEqual(updated?.messages, messages);
+        assert.deepEqual(updated?.desktopSettings, route);
+        assert.equal(updated?.revision, saved!.revision! + 1);
+        assert.throws(() => store.updateDesktopSettings(created.id, saved!.revision!, route), SessionConflictError);
+        assert.deepEqual(store.load(created.id)?.messages, messages);
+    } finally {
+        releaseRun?.();
+        rmSync(workspaceRoot, { recursive: true, force: true });
+        rmSync(sessionDirectory, { recursive: true, force: true });
     }
 });

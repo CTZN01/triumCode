@@ -4,6 +4,7 @@ import { AgentHost } from "./agent-host.js";
 import type { TerminalService } from "./terminal-service.js";
 import type { WorkspaceWatchService } from "./workspace-watch-service.js";
 import { DesktopServiceError } from "./workspace-store.js";
+import type { EffortLevel } from "../../../src/thinking.js";
 
 interface IpcDependencies {
     host: AgentHost;
@@ -307,6 +308,13 @@ export function registerIpcHandlers({ host, terminals, workspaceWatch, getWindow
         host.respondToQuestion(requestId(request), answer);
     });
     handle("desktop:settings-save", (settings) => host.saveSettings(parseSettings(settings)));
+    handle("desktop:session-route", (workspace, session, preset, effort) => {
+        const level = stringArg(effort, "effort", 8);
+        if (!["low", "medium", "high", "xhigh", "max"].includes(level)) {
+            throw new DesktopServiceError("INVALID_ARGUMENT", "思考深度无效。");
+        }
+        host.updateSessionRoute(workspaceId(workspace), sessionId(session), modelPresetName(preset), level as EffortLevel);
+    });
     handle("desktop:credential-state", (preset) => host.credentialState(modelPresetName(preset)));
     handle("desktop:credential-save", (key, preset) => host.saveApiKey(
         stringArg(key, "apiKey", 10_000),

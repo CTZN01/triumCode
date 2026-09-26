@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { execFile } from "node:child_process";
 import * as nodePty from "node-pty";
 import type { TerminalEvent, TerminalSummary } from "../shared/contracts.js";
 import { DesktopServiceError, WorkspaceStore } from "./workspace-store.js";
@@ -15,6 +16,8 @@ interface TerminalRecord extends TerminalSummary {
     droppedBytes: number;
     flushTimer: ReturnType<typeof setTimeout> | null;
     closing: boolean;
+    closingPromise: Promise<void> | null;
+    didExit: boolean;
     exited: Promise<void>;
     resolveExit: () => void;
 }
@@ -23,10 +26,23 @@ function environment(): NodeJS.ProcessEnv {
     return Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => typeof entry[1] === "string"));
 }
 
+async function waitForExit(record: TerminalRecord, timeoutMs: number): Promise<boolean> {
+    let timeout: ReturnType<typeof setTimeout> | null = null;
+    try {
+        return await Promise.race([
+            record.exited.then(() => true),
+            new Promise<false>((resolve) => { timeout = setTimeout(() => resolve(false), timeoutMs); }),
+        ]);
+    } finally {
+        if (timeout) clearTimeout(timeout);
+    }
+}
+
 export class TerminalService {
     private readonly workspaces: WorkspaceStore;
     private readonly emitToRenderer: (event: TerminalEvent) => void;
     private readonly terminals = new Map<string, TerminalRecord>();
+    private closingAll: Promise<void> | null = null;
 
     constructor(workspaces: WorkspaceStore, emitToRenderer: (event: TerminalEvent) => void) {
         this.workspaces = workspaces;
@@ -34,6 +50,7 @@ export class TerminalService {
     }
 
     create(workspaceId: string, cols: number, rows: number): TerminalSummary {
+        if (this.closingAll) throw new DesktopServiceError("APP_STOPPING", "Wait for TriumCode to finish closing its terminals.");
         if (process.platform !== "win32") {
             throw new DesktopServiceError("TERMINAL_UNSUPPORTED", "The integrated terminal currently supports Windows PowerShell only.");
         }
@@ -79,12 +96,15 @@ export class TerminalService {
             droppedBytes: 0,
             flushTimer: null,
             closing: false,
+            closingPromise: null,
+            didExit: false,
             exited,
             resolveExit,
         };
         this.terminals.set(id, record);
         child.onData((data) => this.queueOutput(record, data));
         child.onExit(({ exitCode, signal }) => {
+            record.didExit = true;
             record.resolveExit();
             this.flushOutput(record);
             this.terminals.delete(id);
@@ -106,20 +126,44 @@ export class TerminalService {
         catch { throw new DesktopServiceError("TERMINAL_RESIZE_FAILED", "The terminal could not be resized."); }
     }
 
-    async close(terminalId: string): Promise<void> {
+    close(terminalId: string): Promise<void> {
         const record = this.terminals.get(terminalId);
-        if (!record || record.closing) return;
+        if (!record) return Promise.resolve();
+        if (record.closingPromise) return record.closingPromise;
         record.closing = true;
         this.flushOutput(record);
-        try { record.process.kill(); } catch { /* the shell may have exited while closing */ }
-        let timeout: ReturnType<typeof setTimeout> | null = null;
-        await Promise.race([record.exited, new Promise<void>((resolve) => { timeout = setTimeout(resolve, 6_000); })]);
-        if (timeout) clearTimeout(timeout);
-        this.terminals.delete(terminalId);
+        record.closingPromise = (async () => {
+            try {
+                if (!record.didExit) {
+                    await new Promise<void>((resolve, reject) => {
+                        execFile("taskkill.exe", ["/PID", String(record.process.pid), "/T", "/F"],
+                            { windowsHide: true, timeout: 5_000 }, (error) => {
+                                if (error && !record.didExit) reject(new DesktopServiceError("TERMINAL_TREE_KILL_FAILED", "Could not stop the PowerShell process tree. Try closing the terminal again."));
+                                else resolve();
+                            });
+                    });
+                }
+                try { record.process.kill(); } catch { /* the shell may have exited while closing */ }
+                if (!await waitForExit(record, 6_000)) {
+                    throw new DesktopServiceError("TERMINAL_CLOSE_TIMEOUT", "PowerShell did not exit. Close it before exiting TriumCode.");
+                }
+            } finally {
+                record.closing = false;
+                record.closingPromise = null;
+            }
+        })();
+        return record.closingPromise;
     }
 
-    async closeAll(): Promise<void> {
-        await Promise.all([...this.terminals.keys()].map((id) => this.close(id)));
+    closeAll(): Promise<void> {
+        if (this.closingAll) return this.closingAll;
+        const closing = Promise.all([...this.terminals.keys()].map((id) => this.close(id))).then(() => undefined);
+        this.closingAll = closing;
+        void closing.then(
+            () => { if (this.closingAll === closing) this.closingAll = null; },
+            () => { if (this.closingAll === closing) this.closingAll = null; },
+        );
+        return closing;
     }
 
     hasOpenTerminals(workspaceId?: string): boolean {

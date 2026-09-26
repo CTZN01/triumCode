@@ -755,6 +755,27 @@ export class SessionStore {
         });
     }
 
+    updateDesktopSettings(id: string, expectedRevision: number, settings: DesktopSessionSettings): SessionData | null {
+        const path = sessionPath(id, this.workspaceRoot);
+        return withSessionRunLock(id, path, () => withSessionLock(id, path, () => {
+            const existing = readSessionFile(path);
+            if (!existing) return null;
+            const actualRevision = sessionRevision(existing);
+            if (actualRevision !== expectedRevision) {
+                throw new SessionConflictError(id, expectedRevision, actualRevision);
+            }
+            const data: SessionData = {
+                ...existing,
+                revision: actualRevision + 1,
+                updated: new Date().toISOString(),
+                model: settings.model,
+                desktopSettings: settings,
+            };
+            atomicWrite(path, JSON.stringify(data, null, 2));
+            return data;
+        }));
+    }
+
     rename(id: string, title: string): SessionData | null {
         const cleaned = title.trim();
         if (!cleaned) return null;

@@ -1,6 +1,6 @@
 import { app, BrowserWindow, dialog, screen, session, shell } from "electron";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { AgentHost } from "./agent-host.js";
 import { CredentialStore } from "./credential-store.js";
@@ -11,6 +11,11 @@ import { WorkspaceStore } from "./workspace-store.js";
 import { WorkspaceWatchService } from "./workspace-watch-service.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
+app.setName("TriumCode");
+const dataDirectoryOverride = app.commandLine.getSwitchValue("user-data-dir");
+const userDataPath = dataDirectoryOverride ? resolve(dataDirectoryOverride) : join(app.getPath("appData"), "triumcode");
+mkdirSync(userDataPath, { recursive: true });
+app.setPath("userData", userDataPath);
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 if (!hasSingleInstanceLock) app.quit();
 
@@ -152,8 +157,14 @@ function createWindow(): BrowserWindow {
     });
     window.webContents.on("will-navigate", (event) => event.preventDefault());
     window.webContents.on("render-process-gone", () => {
-        void host?.stopAll();
-        void terminals?.closeAll();
+        void host?.stopAll().catch((error: unknown) => {
+            const message = error instanceof Error ? error.message : String(error);
+            dialog.showErrorBox("Task could not stop", message);
+        });
+        void terminals?.closeAll().catch((error: unknown) => {
+            const message = error instanceof Error ? error.message : String(error);
+            dialog.showErrorBox("Terminal could not close", message);
+        });
     });
     window.on("close", (event) => {
         if (closeAfterStopping || (!host?.hasRunningTasks() && !terminals?.hasOpenTerminals())) return;
@@ -170,13 +181,14 @@ function createWindow(): BrowserWindow {
             cancelId: 1,
             noLink: true,
         }).then(async ({ response }) => {
-            closePromptOpen = false;
             if (response !== 0) return;
-            await host?.stopAll();
-            await terminals?.closeAll();
+            await Promise.all([host?.stopAll(), terminals?.closeAll()]);
             closeAfterStopping = true;
-            window.close();
-        });
+            if (!window.isDestroyed()) window.close();
+        }).catch((error: unknown) => {
+            const message = error instanceof Error ? error.message : String(error);
+            dialog.showErrorBox("TriumCode could not exit cleanly", message);
+        }).finally(() => { closePromptOpen = false; });
     });
     window.on("closed", () => {
         if (mainWindow === window) mainWindow = null;
@@ -238,13 +250,20 @@ if (hasSingleInstanceLock) {
     });
 
     app.on("before-quit", (event) => {
-        workspaceWatch?.close();
         if (closeAfterStopping) return;
         if (!host?.hasRunningTasks() && !terminals?.hasOpenTerminals()) return;
         event.preventDefault();
+        if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.close();
+            return;
+        }
         void Promise.all([host?.stopAll(), terminals?.closeAll()]).then(() => {
             closeAfterStopping = true;
             app.quit();
+        }).catch((error: unknown) => {
+            const message = error instanceof Error ? error.message : String(error);
+            dialog.showErrorBox("TriumCode could not exit cleanly", message);
         });
     });
+    app.on("will-quit", () => workspaceWatch?.close());
 }

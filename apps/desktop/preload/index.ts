@@ -17,6 +17,7 @@ const api: DesktopApi = {
     listSessions: (workspaceId) => ipcRenderer.invoke("desktop:list-sessions", workspaceId),
     createSession: (workspaceId) => ipcRenderer.invoke("desktop:create-session", workspaceId),
     openSession: (workspaceId, sessionId) => ipcRenderer.invoke("desktop:open-session", workspaceId, sessionId),
+    updateSessionRoute: (workspaceId, sessionId, modelPreset, effort) => ipcRenderer.invoke("desktop:session-route", workspaceId, sessionId, modelPreset, effort),
     renameSession: (workspaceId, sessionId, title) => ipcRenderer.invoke("desktop:rename-session", workspaceId, sessionId, title),
     deleteSession: (workspaceId, sessionId) => ipcRenderer.invoke("desktop:delete-session", workspaceId, sessionId),
     getGitSnapshot: (workspaceId) => ipcRenderer.invoke("desktop:git-snapshot", workspaceId),

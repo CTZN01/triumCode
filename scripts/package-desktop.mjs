@@ -97,7 +97,11 @@ try {
     run(process.execPath, [npmCli, "ci", "--omit=dev", "--no-audit", "--no-fund"], { cwd: appRoot });
 
     await rm(archivePath, { force: true });
-    run("tar.exe", ["-a", "-c", "-f", archivePath, "-C", stageRoot, "."], { cwd: projectRoot });
+    const zipCommand = "Add-Type -AssemblyName System.IO.Compression.FileSystem; [System.IO.Compression.ZipFile]::CreateFromDirectory($env:TRIUMCODE_STAGE_ROOT, $env:TRIUMCODE_ARCHIVE_PATH, [System.IO.Compression.CompressionLevel]::Optimal, $false)";
+    run("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", zipCommand], {
+        cwd: projectRoot,
+        env: { ...process.env, TRIUMCODE_STAGE_ROOT: stageRoot, TRIUMCODE_ARCHIVE_PATH: archivePath },
+    });
 
     const archiveSize = (await stat(archivePath)).size;
     console.log(`Created ${archivePath} (${(archiveSize / 1024 / 1024).toFixed(1)} MiB).`);

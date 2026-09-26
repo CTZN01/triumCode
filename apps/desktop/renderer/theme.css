@@ -1,7 +1,7 @@
 /* Neutral desktop palette shared by both appearance modes. */
 :root {
-    font-family: Inter, "Segoe UI Variable", "Segoe UI", "Microsoft YaHei UI", sans-serif;
-    font-size: 13px;
+    font-family: "Segoe UI Variable", "Segoe UI", "PingFang SC", "Microsoft YaHei UI", sans-serif;
+    font-size: 14px;
     color-scheme: light dark;
     --canvas: #ffffff;
     --sidebar: #f7f7f7;
@@ -11,8 +11,8 @@
     --border: #e5e5e5;
     --text: #242424;
     --muted: #686868;
-    --accent: #9a4b25;
-    --focus: #a55732;
+    --accent: #496c9a;
+    --focus: #4979b5;
     --button: #242424;
     --button-text: #ffffff;
     --danger: #b42318;
@@ -24,18 +24,18 @@
 }
 :root[data-theme="dark"] {
     color-scheme: dark;
-    --canvas: #171717;
-    --sidebar: #1e1e1e;
-    --surface: #202020;
-    --field: #171717;
-    --hover: #2b2b2b;
-    --border: #343434;
-    --text: #ededed;
-    --muted: #a0a0a0;
-    --accent: #e2a178;
-    --focus: #e2a178;
-    --button: #ededed;
-    --button-text: #171717;
+    --canvas: #1b1b1b;
+    --sidebar: #232323;
+    --surface: #252525;
+    --field: #202020;
+    --hover: #303030;
+    --border: #383838;
+    --text: #eeeeee;
+    --muted: #a2a2a2;
+    --accent: #8eb3e5;
+    --focus: #8eb3e5;
+    --button: #e8e8e8;
+    --button-text: #202020;
     --danger: #e58d84;
     --danger-bg: #32201f;
     --warning: #d8b47d;
@@ -47,10 +47,10 @@
 @media (prefers-color-scheme: dark) {
     :root[data-theme="system"] {
         color-scheme: dark;
-        --canvas: #171717; --sidebar: #1e1e1e; --surface: #202020;
-        --field: #171717; --hover: #2b2b2b; --border: #343434;
-        --text: #ededed; --muted: #a0a0a0; --accent: #e2a178;
-        --focus: #e2a178; --button: #ededed; --button-text: #171717;
+        --canvas: #1b1b1b; --sidebar: #232323; --surface: #252525;
+        --field: #202020; --hover: #303030; --border: #383838;
+        --text: #eeeeee; --muted: #a2a2a2; --accent: #8eb3e5;
+        --focus: #8eb3e5; --button: #e8e8e8; --button-text: #202020;
         --danger: #e58d84; --danger-bg: #32201f;
         --warning: #d8b47d; --warning-bg: #30281d;
         --success: #92c8a4; --success-bg: #1e3025;
@@ -1371,3 +1371,43 @@
 .worktree-source code, .worktree-review-status, .worktree-review-summary span {
     font-size: 11px !important;
 }
+
+/* Keep navigation quiet and let conversation text lead. */
+.message { gap: 0; }
+.message-meta { font-size: 12px; font-weight: 600; }
+.message-body, .composer textarea { font-size: 14px; line-height: 1.65; }
+.thinking-placeholder { color: var(--muted); font-size: 13px; }
+.topbar-chip, .permission-chip { border-color: transparent !important; background: transparent !important; color: var(--muted) !important; }
+.topbar-chip:hover:is(button) { background: var(--hover) !important; color: var(--text) !important; }
+.settings-section { padding: 3px 0 18px; }
+.settings-section + .settings-section { border-top: 1px solid var(--border); padding-top: 18px; }
+.settings-section h3 { margin: 0 0 12px; font-size: 14px; font-weight: 620; color: var(--text); }
+.settings-section p { margin: 9px 0 0; font-size: 12px; color: var(--muted); }
+.appearance-options { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.appearance-options button { min-height: 36px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: var(--text); cursor: pointer; font: inherit; }
+.appearance-options button:hover { background: var(--hover); }
+.appearance-options button.selected { border-color: var(--focus); background: var(--hover); }
+.composer-choices { display: flex; align-items: center; gap: 6px; min-width: 0; color: var(--muted); font-size: 11px; }
+.composer-choices select { max-width: 170px; height: 29px; padding: 0 7px; border: 0; border-radius: 6px; background: transparent; color: var(--text); font: inherit; cursor: pointer; }
+.composer-choices select:hover { background: var(--hover); }
+.composer-choices select:disabled { opacity: .5; }
+.composer-choices option { color: var(--text); background: var(--surface); }
+.settings-dialog { width: min(660px, 100%); }
+.settings-heading h2 { font-size: 21px; }
+.settings-heading p, .field-help, .toggle-row small, .credential-header small, .test-result { font-size: 12px !important; line-height: 1.5; }
+.field > span, .toggle-row strong, .credential-header strong { font-size: 12px !important; }
+.field input, .field select, .key-entry input { height: 38px; font-size: 13px; }
+.settings-form-grid { gap: 15px 12px; }
+.message-list { width: min(100%, 840px); }
+.brand-name { font-size: 15px; }
+.new-task-button, .settings-entry, .workspace-name, .session-title, .search-box input,
+.crumb-project, .crumb-session, .topbar-chip, .permission-chip { font-size: 13px !important; }
+.section-head, .local-status, .settings-shortcut, .composer-footer,
+.inspector-tabs button, .inspector-empty p, .inspector-footer { font-size: 12px !important; }
+.empty-conversation p { font-size: 13px; }
+.activity-empty-icon { display: none; }
+.detail-card strong { font-size: 13px; }
+.detail-card small, .detail-card code { font-size: 12px !important; }
+.sidebar .new-task-button { border-color: transparent !important; background: transparent !important; color: var(--text) !important; }
+.sidebar .new-task-button:hover:not(:disabled) { background: var(--hover) !important; opacity: 1; }
+.sidebar .new-task-button kbd { color: var(--muted) !important; background: transparent !important; border-color: var(--border) !important; }

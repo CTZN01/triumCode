@@ -334,6 +334,8 @@ export function App() {
     const [activeWorkspace, setActiveWorkspace] = useState<WorkspaceSummary | null>(null);
     const [sessions, setSessions] = useState<SessionSummary[]>([]);
     const [activeSession, setActiveSession] = useState<SessionSummary | null>(null);
+    const [sessionRoute, setSessionRoute] = useState<OpenSessionData["route"] | null>(null);
+    const [sessionCredentialState, setSessionCredentialState] = useState<CredentialState | null>(null);
     const [messages, setMessages] = useState<ConversationMessage[]>([]);
     const [activities, setActivities] = useState<ActivityRow[]>([]);
     const [tokenUsage, setTokenUsage] = useState<AgentUsage | null>(null);
@@ -370,6 +372,7 @@ export function App() {
     const [starting, setStarting] = useState(true);
     const [panelWidths, setPanelWidths] = useState(readPanelWidths);
     const [theme, setTheme] = useState<AppTheme>(readThemePreference);
+    const [quickSettingsSaving, setQuickSettingsSaving] = useState(false);
     const [systemDark, setSystemDark] = useState(() => window.matchMedia("(prefers-color-scheme: dark)").matches);
     const resolvedTheme = theme === "system" ? (systemDark ? "dark" : "light") : theme;
     const commandModifier = /Mac|iPhone|iPad/.test(navigator.userAgent) ? "⌘" : "Ctrl";
@@ -471,7 +474,10 @@ export function App() {
 
     const refreshSessions = useCallback(async (workspaceId: string) => {
         const next = await window.desktop.listSessions(workspaceId);
-        setSessions(next);
+        if (activeRef.current.workspaceId === workspaceId) {
+            setSessions(next);
+            setActiveSession((current) => current ? next.find((session) => session.id === current.id) ?? current : null);
+        }
         return next;
     }, []);
 
@@ -539,10 +545,13 @@ export function App() {
 
     const openSession = useCallback(async (workspaceId: string, sessionId: string) => {
         const opened = await window.desktop.openSession(workspaceId, sessionId);
+        const routeCredentialState = await window.desktop.getCredentialState(opened.route.modelPreset);
         const key = `${workspaceId}:${sessionId}`;
         eventTracker.openSession(key, opened.eventSequence, opened.runId);
         activeRef.current = { workspaceId, sessionId };
         setActiveSession(opened.session);
+        setSessionRoute(opened.route);
+        setSessionCredentialState(routeCredentialState);
         setSessions((current) => current.some((item) => item.id === opened.session.id)
             ? current.map((item) => item.id === opened.session.id ? opened.session : item)
             : [opened.session, ...current]);
@@ -570,6 +579,16 @@ export function App() {
         void refreshCodeReview(workspaceId, sessionId);
     }, [eventTracker, refreshCodeReview]);
 
+    const changeSessionRoute = async (modelPreset: string | null, effort: string) => {
+        if (!activeWorkspace || !activeSession || !sessionRoute || busy || externalRun || quickSettingsSaving) return;
+        setQuickSettingsSaving(true);
+        try {
+            await window.desktop.updateSessionRoute(activeWorkspace.id, activeSession.id, modelPreset, effort);
+            await openSession(activeWorkspace.id, activeSession.id);
+        } catch (failure) { setError(displayError(failure)); }
+        finally { setQuickSettingsSaving(false); }
+    };
+
     const openWorkspace = useCallback(async (workspace: WorkspaceSummary, activate = true, preferredSessionId?: string) => {
         try {
             const selected = activate ? await window.desktop.activateWorkspace(workspace.id) : workspace;
@@ -584,6 +603,8 @@ export function App() {
             setReviewView(null);
             setReviewLoading(false);
             setActiveSession(null);
+            setSessionRoute(null);
+            setSessionCredentialState(null);
             setRetryNotice("");
             setMessages([]);
             setActivities([]);
@@ -1024,8 +1045,8 @@ export function App() {
 
     const retryFailedPrompt = async () => {
         if (!failedPrompt || failedTurnActivity?.safeToRetry !== true || busy || externalRun || !activeWorkspace || !activeSession) return;
-        if (!hasDesktopCredential(bootstrap?.credentialState)) {
-            setError(credentialSetupMessage(bootstrap?.credentialState ?? "missing"));
+        if (!hasDesktopCredential(sessionCredentialState ?? bootstrap?.credentialState)) {
+            setError(credentialSetupMessage(sessionCredentialState ?? bootstrap?.credentialState ?? "missing"));
             setSettingsOpen(true);
             return;
         }
@@ -1087,6 +1108,8 @@ export function App() {
             eventTracker.openSession(`${activeWorkspace.id}:${created.session.id}`, created.eventSequence, created.runId);
             activeRef.current = { workspaceId: activeWorkspace.id, sessionId: created.session.id };
             setActiveSession(created.session);
+            setSessionRoute(created.route);
+            setSessionCredentialState(await window.desktop.getCredentialState(created.route.modelPreset));
             setMessages([]);
             setRetryNotice("");
             setActivities([]);
@@ -1130,8 +1153,8 @@ export function App() {
             setError("这个会话正在另一个 CLI 或桌面进程中运行。请刷新会话状态，任务结束后再继续发送。");
             return;
         }
-        if (!hasDesktopCredential(bootstrap?.credentialState)) {
-            setError(credentialSetupMessage(bootstrap?.credentialState ?? "missing"));
+        if (!hasDesktopCredential(sessionCredentialState ?? bootstrap?.credentialState)) {
+            setError(credentialSetupMessage(sessionCredentialState ?? bootstrap?.credentialState ?? "missing"));
             setSettingsOpen(true);
             return;
         }
@@ -1280,12 +1303,12 @@ export function App() {
         catch (failure) { setError(displayError(failure)); }
     };
 
-    if (starting) return <div className="launch-screen"><div className="brand-mark"><Icon name="spark" size={22} /></div><span>正在启动 TriumCode...</span></div>;
+    if (starting) return <div className="launch-screen"><span>正在启动 TriumCode...</span></div>;
 
     return <div ref={appShellRef} className={`app-shell ${activeWorkspace ? "" : "no-inspector"}`}
         style={{ "--sidebar-width": `${panelWidths.sidebar}px`, "--inspector-width": `${panelWidths.inspector}px` } as CSSProperties}>
         <aside className="sidebar">
-            <div className="brand-row"><div className="brand-mark"><Icon name="spark" size={17} /></div><span className="brand-name">TriumCode</span><span className="brand-edition">LOCAL</span></div>
+            <div className="brand-row"><span className="brand-name">TriumCode</span></div>
             <div className="sidebar-primary">
                 <button className="new-task-button" onClick={() => void handleNewSession()} disabled={!activeWorkspace?.available}
                     aria-keyshortcuts={commandModifier === "⌘" ? "Meta+N" : "Control+N"}>
@@ -1347,20 +1370,8 @@ export function App() {
                 </div>
                 <div className="topbar-actions">
                     {activeWorkspace?.branch && <span className="topbar-chip"><span className="git-branch-icon">⌘</span>{activeWorkspace.branch}</span>}
-                    {bootstrap && <button className="topbar-chip model-chip" onClick={() => setSettingsOpen(true)} title="打开模型设置"><span className="model-spark">✳</span>{bootstrap.settings.modelPreset || bootstrap.settings.model}</button>}
+                    {bootstrap && <button className="topbar-chip model-chip" onClick={() => setSettingsOpen(true)} title="打开模型设置">{activeSession?.model || bootstrap.settings.modelPreset || bootstrap.settings.model}</button>}
                     <button className={`topbar-chip task-center-toggle ${taskCenterOpen ? "selected" : ""}`} onClick={() => setTaskCenterOpen(true)} title="查看所有工作区的任务">任务中心</button>
-                    {contextUsage && <span className="topbar-chip context-meter" title={`最近请求上下文为本地估算：约 ${contextUsage.estimatedTokens.toLocaleString("en-US")} / ${contextUsage.usableTokens.toLocaleString("en-US")} tokens；模型窗口 ${contextUsage.contextWindow.toLocaleString("en-US")} tokens，估算预算预留 20,000 tokens。`}>
-                        <span>上下文 {Math.round(contextUsage.utilization * 100)}%</span>
-                        <small>剩余 ~{formatTokenCount(contextUsage.remainingTokens)}</small>
-                    </span>}
-                    {tokenUsage && (tokenUsage.inputAvailable || tokenUsage.outputAvailable || tokenUsage.cacheReadAvailable || tokenUsage.cacheWriteAvailable) && <span className="topbar-chip usage-meter" title={usageDetails(tokenUsage)}>
-                        {[
-                            tokenUsage.inputAvailable ? `输入 ${formatTokenCount(tokenUsage.input)}` : "",
-                            tokenUsage.outputAvailable ? `输出 ${formatTokenCount(tokenUsage.output)}` : "",
-                            tokenUsage.cacheReadAvailable ? `缓存读 ${formatTokenCount(tokenUsage.cacheRead)}` : "",
-                            tokenUsage.cacheWriteAvailable ? `缓存写 ${formatTokenCount(tokenUsage.cacheWrite)}` : "",
-                        ].filter(Boolean).join(" · ")}
-                    </span>}
                     <span className="permission-chip"><span className="shield-icon">◇</span>{permissionMode === "plan" ? "计划模式 · 仅规划" : "默认 · 逐项确认"}</span>
                     <button className={`topbar-chip terminal-toggle ${terminalOpen ? "selected" : ""}`} onClick={toggleTerminal} disabled={!terminalOpen && !activeWorkspace?.available} title={terminalOpen ? "关闭工作区终端" : "打开绑定当前工作区的 PowerShell 终端"}>终端</button>
                     <button className={`icon-button ${rightPanel === "activity" ? "panel-selected" : ""}`} title="任务活动" aria-label="切换任务活动面板" aria-pressed={rightPanel === "activity"} onClick={() => selectRightPanel(rightPanel === "activity" ? "details" : "activity")}><span className="activity-bars"><i /><i /><i /></span></button>
@@ -1372,14 +1383,12 @@ export function App() {
                 <button className="secondary-button compact" onClick={() => void refreshExternalSession()}>刷新会话状态</button>
             </div>}
 
-            {activeWorkspace?.available && bootstrap && !hasDesktopCredential(bootstrap.credentialState) && <div className="credential-setup-banner" role="status">
-                <span>{credentialSetupMessage(bootstrap.credentialState)}</span>
+            {activeWorkspace?.available && bootstrap && !hasDesktopCredential(sessionCredentialState ?? bootstrap.credentialState) && <div className="credential-setup-banner" role="status">
+                <span>{credentialSetupMessage(sessionCredentialState ?? bootstrap.credentialState)}</span>
                 <button className="secondary-button compact" onClick={() => setSettingsOpen(true)}>配置模型</button>
             </div>}
 
             {!activeWorkspace ? <div className="welcome-area">
-                <div className="welcome-orb"><Icon name="spark" size={26} /></div>
-                <div className="eyebrow">LOCAL CODING AGENT</div>
                 <h1>让代码任务从这里开始</h1>
                 <p>选择一个本地项目，描述你要完成的工作。Agent 会在你查看和确认的过程中协助修改代码。</p>
                 <div className="welcome-actions">
@@ -1393,17 +1402,15 @@ export function App() {
             </div> : !activeWorkspace.available ? <div className="missing-workspace"><div className="missing-icon">!</div><h2>找不到这个项目文件夹</h2><p>{activeWorkspace.path}</p><button className="secondary-button" onClick={() => void handleChooseWorkspace()}>打开其他项目</button></div> : <>
                 <div className="conversation" key={activeSession?.id || "none"}>
                     {!activeSession ? <div className="empty-conversation">
-                        <div className="conversation-orb"><Icon name="spark" size={20} /></div>
                         <h2>在 {activeWorkspace.name} 中开始新任务</h2>
                         <p>描述一个问题、功能或代码问题。所有写入和命令都会先等待你的确认。</p>
                         <button className="suggestion-card" onClick={() => setDraft("先熟悉这个项目的结构，并告诉我主要模块之间的关系。")}><span className="suggestion-icon"><Icon name="search" size={15} /></span><span><strong>了解项目</strong><small>先阅读代码，再概述主要模块</small></span><Icon name="arrow" size={14} /></button>
                     </div> : <div className="message-list">
-                        {messages.length === 0 && <div className="empty-conversation compact-empty"><div className="conversation-orb"><Icon name="spark" size={20} /></div><h2>准备好开始了</h2><p>用自然语言描述你想完成的任务。</p></div>}
+                        {messages.length === 0 && <div className="empty-conversation compact-empty"><h2>准备好开始了</h2><p>用自然语言描述你想完成的任务。</p></div>}
                         {messages.map((message) => <article className={`message ${message.role}`} key={message.id}>
-                            <div className="message-avatar">{message.role === "user" ? "你" : <Icon name="spark" size={14} />}</div>
                             <div className="message-content">
                                 <div className="message-meta"><span>{message.role === "user" ? "你" : "TriumCode"}</span>{message.role === "assistant" && <button className="copy-message" title="复制消息" aria-label="复制消息" onClick={() => void navigator.clipboard.writeText(message.text)}><Icon name="copy" size={13} /></button>}</div>
-                                {message.text ? <MessageBody text={message.text} /> : <div className="thinking-placeholder"><i /><i /><i /><span>正在准备回复</span></div>}
+                                {message.text ? <MessageBody text={message.text} /> : <div className="thinking-placeholder" role="status">正在准备回复</div>}
                             </div>
                         </article>)}
                         <div ref={endOfMessages} />
@@ -1427,7 +1434,13 @@ export function App() {
                 {activeSession && <form className="composer-wrap" onSubmit={(event) => void handleSend(event)}>
                     <div className={`composer ${busy ? "is-busy" : ""}`}>
                         <textarea ref={composerInput} value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={handleComposerKey} disabled={busy || externalRun || questions.length > 0} placeholder={externalRun ? "其他进程正在运行此任务..." : questions.length ? "先回答 Agent 的问题..." : busy ? "Agent 正在工作..." : "描述你希望在这个项目中完成的任务"} rows={Math.min(4, Math.max(1, draft.split("\n").length))} />
-                        <div className="composer-bottom"><div className="composer-hints"><span><kbd>Enter</kbd> 发送</span><span><kbd>Shift</kbd> + <kbd>Enter</kbd> 换行</span></div>
+                        <div className="composer-bottom"><div className="composer-choices" title="切换当前会话下一条消息使用的模型和思考深度。">
+                            <select aria-label="当前会话模型" disabled={!sessionRoute || busy || externalRun || quickSettingsSaving} value={sessionRoute?.modelPreset ?? ""} onChange={(event) => { if (event.target.value) void changeSessionRoute(event.target.value, sessionRoute?.effort ?? "high"); else setSettingsOpen(true); }}>
+                                <option value="">{sessionRoute?.model ?? "自定义模型"}</option>
+                                {bootstrap?.modelPresets.map((preset) => <option key={preset.name} value={preset.name}>{preset.name}</option>)}
+                            </select>
+                            <select aria-label="当前会话思考深度" disabled={!sessionRoute || busy || externalRun || quickSettingsSaving} value={sessionRoute?.effort ?? "high"} onChange={(event) => void changeSessionRoute(sessionRoute?.modelPreset ?? null, event.target.value)}><option value="low">低</option><option value="medium">中</option><option value="high">高</option><option value="xhigh">极高</option><option value="max">最大</option></select>
+                        </div>
                             {busy ? <button type="button" className="stop-button" onClick={() => void handleStop()}><span className="stop-square" />停止</button> : <button type="submit" className="send-button" disabled={!draft.trim() || externalRun} title={externalRun ? "任务由另一个进程运行" : "发送消息"}><Icon name="arrow" size={17} /></button>}
                         </div>
                     </div>
@@ -1527,7 +1540,9 @@ export function App() {
                 }}>打开源工作区</button></div>}
                 <div className="detail-card"><span className="detail-label">工作区</span><strong>{activeWorkspace.name}</strong><code>{activeWorkspace.path}</code></div>
                 <div className="detail-card"><span className="detail-label">当前分支</span><strong>{activeWorkspace.branch || "非 Git 项目"}</strong></div>
-                <div className="detail-card"><span className="detail-label">模型</span><strong>{bootstrap?.settings.modelPreset || bootstrap?.settings.model || "未配置"}</strong><small>{bootstrap ? `${bootstrap.settings.model} · ${bootstrap.settings.protocol}` : ""}</small></div>
+                <div className="detail-card"><span className="detail-label">模型</span><strong>{sessionRoute?.modelPreset || sessionRoute?.model || "未配置"}</strong><small>{sessionRoute ? `${sessionRoute.model} · ${sessionRoute.protocol} · 思考 ${sessionRoute.effort}` : ""}</small></div>
+                {contextUsage && <div className="detail-card"><span className="detail-label">上下文</span><strong>{Math.round(contextUsage.utilization * 100)}% 已使用</strong><small>剩余约 {formatTokenCount(contextUsage.remainingTokens)} tokens · 模型窗口 {formatTokenCount(contextUsage.contextWindow)}</small></div>}
+                {tokenUsage && (tokenUsage.inputAvailable || tokenUsage.outputAvailable) && <div className="detail-card"><span className="detail-label">Token 用量</span><strong>{[tokenUsage.inputAvailable ? `输入 ${formatTokenCount(tokenUsage.input)}` : "", tokenUsage.outputAvailable ? `输出 ${formatTokenCount(tokenUsage.output)}` : ""].filter(Boolean).join(" · ")}</strong><small>{usageDetails(tokenUsage)}</small></div>}
                 <div className="detail-card"><span className="detail-label">权限模式</span><strong>{permissionMode === "plan" ? "计划模式" : "默认 - 逐项确认"}</strong><small>{permissionMode === "plan" ? "仅允许读取、提问和写计划文件。" : "读取自动允许；文件写入和命令执行需审批。"}</small></div>
                 <div className="detail-card grant-card"><span className="detail-label">本会话授权</span>{permissionGrants.length === 0
                     ? <small>当前没有本会话授权。</small>
@@ -1557,8 +1572,11 @@ export function App() {
                 setBootstrap((current) => current ? { ...current, settings } : current);
                 void window.desktop.getBootstrap().then(setBootstrap).catch(() => undefined);
             }}
-            onCredentialChanged={(credentialState, presetName) => setBootstrap((current) => current
-                && current.settings.modelPreset === presetName ? { ...current, credentialState } : current)}
+            onCredentialChanged={(credentialState, presetName) => {
+                setBootstrap((current) => current
+                    && current.settings.modelPreset === presetName ? { ...current, credentialState } : current);
+                if (sessionRoute?.modelPreset === presetName) setSessionCredentialState(credentialState);
+            }}
             onError={setError}
         />}
         {taskCenterOpen && <TaskCenterDialog
@@ -1756,13 +1774,14 @@ function SettingsDialog({
                 else if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
                 else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
             }}>
-            <div className="settings-heading"><div><div className="eyebrow">PREFERENCES</div><h2 id="settings-title">模型与连接</h2><p>设置只保存在这台设备上。密钥通过系统安全存储保护。</p></div><button className="icon-button" onClick={onClose} aria-label="关闭设置"><Icon name="close" /></button></div>
+            <div className="settings-heading"><div><h2 id="settings-title">设置</h2><p>设置只保存在这台设备上。密钥通过系统安全存储保护。</p></div><button className="icon-button" onClick={onClose} aria-label="关闭设置"><Icon name="close" /></button></div>
             <form onSubmit={(event) => void saveSettings(event)}>
+                <section className="settings-section" aria-labelledby="appearance-heading"><h3 id="appearance-heading">外观</h3><div className="appearance-options" role="group" aria-label="外观主题">{(["system", "light", "dark"] as const).map((option) => <button key={option} type="button" className={theme === option ? "selected" : ""} aria-pressed={theme === option} onClick={() => onThemeChanged(option)}>{option === "system" ? "跟随系统" : option === "light" ? "浅色" : "深色"}</button>)}</div><p>跟随系统会在系统外观变化时自动切换。</p></section>
+                <section className="settings-section" aria-labelledby="model-heading"><h3 id="model-heading">模型与连接</h3>
                 <div className="settings-form-grid">
-                    <label className="field wide"><span>外观主题</span><select value={theme} onChange={(event) => onThemeChanged(event.target.value as AppTheme)}><option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option></select><small className="field-help">跟随系统会在系统外观变化时自动切换。偏好只保存在这台设备上。</small></label>
                     <label className="field wide"><span>命名模型预设</span><select value={form.modelPreset ?? ""} onChange={(event) => chooseModelPreset(event.target.value)} disabled={modelPresets.length === 0}><option value="">自定义配置</option>{modelPresets.map((preset) => <option key={preset.name} value={preset.name}>{preset.name}</option>)}</select>
                         <small className="field-help">{modelPresets.find((preset) => preset.name === form.modelPreset)?.hasApiKey
-                            ? "此预设在 CLI 配置中包含 API Key。保存设置后会通过系统安全存储保存到此预设专属槽位。手动输入的密钥也只绑定当前预设。"
+                            ? "此预设在 CLI 配置中包含 API Key，可安全导入到此预设专属槽位。手动输入的密钥不会被预设覆盖。"
                             : modelPresets.length === 0 ? "未找到 CLI 命名预设。可在 ~/.triumcode/config.json 的 models 字段中配置。"
                                 : "预设来自 CLI 配置；手动修改模型路由字段后会切换为自定义配置。"}</small>
                     </label>
@@ -1771,10 +1790,11 @@ function SettingsDialog({
                     <label className="field wide"><span>API Base URL</span><input value={form.apiBase} onChange={(event) => update("apiBase", event.target.value)} placeholder="https://api.anthropic.com" maxLength={2000} /></label>
                     <label className="field"><span>认证方式</span><select value={form.auth} onChange={(event) => update("auth", event.target.value as DesktopSettings["auth"])}><option value="api-key">API Key Header</option><option value="bearer">Bearer Token</option></select></label>
                     <label className="field"><span>思考深度</span><select value={form.effort} onChange={(event) => update("effort", event.target.value)}><option value="low">低</option><option value="medium">中</option><option value="high">高</option><option value="xhigh">极高</option><option value="max">最大</option></select></label>
-                    <label className="field"><span>上下文窗口 (tokens)</span><input type="number" min={1024} max={10000000} step={1024} value={form.contextWindow} onChange={(event) => update("contextWindow", Number(event.target.value))} /></label>
+                    <label className="field"><span>上下文窗口 (tokens)</span><input type="number" min={1024} max={10000000} step={1} value={form.contextWindow} onChange={(event) => update("contextWindow", Number(event.target.value))} /></label>
                     <label className="field"><span>同时运行上限</span><select value={form.maxParallelRuns} onChange={(event) => update("maxParallelRuns", Number(event.target.value))}>{Array.from({ length: 8 }, (_, index) => index + 1).map((count) => <option key={count} value={count}>{count} 个任务</option>)}</select><small className="field-help">不同工作区可并行；同一工作树仍一次运行一个任务。</small></label>
                     <label className="toggle-row"><input type="checkbox" checked={form.thinking} onChange={(event) => update("thinking", event.target.checked)} /><span><strong>启用扩展思考</strong><small>支持时向模型发送思考深度参数。</small></span></label>
                 </div>
+                </section>
                 <div className="settings-divider" />
                 <div className="credential-header"><div><strong>API 密钥</strong><small>{credentialLabel(routeCredentialState)}</small></div>{routeCredentialState === "secure-key" && <button type="button" className="text-button danger-text" onClick={() => void clearKey()}>删除</button>}</div>
                 <div className="key-entry"><input type="password" autoComplete="new-password" value={key} onChange={(event) => setKey(event.target.value)} placeholder={routeCredentialState === "secure-key" ? "此路由已设置密钥，可输入新密钥替换" : "粘贴 API 密钥"} maxLength={10000} /><button type="button" className="secondary-button compact" disabled={!key.trim()} onClick={() => void saveKey()}>安全保存</button></div>
