@@ -57,6 +57,9 @@ API key.
 The short connection test reports whether a failure points to credentials,
 rate limits, network access, the model route, or a timeout, without showing
 raw provider error text.
+The desktop rejects a base URL containing credentials, query parameters, or a
+fragment; enter the API key in its protected field. Editing a route or key
+clears the previous connection-test result until it is tested again.
 The desktop restores the main window's size and position and panel widths. Its
 neutral light and dark themes follow the system appearance by default, including
 changes while the app is open; you can also choose either theme in Settings. Drag

@@ -1680,6 +1680,9 @@ function SettingsDialog({
             [field]: value,
             ...(clearsPreset ? { modelPreset: null } : {}),
         }));
+        setSaved(false);
+        setTestResult("");
+        setTestSucceeded(false);
         if (clearsPreset && form.modelPreset !== null) void refreshCredentialState(null);
     };
     const chooseModelPreset = (name: string) => {
@@ -1714,6 +1717,7 @@ function SettingsDialog({
             void refreshCredentialState(result.modelPreset);
             setSaved(true);
             setTestResult("");
+            setTestSucceeded(false);
         } catch (failure) { onError(displayError(failure)); }
         finally { setSaving(false); }
     };
@@ -1740,6 +1744,8 @@ function SettingsDialog({
             setRouteCredentialState(state);
             onCredentialChanged(state, form.modelPreset);
             setSaved(false);
+            setTestResult("");
+            setTestSucceeded(false);
         } catch (failure) { onError(displayError(failure)); }
     };
     const importCliKey = async () => {
@@ -1747,6 +1753,8 @@ function SettingsDialog({
             const state = await window.desktop.importCliCredential(form.modelPreset);
             setRouteCredentialState(state);
             onCredentialChanged(state, form.modelPreset);
+            setTestResult("");
+            setTestSucceeded(false);
         }
         catch (failure) { onError(displayError(failure)); }
     };
@@ -1755,6 +1763,8 @@ function SettingsDialog({
             const state = await window.desktop.clearApiKey(form.modelPreset);
             setRouteCredentialState(state);
             onCredentialChanged(state, form.modelPreset);
+            setTestResult("");
+            setTestSucceeded(false);
         }
         catch (failure) { onError(displayError(failure)); }
     };
