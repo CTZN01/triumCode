@@ -19,7 +19,6 @@ const api: DesktopApi = {
     openSession: (workspaceId, sessionId) => ipcRenderer.invoke("desktop:open-session", workspaceId, sessionId),
     updateSessionRoute: (workspaceId, sessionId, modelPreset, effort) => ipcRenderer.invoke("desktop:session-route", workspaceId, sessionId, modelPreset, effort),
     updatePermissionMode: (workspaceId, sessionId, mode) => ipcRenderer.invoke("desktop:permission-mode", workspaceId, sessionId, mode),
-    chooseAttachments: () => ipcRenderer.invoke("desktop:choose-attachments"),
     renameSession: (workspaceId, sessionId, title) => ipcRenderer.invoke("desktop:rename-session", workspaceId, sessionId, title),
     deleteSession: (workspaceId, sessionId) => ipcRenderer.invoke("desktop:delete-session", workspaceId, sessionId),
     getGitSnapshot: (workspaceId) => ipcRenderer.invoke("desktop:git-snapshot", workspaceId),

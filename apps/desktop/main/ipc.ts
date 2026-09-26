@@ -1,6 +1,4 @@
 import { dialog, ipcMain, type BrowserWindow, type IpcMainInvokeEvent } from "electron";
-import { readFileSync, statSync } from "node:fs";
-import { isUtf8 } from "node:buffer";
 import type { CreateWorktreeRequest, PermissionChoice } from "../shared/contracts.js";
 import { AgentHost } from "./agent-host.js";
 import type { TerminalService } from "./terminal-service.js";
@@ -163,29 +161,6 @@ export function registerIpcHandlers({ host, terminals, workspaceWatch, getWindow
         const workspace = host.openWorkspace(result.filePaths[0]);
         workspaceWatch.watchWorkspace(workspace.id);
         return workspace;
-    });
-    handle("desktop:choose-attachments", async () => {
-        const window = getWindow();
-        if (!window) return [];
-        const result = await dialog.showOpenDialog(window, {
-            title: "选择要交给 Agent 的文件",
-            properties: ["openFile", "multiSelections"],
-        });
-        if (result.canceled) return [];
-        if (result.filePaths.length > 4) throw new DesktopServiceError("ATTACHMENT_LIMIT", "每条消息最多添加 4 个文件。");
-        let totalBytes = 0;
-        return result.filePaths.map((path) => {
-            const size = statSync(path).size;
-            totalBytes += size;
-            if (size > 50_000 || totalBytes > 70_000) {
-                throw new DesktopServiceError("ATTACHMENT_LIMIT", "单个文件不能超过 50 KB，附件合计不能超过 70 KB。");
-            }
-            const buffer = readFileSync(path);
-            if (!isUtf8(buffer) || buffer.includes(0)) {
-                throw new DesktopServiceError("ATTACHMENT_TYPE", "目前只能添加 UTF-8 文本文件。");
-            }
-            return { path, content: buffer.toString("utf-8") };
-        });
     });
     handle("desktop:activate-workspace", (id) => {
         const workspace = host.activateWorkspace(workspaceId(id));

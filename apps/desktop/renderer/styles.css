@@ -59,11 +59,6 @@ kbd { font-family: inherit; font-size: 10px; color: #a1a5b2; background: #1c1e24
 .row-action { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; width: 23px; height: 23px; border: 0; border-radius: 5px; background: transparent; color: #767b88; cursor: pointer; opacity: 0; }
 .workspace-row:hover .row-action, .workspace-row:focus-within .row-action, .session-row:hover .row-action { opacity: 1; }
 .row-action:hover { color: #e7e9ef; background: #353843; }
-.session-status { width: 6px; height: 6px; flex: 0 0 auto; border-radius: 50%; background: #626773; }
-.session-status.running { background: #8d7cf5; box-shadow: 0 0 0 3px #8d7cf51d; }
-.session-status.interrupted { background: #d69d63; }
-.session-status.failed { background: #d2827d; }
-.session-status.cancelled { background: #858997; }
 .session-state-label { flex: 0 0 auto; color: #858997; font-size: 8px; }
 .session-state-label.running { color: #b3a8f3; }
 .session-state-label.interrupted, .session-state-label.failed { color: #d69d63; }

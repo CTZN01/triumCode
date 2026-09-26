@@ -315,7 +315,6 @@ export interface DesktopApi {
     openSession(workspaceId: string, sessionId: string): Promise<OpenSessionData>;
     updateSessionRoute(workspaceId: string, sessionId: string, modelPreset: string | null, effort: string): Promise<void>;
     updatePermissionMode(workspaceId: string, sessionId: string, mode: "desktopDefault" | "desktopAcceptEdits" | "bypassPermissions"): Promise<void>;
-    chooseAttachments(): Promise<DesktopAttachment[]>;
     renameSession(workspaceId: string, sessionId: string, title: string): Promise<SessionSummary>;
     deleteSession(workspaceId: string, sessionId: string): Promise<{ reviewRemoved: boolean }>;
     getGitSnapshot(workspaceId: string): Promise<GitSnapshot>;

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type KeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type CSSProperties, type FormEvent, type KeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import type {
     BootstrapData,
     ConversationMessage,
@@ -356,6 +356,8 @@ export function App() {
     const [questionDraft, setQuestionDraft] = useState("");
     const [draft, setDraft] = useState("");
     const [attachments, setAttachments] = useState<DesktopAttachment[]>([]);
+    const [modelPickerOpen, setModelPickerOpen] = useState(false);
+    const [permissionPickerOpen, setPermissionPickerOpen] = useState(false);
     const [sessionMenuId, setSessionMenuId] = useState<string | null>(null);
     const [retryNotice, setRetryNotice] = useState("");
     const [search, setSearch] = useState("");
@@ -394,6 +396,7 @@ export function App() {
     const endOfMessages = useRef<HTMLDivElement | null>(null);
     const activityList = useRef<HTMLDivElement | null>(null);
     const composerInput = useRef<HTMLTextAreaElement | null>(null);
+    const attachmentInput = useRef<HTMLInputElement | null>(null);
     const activeRef = useRef({ workspaceId: "", sessionId: "" });
     const eventTracker = useMemo(() => new DesktopRunEventTracker(), []);
     const pendingStartStops = useRef(new Set<string>());
@@ -1052,6 +1055,21 @@ export function App() {
     }, [sessionMenuId]);
 
     useEffect(() => {
+        if (!modelPickerOpen && !permissionPickerOpen) return;
+        const closeOnOutside = (event: PointerEvent): void => {
+            if (!(event.target instanceof Element)) return;
+            if (!event.target.closest(".model-picker")) setModelPickerOpen(false);
+            if (!event.target.closest(".permission-picker")) setPermissionPickerOpen(false);
+        };
+        const closeOnEscape = (event: globalThis.KeyboardEvent): void => {
+            if (event.key === "Escape") { setModelPickerOpen(false); setPermissionPickerOpen(false); }
+        };
+        document.addEventListener("pointerdown", closeOnOutside);
+        document.addEventListener("keydown", closeOnEscape);
+        return () => { document.removeEventListener("pointerdown", closeOnOutside); document.removeEventListener("keydown", closeOnEscape); };
+    }, [modelPickerOpen, permissionPickerOpen]);
+
+    useEffect(() => {
         if (!activityFocusId || rightPanel !== "activity") return;
         const rows = activityList.current?.querySelectorAll<HTMLDetailsElement>("[data-activity-id]");
         const row = rows ? [...rows].find((item) => item.dataset.activityId === activityFocusId) : undefined;
@@ -1256,6 +1274,8 @@ export function App() {
     const chooseSession = async (session: SessionSummary) => {
         if (!activeWorkspace) return;
         setSessionMenuId(null);
+        setModelPickerOpen(false);
+        setPermissionPickerOpen(false);
         setAttachments([]);
         try { await openSession(activeWorkspace.id, session.id); }
         catch (failure) { setError(displayError(failure)); }
@@ -1263,6 +1283,10 @@ export function App() {
 
     const changePermissionMode = async (mode: "desktopDefault" | "desktopAcceptEdits" | "bypassPermissions") => {
         if (!activeWorkspace || !activeSession || busy || externalRun || quickSettingsSaving) return;
+        if (typeof window.desktop.updatePermissionMode !== "function") {
+            setError("桌面服务仍在运行旧版本。请完全退出并重新启动 TriumCode 后再调整权限。");
+            return;
+        }
         setQuickSettingsSaving(true);
         try {
             await window.desktop.updatePermissionMode(activeWorkspace.id, activeSession.id, mode);
@@ -1271,17 +1295,25 @@ export function App() {
         finally { setQuickSettingsSaving(false); }
     };
 
-    const chooseAttachments = async () => {
+    const chooseAttachments = async (event: ChangeEvent<HTMLInputElement>) => {
+        const selected = [...(event.currentTarget.files ?? [])];
+        event.currentTarget.value = "";
+        if (!selected.length) return;
         try {
-            const files = await window.desktop.chooseAttachments();
-            if (files.length) {
-                const next = [...attachments, ...files.filter((file) => !attachments.some((item) => item.path === file.path))];
-                if (next.length > 4 || next.reduce((size, file) => size + new TextEncoder().encode(file.content).length, 0) > 70_000) {
-                    setError("每条消息最多添加 4 个文件，附件合计不能超过 70 KB。");
-                    return;
-                }
-                setAttachments(next);
+            if (selected.some((file) => file.size > 50_000)) throw new Error("单个文件不能超过 50 KB。");
+            const files = await Promise.all(selected.map(async (file) => {
+                const bytes = new Uint8Array(await file.arrayBuffer());
+                if (bytes.includes(0)) throw new Error("目前只能添加 UTF-8 文本文件。");
+                let content: string;
+                try { content = new TextDecoder("utf-8", { fatal: true }).decode(bytes); }
+                catch { throw new Error("目前只能添加 UTF-8 文本文件。"); }
+                return { path: file.name, content };
+            }));
+            const next = [...attachments, ...files.filter((file) => !attachments.some((item) => item.path === file.path))];
+            if (next.length > 4 || next.reduce((size, file) => size + new TextEncoder().encode(file.content).length, 0) > 70_000) {
+                throw new Error("每条消息最多添加 4 个文件，附件合计不能超过 70 KB。");
             }
+            setAttachments(next);
         } catch (failure) { setError(displayError(failure)); }
     };
 
@@ -1407,7 +1439,6 @@ export function App() {
                     {!activeWorkspace && <div className="side-empty">先选择一个工作区。</div>}
                     {activeWorkspace && visibleSessions.map((session) => <div className={`session-row ${activeSession?.id === session.id ? "selected" : ""}`} key={session.id}>
                         <button className="session-select" aria-current={activeSession?.id === session.id ? "page" : undefined} onClick={() => void chooseSession(session)}>
-                    <span className={`session-status ${session.status}`} aria-hidden="true" />
                             <span className="session-title">{session.title}</span>
                             {sessionStatusLabel(session.status) && <span className={`session-state-label ${session.status}`}>{sessionStatusLabel(session.status)}</span>}
                         </button>
@@ -1504,17 +1535,17 @@ export function App() {
                         <textarea ref={composerInput} value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={handleComposerKey} disabled={busy || externalRun || questions.length > 0} placeholder={externalRun ? "其他进程正在运行此任务..." : questions.length ? "先回答 Agent 的问题..." : busy ? "Agent 正在工作..." : "描述你希望在这个项目中完成的任务"} rows={Math.min(4, Math.max(1, draft.split("\n").length))} />
                         {attachments.length > 0 && <div className="attachment-list">{attachments.map((file) => <span className="attachment-chip" key={file.path} title={file.path}>{file.path.split(/[\\/]/).at(-1)}<button type="button" aria-label={`移除附件：${file.path}`} onClick={() => setAttachments((current) => current.filter((item) => item.path !== file.path))}><Icon name="close" size={12} /></button></span>)}</div>}
                         <div className="composer-bottom">
-                            <div className="composer-left"><button type="button" className="composer-attach" title="添加本机文件" aria-label="添加文件" disabled={busy || externalRun} onClick={() => void chooseAttachments()}><Icon name="plus" size={17} /></button>
-                                <select className="permission-select" aria-label="当前会话权限" title="调整当前会话权限" disabled={busy || externalRun || quickSettingsSaving || permissionMode === "plan"} value={permissionMode === "plan" ? "desktopDefault" : permissionMode} onChange={(event) => void changePermissionMode(event.target.value as "desktopDefault" | "desktopAcceptEdits" | "bypassPermissions")}>
-                                    <option value="desktopDefault">默认 - 逐项确认</option><option value="desktopAcceptEdits">自动接受编辑</option><option value="bypassPermissions">完全访问</option>
-                                </select>
+                            <div className="composer-left"><input ref={attachmentInput} type="file" multiple className="visually-hidden" tabIndex={-1} onChange={(event) => void chooseAttachments(event)} /><button type="button" className="composer-attach" title="添加本机文本文件" aria-label="添加文件" disabled={busy || externalRun} onClick={() => attachmentInput.current?.click()}><Icon name="plus" size={17} /></button>
+                                <div className="permission-picker"><button type="button" className="picker-trigger" aria-label="当前会话权限" aria-expanded={permissionPickerOpen} disabled={busy || externalRun || quickSettingsSaving || permissionMode === "plan"} onClick={() => { setPermissionPickerOpen((current) => !current); setModelPickerOpen(false); }}>{permissionMode === "plan" ? "计划模式" : permissionMode === "bypassPermissions" ? "完全访问" : permissionMode === "desktopAcceptEdits" ? "自动接受编辑" : "默认 - 逐项确认"}<Icon name="chevron" size={12} /></button>
+                                    {permissionPickerOpen && <div className="composer-popover permission-popover" role="menu" aria-label="选择会话权限">{([{"mode": "desktopDefault", "label": "默认 - 逐项确认", "hint": "文件写入和命令执行前询问"}, {"mode": "desktopAcceptEdits", "label": "自动接受编辑", "hint": "文件编辑自动允许，命令仍需确认"}, {"mode": "bypassPermissions", "label": "完全访问", "hint": "自动运行工具，仍遵守明确拒绝规则"}] as const).map((choice) => <button type="button" role="menuitemradio" aria-checked={permissionMode === choice.mode} key={choice.mode} onClick={() => { setPermissionPickerOpen(false); void changePermissionMode(choice.mode); }}><span><strong>{choice.label}</strong><small>{choice.hint}</small></span>{permissionMode === choice.mode && <span className="picker-check">✓</span>}</button>)}</div>}
+                                </div>
                             </div>
-                            <div className="composer-right"><details className="model-picker"><summary title="调整模型和思考强度">{sessionRoute?.modelPreset ?? sessionRoute?.model ?? "模型"} <span>{({ low: "低", medium: "中", high: "高", xhigh: "极高", max: "最大" } as Record<string, string>)[sessionRoute?.effort ?? "high"]}</span><Icon name="chevron" size={12} /></summary>
-                                <div className="model-popover"><label>模型<select aria-label="当前会话模型" disabled={!sessionRoute || busy || externalRun || quickSettingsSaving} value={sessionRoute?.modelPreset ?? ""} onChange={(event) => { if (event.target.value) void changeSessionRoute(event.target.value, effortChoice); else setSettingsOpen(true); }}><option value="">{sessionRoute?.model ?? "自定义模型"}</option>{bootstrap?.modelPresets.map((preset) => <option key={preset.name} value={preset.name}>{preset.name}</option>)}</select></label>
+                            <div className="composer-right"><div className="model-picker"><button type="button" className="picker-trigger" aria-label="调整模型和思考强度" aria-expanded={modelPickerOpen} onClick={() => { setModelPickerOpen((current) => !current); setPermissionPickerOpen(false); }}>{sessionRoute?.modelPreset ?? sessionRoute?.model ?? "模型"} <span>{({ low: "低", medium: "中", high: "高", xhigh: "极高", max: "最大" } as Record<string, string>)[sessionRoute?.effort ?? "high"]}</span><Icon name="chevron" size={12} /></button>
+                                {modelPickerOpen && <div className="composer-popover model-popover"><label>模型<select aria-label="当前会话模型" disabled={!sessionRoute || busy || externalRun || quickSettingsSaving} value={sessionRoute?.modelPreset ?? ""} onChange={(event) => { if (event.target.value) void changeSessionRoute(event.target.value, effortChoice); else setSettingsOpen(true); }}><option value="">{sessionRoute?.model ?? "自定义模型"}</option>{bootstrap?.modelPresets.map((preset) => <option key={preset.name} value={preset.name}>{preset.name}</option>)}</select></label>
                                     <div className="effort-heading"><span>思考强度</span><strong>{({ low: "低", medium: "中", high: "高", xhigh: "极高", max: "最大" } as Record<string, string>)[effortChoice]}</strong></div>
                                     <input type="range" aria-label="当前会话思考强度" min={0} max={4} step={1} disabled={!sessionRoute || busy || externalRun || quickSettingsSaving} value={["low", "medium", "high", "xhigh", "max"].indexOf(effortChoice)} onChange={(event) => setEffortChoice(["low", "medium", "high", "xhigh", "max"][Number(event.target.value)])} onPointerUp={() => { if (effortChoice !== sessionRoute?.effort) void changeSessionRoute(sessionRoute?.modelPreset ?? null, effortChoice); }} onKeyUp={() => { if (effortChoice !== sessionRoute?.effort) void changeSessionRoute(sessionRoute?.modelPreset ?? null, effortChoice); }} />
                                     <div className="effort-scale"><span>低</span><span>最大</span></div>
-                                </div></details>
+                                </div>}</div>
                                 {busy ? <button type="button" className="stop-button" onClick={() => void handleStop()}><span className="stop-square" />停止</button> : <button type="submit" className="send-button" disabled={(!draft.trim() && attachments.length === 0) || externalRun} title={externalRun ? "任务由另一个进程运行" : "发送消息"}><Icon name="arrow" size={17} /></button>}
                             </div>
                         </div>
@@ -1644,9 +1675,11 @@ export function App() {
             fontScale={fontScale}
             usage={tokenUsage}
             contextUsage={contextUsage}
+            permissionMode={permissionMode}
             onClose={() => setSettingsOpen(false)}
             onThemeChanged={setTheme}
             onFontScaleChanged={setFontScale}
+            onPermissionModeChanged={(mode) => void changePermissionMode(mode)}
             onSettingsSaved={(settings) => {
                 setBootstrap((current) => current ? { ...current, settings } : current);
                 void window.desktop.getBootstrap().then(setBootstrap).catch(() => undefined);
@@ -1709,9 +1742,11 @@ function SettingsDialog({
     fontScale,
     usage,
     contextUsage,
+    permissionMode,
     onClose,
     onThemeChanged,
     onFontScaleChanged,
+    onPermissionModeChanged,
     onSettingsSaved,
     onCredentialChanged,
     onError,
@@ -1723,15 +1758,17 @@ function SettingsDialog({
     fontScale: number;
     usage: AgentUsage | null;
     contextUsage: AgentContextUsage | null;
+    permissionMode: OpenSessionData["permissionMode"];
     onClose: () => void;
     onThemeChanged: (theme: AppTheme) => void;
     onFontScaleChanged: (scale: number) => void;
+    onPermissionModeChanged: (mode: "desktopDefault" | "desktopAcceptEdits" | "bypassPermissions") => void;
     onSettingsSaved: (settings: DesktopSettings) => void;
     onCredentialChanged: (state: CredentialState, presetName: string | null) => void;
     onError: (message: string) => void;
 }) {
     const [form, setForm] = useState(settings);
-    const [section, setSection] = useState<"appearance" | "usage" | "model">("appearance");
+    const [section, setSection] = useState<"general" | "appearance" | "usage" | "model">("general");
     const [key, setKey] = useState("");
     const [saving, setSaving] = useState(false);
     const [testing, setTesting] = useState(false);
@@ -1872,10 +1909,11 @@ function SettingsDialog({
                 else if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
                 else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
             }}>
-            <div className="settings-heading"><div><h2 id="settings-title">设置</h2><p>设置只保存在这台设备上。密钥通过系统安全存储保护。</p></div><button className="icon-button" onClick={onClose} aria-label="关闭设置"><Icon name="close" /></button></div>
-            <nav className="settings-nav" aria-label="设置分类"><button className={section === "appearance" ? "selected" : ""} onClick={() => setSection("appearance")}>外观</button><button className={section === "usage" ? "selected" : ""} onClick={() => setSection("usage")}>查看用量</button><button className={section === "model" ? "selected" : ""} onClick={() => setSection("model")}>模型设置</button></nav>
+            <aside className="settings-sidebar"><strong>设置</strong><span>个人</span><nav className="settings-nav" aria-label="设置分类"><button className={section === "general" ? "selected" : ""} onClick={() => setSection("general")}>常规</button><button className={section === "appearance" ? "selected" : ""} onClick={() => setSection("appearance")}>外观</button><button className={section === "usage" ? "selected" : ""} onClick={() => setSection("usage")}>使用情况</button><button className={section === "model" ? "selected" : ""} onClick={() => setSection("model")}>模型与连接</button></nav></aside>
+            <div className="settings-main"><div className="settings-heading"><div><h2 id="settings-title">{section === "general" ? "常规" : section === "appearance" ? "外观" : section === "usage" ? "使用情况" : "模型与连接"}</h2><p>{section === "usage" ? "查看当前会话的模型用量" : "设置只保存在这台设备上"}</p></div><button className="icon-button" onClick={onClose} aria-label="关闭设置"><Icon name="close" /></button></div>
             <form onSubmit={(event) => void saveSettings(event)}>
-                {section === "appearance" && <section className="settings-section" aria-labelledby="appearance-heading"><h3 id="appearance-heading">外观</h3><div className="appearance-options" role="group" aria-label="外观主题">{(["system", "light", "dark"] as const).map((option) => <button key={option} type="button" className={theme === option ? "selected" : ""} aria-pressed={theme === option} onClick={() => onThemeChanged(option)}>{option === "system" ? "跟随系统" : option === "light" ? "浅色" : "深色"}</button>)}</div><label className="font-scale-setting">界面字号<select aria-label="界面字号" value={fontScale} onChange={(event) => onFontScaleChanged(Number(event.target.value))}><option value={1}>标准</option><option value={1.1}>较大</option><option value={1.2}>最大</option></select></label><p>主题和字号会立即应用，并保存在这台设备上。</p></section>}
+                {section === "general" && <div className="settings-page"><section className="settings-section"><h3>权限</h3><div className="settings-list"><div className="settings-row stacked"><div><strong>当前会话权限</strong><small>运行任务前可在输入区随时调整；运行中不可切换。</small></div><div className="settings-permission-options">{([{"mode": "desktopDefault", "label": "默认", "hint": "逐项确认"}, {"mode": "desktopAcceptEdits", "label": "接受编辑", "hint": "命令仍需确认"}, {"mode": "bypassPermissions", "label": "完全访问", "hint": "工具免审批"}] as const).map((choice) => <button type="button" key={choice.mode} className={permissionMode === choice.mode ? "selected" : ""} disabled={permissionMode === "plan"} aria-pressed={permissionMode === choice.mode} onClick={() => onPermissionModeChanged(choice.mode)}><strong>{choice.label}</strong><small>{choice.hint}</small></button>)}</div></div></div></section><section className="settings-section"><h3>任务</h3><div className="settings-list"><label className="settings-row"><span><strong>同时运行上限</strong><small>不同工作区可并行，同一工作树一次运行一个任务。</small></span><select value={form.maxParallelRuns} onChange={(event) => update("maxParallelRuns", Number(event.target.value))}>{Array.from({ length: 8 }, (_, index) => index + 1).map((count) => <option key={count} value={count}>{count} 个任务</option>)}</select></label></div><div className="settings-actions settings-page-actions"><button className="primary-button" disabled={saving}>{saving ? "保存中..." : saved ? "已保存" : "保存设置"}</button></div></section></div>}
+                {section === "appearance" && <section className="settings-section" aria-labelledby="appearance-heading"><h3 id="appearance-heading">外观</h3><div className="settings-list"><div className="settings-row stacked"><div><strong>应用主题</strong><small>跟随系统会在系统外观变化时自动切换。</small></div><div className="appearance-options" role="group" aria-label="外观主题">{(["system", "light", "dark"] as const).map((option) => <button key={option} type="button" className={theme === option ? "selected" : ""} aria-pressed={theme === option} onClick={() => onThemeChanged(option)}>{option === "system" ? "跟随系统" : option === "light" ? "浅色" : "深色"}</button>)}</div></div><label className="settings-row"><span><strong>界面字号</strong><small>同时调整对话、导航和面板文字。</small></span><select aria-label="界面字号" value={fontScale} onChange={(event) => onFontScaleChanged(Number(event.target.value))}><option value={1}>标准</option><option value={1.1}>较大</option><option value={1.2}>最大</option></select></label></div></section>}
                 {section === "usage" && <section className="settings-section usage-section"><h3>当前会话用量</h3>{usage ? <><div className="usage-grid"><div><span>输入 tokens</span><strong>{usage.inputAvailable ? usage.input.toLocaleString("en-US") : "暂无数据"}</strong></div><div><span>输出 tokens</span><strong>{usage.outputAvailable ? usage.output.toLocaleString("en-US") : "暂无数据"}</strong></div><div><span>缓存读取</span><strong>{usage.cacheReadAvailable ? usage.cacheRead.toLocaleString("en-US") : "暂无数据"}</strong></div><div><span>缓存写入</span><strong>{usage.cacheWriteAvailable ? usage.cacheWrite.toLocaleString("en-US") : "暂无数据"}</strong></div></div>{contextUsage && <div className="usage-context"><span>上下文已用 {Math.round(contextUsage.utilization * 100)}%</span><progress value={contextUsage.utilization} max={1} /></div>}</> : <p>打开会话后可查看模型返回的用量。</p>}<p>这些数字仅统计当前会话；服务商账户限额和剩余额度以服务商账单为准。</p></section>}
                 {section === "model" && <><section className="settings-section" aria-labelledby="model-heading"><h3 id="model-heading">模型与连接</h3>
                 <div className="settings-form-grid">
@@ -1891,7 +1929,6 @@ function SettingsDialog({
                     <label className="field"><span>认证方式</span><select value={form.auth} onChange={(event) => update("auth", event.target.value as DesktopSettings["auth"])}><option value="api-key">API Key Header</option><option value="bearer">Bearer Token</option></select></label>
                     <label className="field"><span>思考深度</span><select value={form.effort} onChange={(event) => update("effort", event.target.value)}><option value="low">低</option><option value="medium">中</option><option value="high">高</option><option value="xhigh">极高</option><option value="max">最大</option></select></label>
                     <label className="field"><span>上下文窗口 (tokens)</span><input type="number" min={1024} max={10000000} step={1} value={form.contextWindow} onChange={(event) => update("contextWindow", Number(event.target.value))} /></label>
-                    <label className="field"><span>同时运行上限</span><select value={form.maxParallelRuns} onChange={(event) => update("maxParallelRuns", Number(event.target.value))}>{Array.from({ length: 8 }, (_, index) => index + 1).map((count) => <option key={count} value={count}>{count} 个任务</option>)}</select><small className="field-help">不同工作区可并行；同一工作树仍一次运行一个任务。</small></label>
                     <label className="toggle-row"><input type="checkbox" checked={form.thinking} onChange={(event) => update("thinking", event.target.checked)} /><span><strong>启用扩展思考</strong><small>支持时向模型发送思考深度参数。</small></span></label>
                 </div>
                 </section>
@@ -1905,6 +1942,7 @@ function SettingsDialog({
                 </div>
                 </>}
             </form>
+            </div>
         </section>
     </div>;
 }
