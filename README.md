@@ -33,6 +33,8 @@ and a workspace-bound Windows PowerShell terminal. Creating a commit can run
 the repository's local Git hooks.
 User-question activity records answered, skipped, expired, and cancelled
 outcomes without saving the answer text.
+When an API key changes during an open conversation, later visible events and
+saved session copies redact both the previous and current keys.
 Closing the window with a running task or open terminal asks whether to stop
 them or stay in the app. Exit waits for task cancellation and PowerShell's exit
 event; if the shell does not exit, the app reports the failure and stays open.

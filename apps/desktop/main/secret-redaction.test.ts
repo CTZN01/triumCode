@@ -19,3 +19,16 @@ test("saved session messages remove the key without mutating the active Agent hi
 test("a short development key does not corrupt ordinary conversation text", () => {
     assert.equal(redactConfiguredKey("a cat", "a"), "a cat");
 });
+
+test("key rotation removes both old and new credentials from later session saves", () => {
+    const oldKey = "gateway-secret-123";
+    const newKey = "gateway-secret-1234";
+    const keys = [oldKey, newKey];
+    const messages = [{ role: "assistant", content: `${oldKey} then ${newKey}` }];
+    assert.deepEqual(redactSessionMessages(messages, keys), [
+        { role: "assistant", content: "[REDACTED] then [REDACTED]" },
+    ]);
+    assert.equal(redactConfiguredKey(`error: ${oldKey}, ${newKey}`, keys),
+        "error: [REDACTED], [REDACTED]");
+    assert.equal(messages[0].content, `${oldKey} then ${newKey}`);
+});

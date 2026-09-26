@@ -42,7 +42,7 @@ import { updateQuestionActivity } from "../shared/question-activity.js";
 import { desktopTaskStatus } from "./task-status.js";
 import { connectionFailureMessage } from "./connection-result.js";
 import { RunShutdown } from "./run-shutdown.js";
-import { redactConfiguredKey, redactSessionMessages } from "./secret-redaction.js";
+import { redactConfiguredKey, redactSessionMessages, type RedactionKeys } from "./secret-redaction.js";
 import { CredentialStore } from "./credential-store.js";
 import {
     commitGitChanges as createGitCommit,
@@ -96,6 +96,7 @@ interface SessionRuntime {
     store: SessionStore;
     agent: Agent;
     apiKey: string;
+    redactionKeys: string[];
     currentRunId: string | null;
     runPromise: Promise<void> | null;
     releaseRunLease: (() => void) | null;
@@ -147,7 +148,7 @@ function safeDesktopUsage(value: unknown): DesktopUsageSnapshot | null {
     };
 }
 
-function safeSessionPermissionGrants(value: unknown, apiKey = ""): SessionPermissionGrant[] {
+function safeSessionPermissionGrants(value: unknown, apiKey: RedactionKeys = ""): SessionPermissionGrant[] {
     if (!Array.isArray(value)) return [];
     const grants: SessionPermissionGrant[] = [];
     for (const entry of value.slice(-200)) {
@@ -189,7 +190,7 @@ function sessionKey(workspaceId: string, sessionId: string): string {
     return `${workspaceId}:${sessionId}`;
 }
 
-function redact(value: string, apiKey = ""): string {
+function redact(value: string, apiKey: RedactionKeys = ""): string {
     return redactConfiguredKey(value, apiKey)
         .replace(/\bsk-[A-Za-z0-9_-]{12,}\b/g, "sk-[REDACTED]")
         .replace(/\b(Bearer\s+)\S+/gi, "$1[REDACTED]")
@@ -202,7 +203,7 @@ function stringValue(value: unknown): string {
     return typeof value === "string" ? value : "";
 }
 
-function safeToolInput(name: string, input: Record<string, any>, workspaceRoot?: string, apiKey = ""): Record<string, unknown> {
+function safeToolInput(name: string, input: Record<string, any>, workspaceRoot?: string, apiKey: RedactionKeys = ""): Record<string, unknown> {
     if (name === "run_command") {
         const cwd = typeof input.cwd === "string" && input.cwd ? input.cwd : ".";
         const args = Array.isArray(input.args) ? input.args.map(String) : [];
@@ -239,7 +240,7 @@ function safeToolInput(name: string, input: Record<string, any>, workspaceRoot?:
     return summary;
 }
 
-function safeAgentEvent(event: AgentEvent, workspaceRoot?: string, apiKey = ""): AgentEvent {
+function safeAgentEvent(event: AgentEvent, workspaceRoot?: string, apiKey: RedactionKeys = ""): AgentEvent {
     if (event.type === "assistant.delta") return { ...event, text: redact(event.text, apiKey) };
     if (event.type === "tool.started" || event.type === "tool.completed") {
         const input = safeToolInput(event.name, event.input, workspaceRoot, apiKey);
@@ -257,7 +258,7 @@ function safeAgentEvent(event: AgentEvent, workspaceRoot?: string, apiKey = ""):
     return event;
 }
 
-function safePermissionSource(value: unknown, apiKey = ""): PermissionSource {
+function safePermissionSource(value: unknown, apiKey: RedactionKeys = ""): PermissionSource {
     const source = parsePermissionSource(value);
     if (!source) throw new Error("Invalid permission source.");
     return source.kind === "rule" ? { ...source, rule: redact(source.rule, apiKey).slice(0, 300) } : source;
@@ -267,7 +268,7 @@ const MAX_SESSION_ACTIVITIES = 200;
 const MAX_ACTIVITY_DETAIL_CHARS = 4_000;
 const MAX_ACTIVITY_OUTPUT_CHARS = 8_000;
 
-function limitedText(value: string, limit: number, apiKey = ""): string {
+function limitedText(value: string, limit: number, apiKey: RedactionKeys = ""): string {
     const safe = redact(value, apiKey);
     return safe.length <= limit ? safe : `${safe.slice(0, limit)}\n[已截断]`;
 }
@@ -282,7 +283,7 @@ function failureCategoryLabel(category: AgentFailureCategory): string {
     }
 }
 
-function safeSessionActivities(value: unknown, apiKey = ""): SessionActivity[] {
+function safeSessionActivities(value: unknown, apiKey: RedactionKeys = ""): SessionActivity[] {
     if (!Array.isArray(value)) return [];
     const result: SessionActivity[] = [];
     for (const entry of value.slice(-MAX_SESSION_ACTIVITIES)) {
@@ -423,7 +424,7 @@ function activityFromEvent(
     return null;
 }
 
-function projectMessages(messages: unknown[], apiKey = ""): ConversationMessage[] {
+function projectMessages(messages: unknown[], apiKey: RedactionKeys = ""): ConversationMessage[] {
     const visible: ConversationMessage[] = [];
     for (const [index, value] of messages.entries()) {
         if (!value || typeof value !== "object") continue;
@@ -467,7 +468,7 @@ function toSummary(item: SessionIndex): SessionSummary {
     };
 }
 
-function errorMessage(error: unknown, apiKey = ""): string {
+function errorMessage(error: unknown, apiKey: RedactionKeys = ""): string {
     return error instanceof Error ? redact(error.message, apiKey) : redact(String(error), apiKey);
 }
 
@@ -840,25 +841,27 @@ export class AgentHost {
         const runtime = this.runtimeFor(workspaceId, sessionId, item, store);
         const current = store.list().find((entry) => entry.id === sessionId)!;
         const isRunning = Boolean(runtime.currentRunId || store.isRunActive(sessionId));
-        const messages = projectMessages(runtime.agent.history(), runtime.apiKey);
+        const messages = projectMessages(runtime.agent.history(), runtime.redactionKeys);
         if (runtime.currentRunId && runtime.partialAssistantText) {
-            messages.push({ id: `assistant-${runtime.currentRunId}`, role: "assistant", text: redact(runtime.partialAssistantText, runtime.apiKey) });
+            messages.push({ id: `assistant-${runtime.currentRunId}`, role: "assistant", text: redact(runtime.partialAssistantText, runtime.redactionKeys) });
         }
         return {
             session: toSummary(isRunning ? { ...current, status: "running" } : current),
             route: { ...runtime.desktopSettings },
             messages,
-            activities: runtime.activities,
+            activities: safeSessionActivities(runtime.activities, runtime.redactionKeys),
             usage: runtime.agent.getUsage(),
             contextUsage: runtime.agent.getContextUsage(),
             runId: runtime.currentRunId,
             externalRun: isRunning && !runtime.currentRunId,
             permissionMode: runtime.agent.getSessionStatus().mode === "plan" ? "plan" : "desktopDefault",
-            approvals: this.pendingPermissionsFor(workspaceId, sessionId),
-            questions: this.pendingQuestionsFor(workspaceId, sessionId),
+            approvals: redactSessionMessages(this.pendingPermissionsFor(workspaceId, sessionId),
+                runtime.redactionKeys) as PendingPermissionRequest[],
+            questions: redactSessionMessages(this.pendingQuestionsFor(workspaceId, sessionId),
+                runtime.redactionKeys) as PendingUserQuestion[],
             permissionGrants: runtime.agent.getSessionPermissionGrants().map((grant) => ({
                 ...grant,
-                operation: redact(grant.operation, runtime.apiKey).slice(0, 2_000),
+                operation: redact(grant.operation, runtime.redactionKeys).slice(0, 2_000),
             })),
             eventSequence: this.eventSequences.current(key),
         };
@@ -896,7 +899,7 @@ export class AgentHost {
             throw error;
         }
         runtime.desktopSettings = route;
-        runtime.apiKey = this.apiKeyForSettings(route);
+        this.setRuntimeApiKey(runtime, this.apiKeyForSettings(route));
         runtime.agent.setModel({ model: route.model, label: route.modelPreset ?? "", apiBase: route.apiBase,
             apiKey: runtime.apiKey, protocol: route.protocol, auth: route.auth,
             contextWindow: route.contextWindow });
@@ -994,9 +997,12 @@ export class AgentHost {
             throw new DesktopServiceError("SESSION_CONFLICT", "会话已被其他进程修改。请重新打开此会话后再开始任务。");
         }
         if (runtime.currentRunId) throw new DesktopServiceError("SESSION_BUSY", "此会话已有正在运行的任务。");
-        if (!this.apiKeyForSettings(runtime.desktopSettings)) {
+        const apiKey = this.apiKeyForSettings(runtime.desktopSettings);
+        if (!apiKey) {
             throw new DesktopServiceError("CREDENTIAL_MISSING", "当前会话没有可用的 API Key。请先在设置中保存或导入此模型的密钥。");
         }
+        this.setRuntimeApiKey(runtime, apiKey);
+        runtime.agent.setModel({ apiKey });
         let prompt = submittedPrompt;
         if (retryFailedRequest) {
             const failedTurn = [...runtime.activities].reverse().find((activity) => activity.failureCategory !== undefined);
@@ -1041,7 +1047,7 @@ export class AgentHost {
             this.publish(runtime, {
                 type: "notice",
                 level: "warning",
-                text: `无法保存本机代码审阅基线；本轮文件仍会按已批准操作执行。${errorMessage(error, runtime.apiKey)}`,
+                text: `无法保存本机代码审阅基线；本轮文件仍会按已批准操作执行。${errorMessage(error, runtime.redactionKeys)}`,
             });
         }
         if (runtime.cancelRequested) {
@@ -1065,10 +1071,10 @@ export class AgentHost {
         }).catch((error: unknown) => {
             finalStatus = "failed";
             this.persistSession(runtime, runtime.agent.history(), finalStatus);
-            this.publish(runtime, { type: "notice", level: "warning", text: errorMessage(error, runtime.apiKey) });
+            this.publish(runtime, { type: "notice", level: "warning", text: errorMessage(error, runtime.redactionKeys) });
         }).finally(() => {
             try { this.reviews.finishRun(workspaceId, runId, finalStatus); }
-            catch (error) { this.publish(runtime, { type: "notice", level: "warning", text: `无法更新代码审阅快照：${errorMessage(error, runtime.apiKey)}` }); }
+            catch (error) { this.publish(runtime, { type: "notice", level: "warning", text: `无法更新代码审阅快照：${errorMessage(error, runtime.redactionKeys)}` }); }
             runtime.reviewCaptureEnabled = false;
             runtime.currentRunId = null;
             this.refreshRuntimeApiKey(runtime);
@@ -1163,7 +1169,7 @@ export class AgentHost {
         for (const runtime of this.sessions.values()) {
             if (!runtime.currentRunId && runtime.desktopSettings.modelPreset === saved.modelPreset) {
                 runtime.agent.setModel({ apiKey });
-                runtime.apiKey = apiKey;
+                this.setRuntimeApiKey(runtime, apiKey);
             }
         }
         return saved;
@@ -1193,8 +1199,19 @@ export class AgentHost {
     }
 
     private refreshRuntimeApiKey(runtime: SessionRuntime): void {
-        runtime.apiKey = this.apiKeyForSettings(runtime.desktopSettings);
+        this.setRuntimeApiKey(runtime, this.apiKeyForSettings(runtime.desktopSettings));
         runtime.agent.setModel({ apiKey: runtime.apiKey });
+    }
+
+    private setRuntimeApiKey(runtime: SessionRuntime, apiKey: string): void {
+        this.rememberRuntimeRedactionKey(runtime, apiKey);
+        runtime.apiKey = apiKey;
+    }
+
+    private rememberRuntimeRedactionKey(runtime: SessionRuntime, apiKey: string): void {
+        if (apiKey.length < 8 || runtime.redactionKeys.includes(apiKey)) return;
+        runtime.redactionKeys.push(apiKey);
+        runtime.activities = safeSessionActivities(runtime.activities, runtime.redactionKeys);
     }
 
     private pendingPermissionsFor(workspaceId: string, sessionId: string): PendingPermissionRequest[] {
@@ -1265,8 +1282,13 @@ export class AgentHost {
         this.assertCredentialPreset(presetName);
         this.credentials.save(apiKey, presetName);
         for (const runtime of this.sessions.values()) {
-            if (!runtime.currentRunId && runtime.desktopSettings.modelPreset === presetName) {
-                runtime.apiKey = this.apiKeyForSettings(runtime.desktopSettings);
+            if (runtime.desktopSettings.modelPreset === presetName) {
+                const savedKey = this.apiKeyForSettings(runtime.desktopSettings);
+                if (runtime.currentRunId) {
+                    this.rememberRuntimeRedactionKey(runtime, savedKey);
+                    continue;
+                }
+                this.setRuntimeApiKey(runtime, savedKey);
                 runtime.agent.setModel({ apiKey: runtime.apiKey });
             }
         }
@@ -1279,9 +1301,13 @@ export class AgentHost {
         this.credentials.importCliCredential(presetName, preset?.apiKey);
         const apiKey = this.apiKeyForSettings({ ...this.settings.get(), modelPreset: presetName });
         for (const runtime of this.sessions.values()) {
-            if (!runtime.currentRunId && runtime.desktopSettings.modelPreset === presetName) {
+            if (runtime.desktopSettings.modelPreset === presetName) {
+                if (runtime.currentRunId) {
+                    this.rememberRuntimeRedactionKey(runtime, apiKey);
+                    continue;
+                }
                 runtime.agent.setModel({ apiKey });
-                runtime.apiKey = apiKey;
+                this.setRuntimeApiKey(runtime, apiKey);
             }
         }
         return this.credentialState(presetName);
@@ -1294,7 +1320,7 @@ export class AgentHost {
         for (const runtime of this.sessions.values()) {
             if (!runtime.currentRunId && runtime.desktopSettings.modelPreset === presetName) {
                 runtime.agent.setModel({ apiKey });
-                runtime.apiKey = apiKey;
+                this.setRuntimeApiKey(runtime, apiKey);
             }
         }
         return this.credentialState(presetName);
@@ -1394,14 +1420,14 @@ export class AgentHost {
                         this.publish(runtime, {
                             type: "notice",
                             level: "warning",
-                            text: `本轮命令执行结果未能写入代码审阅记录。${errorMessage(error, runtime.apiKey)}`,
+                            text: `本轮命令执行结果未能写入代码审阅记录。${errorMessage(error, runtime.redactionKeys)}`,
                         });
                     }
                 }
                 if (event.type === "usage.updated" || event.type === "context.updated") {
                     this.persistSession(runtime);
                 }
-                const safeEvent = safeAgentEvent(event, runtime.workspaceRoot, runtime.apiKey);
+                const safeEvent = safeAgentEvent(event, runtime.workspaceRoot, runtime.redactionKeys);
                 const nextActivities = activityFromEvent(runtime.activities, safeEvent, runtime.currentRunId ?? undefined);
                 let shouldPersist = false;
                 if (nextActivities) {
@@ -1431,6 +1457,7 @@ export class AgentHost {
             store,
             agent,
             apiKey,
+            redactionKeys: apiKey.length >= 8 ? [apiKey] : [],
             currentRunId: null,
             runPromise: null,
             releaseRunLease: null,
@@ -1465,13 +1492,13 @@ export class AgentHost {
                 : runtime.agent.history());
             const saved = runtime.store.save(
                 runtime.sessionId,
-                redactSessionMessages(snapshot, runtime.apiKey),
+                redactSessionMessages(snapshot, runtime.redactionKeys),
                 runtime.agent.getModel(),
                 runtime.revision,
                 status,
-                runtime.activities,
+                safeSessionActivities(runtime.activities, runtime.redactionKeys),
                 usageSnapshot(runtime.agent.getUsage(), runtime.agent.getContextUsage()),
-                safeSessionPermissionGrants(runtime.agent.getPersistedSessionPermissionGrants(), runtime.apiKey),
+                safeSessionPermissionGrants(runtime.agent.getPersistedSessionPermissionGrants(), runtime.redactionKeys),
                 runtime.desktopSettings,
                 [...this.permissions.values()].some((pending) => pending.workspaceId === runtime.workspaceId && pending.sessionId === runtime.sessionId)
                     ? "approval"
@@ -1508,9 +1535,9 @@ export class AgentHost {
         request: PermissionRequest,
     ): Promise<"once" | "session" | false> {
         const requestId = randomUUID();
-        const operation = safeToolInput(request.toolName, request.input, runtime.workspaceRoot, runtime.apiKey);
-        const message = redact(request.message, runtime.apiKey);
-        const source = safePermissionSource(request.source, runtime.apiKey);
+        const operation = safeToolInput(request.toolName, request.input, runtime.workspaceRoot, runtime.redactionKeys);
+        const message = redact(request.message, runtime.redactionKeys);
+        const source = safePermissionSource(request.source, runtime.redactionKeys);
         return new Promise((resolve) => {
             const timer = setTimeout(() => {
                 const pending = this.permissions.get(requestId);
@@ -1592,8 +1619,8 @@ export class AgentHost {
 
     private askUser(runtime: SessionRuntime, question: string, options?: string[]): Promise<string> {
         const requestId = randomUUID();
-        const safeQuestion = redact(question, runtime.apiKey);
-        const safeOptions = options?.map((option) => redact(option, runtime.apiKey));
+        const safeQuestion = redact(question, runtime.redactionKeys);
+        const safeOptions = options?.map((option) => redact(option, runtime.redactionKeys));
         return new Promise((resolve) => {
             const timer = setTimeout(() => {
                 if (!this.questions.has(requestId)) return;
@@ -1659,7 +1686,7 @@ export class AgentHost {
             || payload.type === "permission.requested" || payload.type === "permission.resolved"
             || payload.type === "question.requested" || payload.type === "question.resolved")
                 ? payload
-                : { type: "agent", event: safeAgentEvent(payload as AgentEvent, runtime.workspaceRoot, runtime.apiKey) };
+                : { type: "agent", event: safeAgentEvent(payload as AgentEvent, runtime.workspaceRoot, runtime.redactionKeys) };
         try {
             const key = sessionKey(runtime.workspaceId, runtime.sessionId);
             const sequence = this.eventSequences.next(key);
@@ -1671,7 +1698,7 @@ export class AgentHost {
                 runId,
                 sequence,
                 timestamp: new Date().toISOString(),
-                payload: safePayload,
+                payload: redactSessionMessages([safePayload], runtime.redactionKeys)[0] as DesktopEventPayload,
             });
         } catch { /* UI delivery is optional; unanswered approvals time out denied. */ }
     }
