@@ -57,6 +57,17 @@ conversation; they apply to its next request and persist after restart. Changes
 are unavailable while a request is running. Settings has a separate Appearance section with System, Light,
 and Dark choices. The context-window field accepts exact token counts such as
 1,000,000.
+The composer groups model selection with a five-step reasoning slider on the right.
+On the left, it offers per-conversation permission choices (confirm operations,
+accept file edits, or full access without approval except explicit deny rules)
+and a file picker for up to
+four UTF-8 text files (50 KB each, 70 KB total). Selected file contents are
+included in the next message; binary files and images are not yet supported.
+The active Agent status appears in the conversation while a task runs. The
+conversation menu provides Rename and Delete actions. Settings has Appearance,
+current-conversation Usage, and Model sections; Appearance includes a saved
+interface text-size choice. Usage is based on tokens reported by the model
+and does not represent the provider account's remaining quota.
 Each preset and the custom route has its own protected API key slot. A
 conversation keeps its selected model route and reasoning settings. Changing
 global preferences applies to new conversations; the composer changes the current

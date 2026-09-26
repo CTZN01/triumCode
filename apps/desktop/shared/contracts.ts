@@ -184,6 +184,11 @@ export interface ConversationMessage {
     text: string;
 }
 
+export interface DesktopAttachment {
+    path: string;
+    content: string;
+}
+
 export interface DesktopSettings {
     model: string;
     modelPreset: string | null;
@@ -225,7 +230,7 @@ export interface OpenSessionData {
     contextUsage: AgentContextUsage | null;
     runId: string | null;
     externalRun: boolean;
-    permissionMode: "desktopDefault" | "plan";
+    permissionMode: "desktopDefault" | "desktopAcceptEdits" | "bypassPermissions" | "plan";
     approvals: PendingPermissionRequest[];
     questions: PendingUserQuestion[];
     permissionGrants: SessionPermissionGrantSummary[];
@@ -309,6 +314,8 @@ export interface DesktopApi {
     createSession(workspaceId: string): Promise<OpenSessionData>;
     openSession(workspaceId: string, sessionId: string): Promise<OpenSessionData>;
     updateSessionRoute(workspaceId: string, sessionId: string, modelPreset: string | null, effort: string): Promise<void>;
+    updatePermissionMode(workspaceId: string, sessionId: string, mode: "desktopDefault" | "desktopAcceptEdits" | "bypassPermissions"): Promise<void>;
+    chooseAttachments(): Promise<DesktopAttachment[]>;
     renameSession(workspaceId: string, sessionId: string, title: string): Promise<SessionSummary>;
     deleteSession(workspaceId: string, sessionId: string): Promise<{ reviewRemoved: boolean }>;
     getGitSnapshot(workspaceId: string): Promise<GitSnapshot>;

@@ -166,6 +166,7 @@ test("desktop route changes preserve history and cannot race a run or stale writ
         thinking: true,
         effort: "medium",
         contextWindow: 128_000,
+        permissionMode: "bypassPermissions" as const,
     };
     let releaseRun: (() => void) | null = null;
     try {

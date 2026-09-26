@@ -554,6 +554,18 @@ test("the session status names the preset, not the model string", () => {
     assert.equal(agent.getSessionStatus().model, "deepseek-flash");
 });
 
+test("desktop permission changes update the active agent mode", () => {
+    const agent = new Agent({ model: "test-model", apiKey: "k", apiBase: "http://127.0.0.1:9",
+        permissionMode: "desktopDefault" });
+    assert.equal(agent.getSessionStatus().mode, "default");
+    agent.setDesktopPermissionMode("desktopAcceptEdits");
+    assert.equal(agent.getSessionStatus().mode, "accept-edits");
+    agent.setDesktopPermissionMode("bypassPermissions");
+    assert.equal(agent.getSessionStatus().mode, "yolo");
+    agent.setDesktopPermissionMode("desktopDefault");
+    assert.equal(agent.getSessionStatus().mode, "default");
+});
+
 test("a bare model switch keeps an explicitly chosen auth scheme", async () => {
     const api = await fakeApi([
         (w) => { w(start(0, { type: "text", text: "" })); w(textDelta(0, "hi")); w(stop(0)); w(finish("end_turn")); },

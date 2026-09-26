@@ -1411,3 +1411,61 @@
 .sidebar .new-task-button { border-color: transparent !important; background: transparent !important; color: var(--text) !important; }
 .sidebar .new-task-button:hover:not(:disabled) { background: var(--hover) !important; opacity: 1; }
 .sidebar .new-task-button kbd { color: var(--muted) !important; background: transparent !important; border-color: var(--border) !important; }
+
+/* Composer controls and navigation use the same neutral surfaces as the rest of the desktop app. */
+.session-row.selected, .workspace-row.selected { color: var(--text) !important; }
+.session-row.selected .session-title, .workspace-row.selected .workspace-name { color: var(--text) !important; }
+.session-actions { position: relative; }
+.session-menu { position: absolute; top: 29px; right: 0; z-index: 8; width: 138px; padding: 5px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); box-shadow: 0 12px 30px #0004; }
+.session-menu button { display: block; width: 100%; padding: 8px; border: 0; border-radius: 5px; background: transparent; color: var(--text); text-align: left; cursor: pointer; }
+.session-menu button:hover { background: var(--hover); }
+.session-menu button:last-child { color: var(--danger); }
+.session-row:has(.session-menu) { z-index: 5; }
+.topbar-actions .task-center-toggle { color: #78aef0 !important; }
+.topbar-actions .terminal-toggle { color: #8acba6 !important; }
+.topbar-actions .git-branch-icon { display: inline-flex; color: var(--text); }
+.topbar-actions .activity-bars i:nth-child(1) { background: #e6ad72; }
+.topbar-actions .activity-bars i:nth-child(2) { background: #89bbec; }
+.topbar-actions .activity-bars i:nth-child(3) { background: #bd9aea; }
+.composer-bottom, .composer-left, .composer-right { display: flex; align-items: center; gap: 7px; }
+.composer-bottom { justify-content: space-between; }
+.composer-left, .composer-right { min-width: 0; }
+.composer-attach { display: grid; place-items: center; width: 29px; height: 29px; padding: 0; border: 0; border-radius: 7px; background: transparent; color: var(--text); cursor: pointer; }
+.composer-attach:hover, .model-picker summary:hover, .permission-select:hover { background: var(--hover); }
+.composer-attach:disabled { opacity: .5; cursor: default; }
+.permission-select { max-width: 185px; min-height: 29px; padding: 0 7px; border: 0; border-radius: 6px; background: transparent; color: var(--warning); cursor: pointer; }
+.permission-select option { background: var(--surface); color: var(--text); }
+.model-picker { position: relative; }
+.model-picker summary { display: flex; align-items: center; gap: 5px; max-width: 225px; min-height: 29px; padding: 0 7px; border-radius: 6px; color: var(--text); cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; list-style: none; }
+.model-picker summary::-webkit-details-marker { display: none; }
+.model-picker summary span { color: var(--muted); }
+.model-picker summary svg { transform: rotate(90deg); }
+.model-popover { position: absolute; z-index: 10; right: 0; bottom: 39px; width: 294px; padding: 15px; border: 1px solid var(--border); border-radius: 13px; background: var(--surface); box-shadow: 0 15px 40px #0005; }
+.model-popover label { display: grid; gap: 6px; color: var(--muted); }
+.model-popover select { width: 100%; height: 33px; padding: 0 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--field); color: var(--text); }
+.effort-heading, .effort-scale { display: flex; justify-content: space-between; align-items: center; }
+.effort-heading { margin: 15px 0 8px; color: var(--muted); }
+.effort-heading strong { color: var(--focus); }
+.model-popover input[type="range"] { width: 100%; margin: 3px 0; accent-color: var(--focus); cursor: pointer; }
+.effort-scale { color: var(--muted); font-size: 11px; }
+.attachment-list { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 0 8px; }
+.attachment-chip { display: inline-flex; align-items: center; gap: 5px; max-width: 210px; padding: 4px 5px 4px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--field); color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.attachment-chip button { display: grid; place-items: center; padding: 1px; border: 0; background: transparent; color: var(--muted); cursor: pointer; }
+.agent-working { padding: 8px 0 21px; color: var(--muted); font-size: 13px; font-weight: 550; }
+.working-glint { display: inline-block; background: linear-gradient(105deg, var(--muted) 15%, #ffffff 48%, var(--muted) 82%); background-size: 230% 100%; color: transparent; background-clip: text; animation: working-glint 1.7s linear infinite; }
+@keyframes working-glint { from { background-position: 100% 0; } to { background-position: -100% 0; } }
+@media (prefers-reduced-motion: reduce) { .working-glint { animation: none; color: var(--text); } }
+.settings-nav { display: flex; gap: 5px; margin-bottom: 18px; padding-bottom: 10px; border-bottom: 1px solid var(--border); }
+.settings-nav button { padding: 8px 11px; border: 0; border-radius: 7px; background: transparent; color: var(--muted); cursor: pointer; }
+.settings-nav button.selected, .settings-nav button:hover { background: var(--hover); color: var(--text); }
+.font-scale-setting { display: flex; align-items: center; justify-content: space-between; margin-top: 18px; color: var(--text); }
+.font-scale-setting select { min-width: 110px; height: 34px; padding: 0 8px; border: 1px solid var(--border); border-radius: 7px; background: var(--field); color: var(--text); }
+.usage-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.usage-grid div { display: grid; gap: 5px; padding: 13px; border: 1px solid var(--border); border-radius: 8px; background: var(--field); }
+.usage-grid span, .usage-context span { color: var(--muted); }
+.usage-grid strong { color: var(--text); font-size: 18px; }
+.usage-context { display: grid; gap: 8px; margin-top: 18px; }
+.usage-context progress { width: 100%; height: 8px; accent-color: var(--focus); }
+.message-body, .composer textarea { font-size: calc(14px * var(--font-scale, 1.1)) !important; }
+.session-title, .workspace-name, .search-box input, .topbar-chip, .crumb-project, .crumb-session { font-size: calc(13px * var(--font-scale, 1.1)) !important; }
+.settings-dialog, .inspector-tabs, .activity-title { font-size: calc(13px * var(--font-scale, 1.1)); }

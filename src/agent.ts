@@ -479,6 +479,12 @@ export class Agent {
         this.thinkingEnabled = enabled;
     }
 
+    setDesktopPermissionMode(mode: "desktopDefault" | "desktopAcceptEdits" | "bypassPermissions"): void {
+        this.planMode = false;
+        this.permissionMode = mode;
+        this.permissionPolicy.setMode(mode);
+    }
+
     getEffort(): EffortLevel | null {
         return this.effort;
     }

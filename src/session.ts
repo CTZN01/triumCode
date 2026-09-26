@@ -159,6 +159,7 @@ export interface DesktopSessionSettings {
     thinking: boolean;
     effort: string;
     contextWindow: number;
+    permissionMode?: "desktopDefault" | "desktopAcceptEdits" | "bypassPermissions";
 }
 
 export interface SessionData {

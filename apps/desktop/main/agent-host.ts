@@ -506,6 +506,8 @@ function safeDesktopSettingsSnapshot(value: unknown): DesktopSessionSettings | n
         thinking: item.thinking,
         effort: item.effort,
         contextWindow: item.contextWindow,
+        permissionMode: item.permissionMode === "desktopAcceptEdits" || item.permissionMode === "bypassPermissions"
+            ? item.permissionMode : "desktopDefault",
     };
 }
 
@@ -854,7 +856,8 @@ export class AgentHost {
             contextUsage: runtime.agent.getContextUsage(),
             runId: runtime.currentRunId,
             externalRun: isRunning && !runtime.currentRunId,
-            permissionMode: runtime.agent.getSessionStatus().mode === "plan" ? "plan" : "desktopDefault",
+            permissionMode: runtime.agent.getSessionStatus().mode === "plan" ? "plan"
+                : runtime.desktopSettings.permissionMode ?? "desktopDefault",
             approvals: redactSessionMessages(this.pendingPermissionsFor(workspaceId, sessionId),
                 runtime.redactionKeys) as PendingPermissionRequest[],
             questions: redactSessionMessages(this.pendingQuestionsFor(workspaceId, sessionId),
@@ -904,6 +907,29 @@ export class AgentHost {
             apiKey: runtime.apiKey, protocol: route.protocol, auth: route.auth,
             contextWindow: route.contextWindow });
         runtime.agent.setEffort(effort);
+    }
+
+    updatePermissionMode(workspaceId: string, sessionId: string,
+        mode: "desktopDefault" | "desktopAcceptEdits" | "bypassPermissions"): void {
+        const store = this.storeFor(workspaceId);
+        const data = store.load(sessionId);
+        if (!data) throw new DesktopServiceError("SESSION_NOT_FOUND", "找不到这段会话。");
+        if (store.isRunActive(sessionId)) throw new DesktopServiceError("SESSION_BUSY", "请等待当前任务结束后再切换权限。");
+        const runtime = this.runtimeFor(workspaceId, sessionId, data, store);
+        if (runtime.currentRunId) throw new DesktopServiceError("SESSION_BUSY", "请等待当前任务结束后再切换权限。");
+        const settings = { ...runtime.desktopSettings, permissionMode: mode };
+        try {
+            const saved = store.updateDesktopSettings(sessionId, runtime.revision, settings);
+            if (!saved) throw new DesktopServiceError("SESSION_NOT_FOUND", "找不到这段会话。");
+            runtime.revision = saved.revision ?? runtime.revision + 1;
+        } catch (error) {
+            if (error instanceof SessionBusyError || error instanceof SessionConflictError) {
+                throw new DesktopServiceError("SESSION_BUSY", "会话已在其他进程中更改，请重新打开后再切换权限。");
+            }
+            throw error;
+        }
+        runtime.desktopSettings = settings;
+        runtime.agent.setDesktopPermissionMode(mode);
     }
 
     listPermissionGrants(workspaceId: string, sessionId: string): OpenSessionData["permissionGrants"] {
@@ -1412,7 +1438,7 @@ export class AgentHost {
             effort: desktopSettings.effort,
             contextWindow: desktopSettings.contextWindow,
             workspaceRoot,
-            permissionMode: "desktopDefault",
+            permissionMode: desktopSettings.permissionMode ?? "desktopDefault",
             sessionPermissionGrants: safeSessionPermissionGrants(data.desktopPermissionGrants, apiKey),
             onSessionCheckpoint: (messages) => {
                 runtime.partialAssistantText = checkpointAssistantText(messages, runtime.agent.history().length);
@@ -1436,6 +1462,10 @@ export class AgentHost {
                 const safeEvent = safeAgentEvent(event, runtime.workspaceRoot, runtime.redactionKeys);
                 const nextActivities = activityFromEvent(runtime.activities, safeEvent, runtime.currentRunId ?? undefined);
                 let shouldPersist = false;
+                if (safeEvent.type === "plan.mode") {
+                    runtime.desktopSettings = { ...runtime.desktopSettings, permissionMode: "desktopDefault" };
+                    shouldPersist = true;
+                }
                 if (nextActivities) {
                     runtime.activities = nextActivities;
                     shouldPersist = true;
