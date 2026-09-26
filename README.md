@@ -60,6 +60,8 @@ raw provider error text.
 The desktop rejects a base URL containing credentials, query parameters, or a
 fragment; enter the API key in its protected field. Editing a route or key
 clears the previous connection-test result until it is tested again.
+Desktop tool activity and newly saved conversation history replace occurrences
+of the active provider key when it is at least eight characters long.
 The desktop restores the main window's size and position and panel widths. Its
 neutral light and dark themes follow the system appearance by default, including
 changes while the app is open; you can also choose either theme in Settings. Drag

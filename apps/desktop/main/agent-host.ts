@@ -41,6 +41,7 @@ import type {
 import { desktopTaskStatus } from "./task-status.js";
 import { connectionFailureMessage } from "./connection-result.js";
 import { RunShutdown } from "./run-shutdown.js";
+import { redactConfiguredKey, redactSessionMessages } from "./secret-redaction.js";
 import { CredentialStore } from "./credential-store.js";
 import {
     commitGitChanges as createGitCommit,
@@ -93,6 +94,7 @@ interface SessionRuntime {
     revision: number;
     store: SessionStore;
     agent: Agent;
+    apiKey: string;
     currentRunId: string | null;
     runPromise: Promise<void> | null;
     releaseRunLease: (() => void) | null;
@@ -144,7 +146,7 @@ function safeDesktopUsage(value: unknown): DesktopUsageSnapshot | null {
     };
 }
 
-function safeSessionPermissionGrants(value: unknown): SessionPermissionGrant[] {
+function safeSessionPermissionGrants(value: unknown, apiKey = ""): SessionPermissionGrant[] {
     if (!Array.isArray(value)) return [];
     const grants: SessionPermissionGrant[] = [];
     for (const entry of value.slice(-200)) {
@@ -161,7 +163,7 @@ function safeSessionPermissionGrants(value: unknown): SessionPermissionGrant[] {
             id: item.id,
             key: item.key,
             toolName: item.toolName,
-            operation: redact(item.operation).slice(0, 2_000),
+            operation: redact(item.operation, apiKey).slice(0, 2_000),
             createdAt: timestamp,
         });
     }
@@ -186,8 +188,8 @@ function sessionKey(workspaceId: string, sessionId: string): string {
     return `${workspaceId}:${sessionId}`;
 }
 
-function redact(value: string): string {
-    return value
+function redact(value: string, apiKey = ""): string {
+    return redactConfiguredKey(value, apiKey)
         .replace(/\bsk-[A-Za-z0-9_-]{12,}\b/g, "sk-[REDACTED]")
         .replace(/\b(Bearer\s+)\S+/gi, "$1[REDACTED]")
         .replace(/\b(api[_-]?key|token|password|secret)(\s*[=:]\s*)[^\s,;]+/gi, "$1$2[REDACTED]")
@@ -199,20 +201,20 @@ function stringValue(value: unknown): string {
     return typeof value === "string" ? value : "";
 }
 
-function safeToolInput(name: string, input: Record<string, any>, workspaceRoot?: string): Record<string, unknown> {
+function safeToolInput(name: string, input: Record<string, any>, workspaceRoot?: string, apiKey = ""): Record<string, unknown> {
     if (name === "run_command") {
         const cwd = typeof input.cwd === "string" && input.cwd ? input.cwd : ".";
         const args = Array.isArray(input.args) ? input.args.map(String) : [];
         return {
-            command: redact(stringValue(input.command)),
+            command: redact(stringValue(input.command), apiKey),
             args: args.map((arg, index) => /^--?(?:api[-_]?key|token|password|secret)$/i.test(args[index - 1] ?? "")
-                ? "[REDACTED]" : redact(arg).slice(0, 240)),
-            cwd: workspaceRoot ? redact(resolve(workspaceRoot, cwd)) : typeof input.cwd === "string" ? redact(input.cwd) : undefined,
+                ? "[REDACTED]" : redact(arg, apiKey).slice(0, 240)),
+            cwd: workspaceRoot ? redact(resolve(workspaceRoot, cwd), apiKey) : typeof input.cwd === "string" ? redact(input.cwd, apiKey) : undefined,
         };
     }
     const rawFile = typeof input.file_path === "string" ? input.file_path
         : typeof input.path === "string" ? input.path : undefined;
-    const file = rawFile ? redact(workspaceRoot ? resolve(workspaceRoot, rawFile) : rawFile) : undefined;
+    const file = rawFile ? redact(workspaceRoot ? resolve(workspaceRoot, rawFile) : rawFile, apiKey) : undefined;
     if (name === "write_file") {
         return { file_path: file, bytes: Buffer.byteLength(stringValue(input.content), "utf-8") };
     }
@@ -229,43 +231,43 @@ function safeToolInput(name: string, input: Record<string, any>, workspaceRoot?:
     const summary: Record<string, unknown> = {};
     for (const key of ["file_path", "path", "pattern", "operation", "name", "type", "question", "options", "offset", "limit", "staged", "cwd"]) {
         const value = input[key];
-        if (typeof value === "string") summary[key] = redact(value).slice(0, 240);
+        if (typeof value === "string") summary[key] = redact(value, apiKey).slice(0, 240);
         else if (typeof value === "number" || typeof value === "boolean") summary[key] = value;
-        else if (key === "options" && Array.isArray(value)) summary[key] = value.map((entry: unknown) => redact(String(entry)).slice(0, 160));
+        else if (key === "options" && Array.isArray(value)) summary[key] = value.map((entry: unknown) => redact(String(entry), apiKey).slice(0, 160));
     }
     return summary;
 }
 
-function safeAgentEvent(event: AgentEvent, workspaceRoot?: string): AgentEvent {
-    if (event.type === "assistant.delta") return { ...event, text: redact(event.text) };
+function safeAgentEvent(event: AgentEvent, workspaceRoot?: string, apiKey = ""): AgentEvent {
+    if (event.type === "assistant.delta") return { ...event, text: redact(event.text, apiKey) };
     if (event.type === "tool.started" || event.type === "tool.completed") {
-        const input = safeToolInput(event.name, event.input, workspaceRoot);
+        const input = safeToolInput(event.name, event.input, workspaceRoot, apiKey);
         if (event.type === "tool.started") return { ...event, input } as AgentEvent;
-        return { ...event, input, output: redact(event.output) } as AgentEvent;
+        return { ...event, input, output: redact(event.output, apiKey) } as AgentEvent;
     }
     if (event.type === "permission.checked") {
-        const source = safePermissionSource(event.source);
-        return { ...event, input: safeToolInput(event.name, event.input, workspaceRoot), source };
+        const source = safePermissionSource(event.source, apiKey);
+        return { ...event, input: safeToolInput(event.name, event.input, workspaceRoot, apiKey), source };
     }
-    if (event.type === "notice") return { ...event, text: redact(event.text) };
-    if (event.type === "turn.failed") return { ...event, message: redact(event.message) };
-    if (event.type === "plan.review") return { ...event, content: redact(event.content) };
-    if (event.type === "subagent.failed") return { ...event, error: redact(event.error) };
+    if (event.type === "notice") return { ...event, text: redact(event.text, apiKey) };
+    if (event.type === "turn.failed") return { ...event, message: redact(event.message, apiKey) };
+    if (event.type === "plan.review") return { ...event, content: redact(event.content, apiKey) };
+    if (event.type === "subagent.failed") return { ...event, error: redact(event.error, apiKey) };
     return event;
 }
 
-function safePermissionSource(value: unknown): PermissionSource {
+function safePermissionSource(value: unknown, apiKey = ""): PermissionSource {
     const source = parsePermissionSource(value);
     if (!source) throw new Error("Invalid permission source.");
-    return source.kind === "rule" ? { ...source, rule: redact(source.rule).slice(0, 300) } : source;
+    return source.kind === "rule" ? { ...source, rule: redact(source.rule, apiKey).slice(0, 300) } : source;
 }
 
 const MAX_SESSION_ACTIVITIES = 200;
 const MAX_ACTIVITY_DETAIL_CHARS = 4_000;
 const MAX_ACTIVITY_OUTPUT_CHARS = 8_000;
 
-function limitedText(value: string, limit: number): string {
-    const safe = redact(value);
+function limitedText(value: string, limit: number, apiKey = ""): string {
+    const safe = redact(value, apiKey);
     return safe.length <= limit ? safe : `${safe.slice(0, limit)}\n[已截断]`;
 }
 
@@ -279,7 +281,7 @@ function failureCategoryLabel(category: AgentFailureCategory): string {
     }
 }
 
-function safeSessionActivities(value: unknown): SessionActivity[] {
+function safeSessionActivities(value: unknown, apiKey = ""): SessionActivity[] {
     if (!Array.isArray(value)) return [];
     const result: SessionActivity[] = [];
     for (const entry of value.slice(-MAX_SESSION_ACTIVITIES)) {
@@ -291,18 +293,18 @@ function safeSessionActivities(value: unknown): SessionActivity[] {
         const timestamp = (candidate: unknown): string | undefined => typeof candidate === "string" && !Number.isNaN(Date.parse(candidate))
             ? candidate : undefined;
         result.push({
-            id: limitedText(item.id, 200),
-            ...(typeof item.runId === "string" ? { runId: limitedText(item.runId, 200) } : {}),
-            title: limitedText(item.title, 120),
-            detail: limitedText(item.detail, MAX_ACTIVITY_DETAIL_CHARS),
+            id: limitedText(item.id, 200, apiKey),
+            ...(typeof item.runId === "string" ? { runId: limitedText(item.runId, 200, apiKey) } : {}),
+            title: limitedText(item.title, 120, apiKey),
+            detail: limitedText(item.detail, MAX_ACTIVITY_DETAIL_CHARS, apiKey),
             state: item.state as SessionActivity["state"],
-            ...(typeof item.output === "string" ? { output: limitedText(item.output, MAX_ACTIVITY_OUTPUT_CHARS) } : {}),
+            ...(typeof item.output === "string" ? { output: limitedText(item.output, MAX_ACTIVITY_OUTPUT_CHARS, apiKey) } : {}),
             ...(typeof item.durationMs === "number" && Number.isFinite(item.durationMs) && item.durationMs >= 0
                 ? { durationMs: Math.min(item.durationMs, 86_400_000) } : {}),
             ...(timestamp(item.startedAt) ? { startedAt: timestamp(item.startedAt) } : {}),
             ...(timestamp(item.updatedAt) ? { updatedAt: timestamp(item.updatedAt) } : {}),
             ...(parsePermissionSource(item.permissionSource)
-                ? { permissionSource: safePermissionSource(item.permissionSource) } : {}),
+                ? { permissionSource: safePermissionSource(item.permissionSource, apiKey) } : {}),
             ...(item.permissionDecision === "allow" || item.permissionDecision === "deny" || item.permissionDecision === "confirm"
                 ? { permissionDecision: item.permissionDecision } : {}),
             ...(item.permissionOutcome === "once" || item.permissionOutcome === "session" || item.permissionOutcome === "denied"
@@ -420,7 +422,7 @@ function activityFromEvent(
     return null;
 }
 
-function projectMessages(messages: unknown[]): ConversationMessage[] {
+function projectMessages(messages: unknown[], apiKey = ""): ConversationMessage[] {
     const visible: ConversationMessage[] = [];
     for (const [index, value] of messages.entries()) {
         if (!value || typeof value !== "object") continue;
@@ -436,7 +438,7 @@ function projectMessages(messages: unknown[]): ConversationMessage[] {
                 : [];
         let text = blocks.join("");
         if (message.role === "user") text = text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, " ").trim();
-        if (text.trim()) visible.push({ id: `history-${index}`, role: message.role, text: redact(text) });
+        if (text.trim()) visible.push({ id: `history-${index}`, role: message.role, text: redact(text, apiKey) });
     }
     return visible;
 }
@@ -464,8 +466,8 @@ function toSummary(item: SessionIndex): SessionSummary {
     };
 }
 
-function errorMessage(error: unknown): string {
-    return error instanceof Error ? redact(error.message) : redact(String(error));
+function errorMessage(error: unknown, apiKey = ""): string {
+    return error instanceof Error ? redact(error.message, apiKey) : redact(String(error), apiKey);
 }
 
 function desktopSettingsSnapshot(settings: DesktopSettings): DesktopSessionSettings {
@@ -837,9 +839,9 @@ export class AgentHost {
         const runtime = this.runtimeFor(workspaceId, sessionId, item, store);
         const current = store.list().find((entry) => entry.id === sessionId)!;
         const isRunning = Boolean(runtime.currentRunId || store.isRunActive(sessionId));
-        const messages = projectMessages(runtime.agent.history());
+        const messages = projectMessages(runtime.agent.history(), runtime.apiKey);
         if (runtime.currentRunId && runtime.partialAssistantText) {
-            messages.push({ id: `assistant-${runtime.currentRunId}`, role: "assistant", text: runtime.partialAssistantText });
+            messages.push({ id: `assistant-${runtime.currentRunId}`, role: "assistant", text: redact(runtime.partialAssistantText, runtime.apiKey) });
         }
         return {
             session: toSummary(isRunning ? { ...current, status: "running" } : current),
@@ -855,7 +857,7 @@ export class AgentHost {
             questions: this.pendingQuestionsFor(workspaceId, sessionId),
             permissionGrants: runtime.agent.getSessionPermissionGrants().map((grant) => ({
                 ...grant,
-                operation: redact(grant.operation).slice(0, 2_000),
+                operation: redact(grant.operation, runtime.apiKey).slice(0, 2_000),
             })),
             eventSequence: this.eventSequences.current(key),
         };
@@ -893,8 +895,9 @@ export class AgentHost {
             throw error;
         }
         runtime.desktopSettings = route;
+        runtime.apiKey = this.apiKeyForSettings(route);
         runtime.agent.setModel({ model: route.model, label: route.modelPreset ?? "", apiBase: route.apiBase,
-            apiKey: this.apiKeyForSettings(route), protocol: route.protocol, auth: route.auth,
+            apiKey: runtime.apiKey, protocol: route.protocol, auth: route.auth,
             contextWindow: route.contextWindow });
         runtime.agent.setEffort(effort);
     }
@@ -1037,7 +1040,7 @@ export class AgentHost {
             this.publish(runtime, {
                 type: "notice",
                 level: "warning",
-                text: `无法保存本机代码审阅基线；本轮文件仍会按已批准操作执行。${errorMessage(error)}`,
+                text: `无法保存本机代码审阅基线；本轮文件仍会按已批准操作执行。${errorMessage(error, runtime.apiKey)}`,
             });
         }
         if (runtime.cancelRequested) {
@@ -1061,10 +1064,10 @@ export class AgentHost {
         }).catch((error: unknown) => {
             finalStatus = "failed";
             this.persistSession(runtime, runtime.agent.history(), finalStatus);
-            this.publish(runtime, { type: "notice", level: "warning", text: errorMessage(error) });
+            this.publish(runtime, { type: "notice", level: "warning", text: errorMessage(error, runtime.apiKey) });
         }).finally(() => {
             try { this.reviews.finishRun(workspaceId, runId, finalStatus); }
-            catch (error) { this.publish(runtime, { type: "notice", level: "warning", text: `无法更新代码审阅快照：${errorMessage(error)}` }); }
+            catch (error) { this.publish(runtime, { type: "notice", level: "warning", text: `无法更新代码审阅快照：${errorMessage(error, runtime.apiKey)}` }); }
             runtime.reviewCaptureEnabled = false;
             runtime.currentRunId = null;
             this.refreshRuntimeApiKey(runtime);
@@ -1156,6 +1159,7 @@ export class AgentHost {
         for (const runtime of this.sessions.values()) {
             if (!runtime.currentRunId && runtime.desktopSettings.modelPreset === saved.modelPreset) {
                 runtime.agent.setModel({ apiKey });
+                runtime.apiKey = apiKey;
             }
         }
         return saved;
@@ -1185,7 +1189,8 @@ export class AgentHost {
     }
 
     private refreshRuntimeApiKey(runtime: SessionRuntime): void {
-        runtime.agent.setModel({ apiKey: this.apiKeyForSettings(runtime.desktopSettings) });
+        runtime.apiKey = this.apiKeyForSettings(runtime.desktopSettings);
+        runtime.agent.setModel({ apiKey: runtime.apiKey });
     }
 
     private pendingPermissionsFor(workspaceId: string, sessionId: string): PendingPermissionRequest[] {
@@ -1257,7 +1262,8 @@ export class AgentHost {
         this.credentials.save(apiKey, presetName);
         for (const runtime of this.sessions.values()) {
             if (!runtime.currentRunId && runtime.desktopSettings.modelPreset === presetName) {
-                runtime.agent.setModel({ apiKey });
+                runtime.apiKey = this.apiKeyForSettings(runtime.desktopSettings);
+                runtime.agent.setModel({ apiKey: runtime.apiKey });
             }
         }
         return this.credentialState(presetName);
@@ -1271,6 +1277,7 @@ export class AgentHost {
         for (const runtime of this.sessions.values()) {
             if (!runtime.currentRunId && runtime.desktopSettings.modelPreset === presetName) {
                 runtime.agent.setModel({ apiKey });
+                runtime.apiKey = apiKey;
             }
         }
         return this.credentialState(presetName);
@@ -1283,6 +1290,7 @@ export class AgentHost {
         for (const runtime of this.sessions.values()) {
             if (!runtime.currentRunId && runtime.desktopSettings.modelPreset === presetName) {
                 runtime.agent.setModel({ apiKey });
+                runtime.apiKey = apiKey;
             }
         }
         return this.credentialState(presetName);
@@ -1355,12 +1363,13 @@ export class AgentHost {
             ...desktopSettingsSnapshot(currentSettings),
             model: data.model || currentSettings.model,
         };
+        const apiKey = this.apiKeyForSettings(desktopSettings);
         let runtime!: SessionRuntime;
         const agent = new Agent({
             model: desktopSettings.model,
             modelLabel: desktopSettings.modelPreset ?? "",
             apiBase: desktopSettings.apiBase,
-            apiKey: this.apiKeyForSettings(desktopSettings),
+            apiKey,
             protocol: desktopSettings.protocol,
             auth: desktopSettings.auth,
             thinking: desktopSettings.thinking,
@@ -1368,7 +1377,7 @@ export class AgentHost {
             contextWindow: desktopSettings.contextWindow,
             workspaceRoot,
             permissionMode: "desktopDefault",
-            sessionPermissionGrants: safeSessionPermissionGrants(data.desktopPermissionGrants),
+            sessionPermissionGrants: safeSessionPermissionGrants(data.desktopPermissionGrants, apiKey),
             onSessionCheckpoint: (messages) => {
                 runtime.partialAssistantText = checkpointAssistantText(messages, runtime.agent.history().length);
                 this.persistSession(runtime, messages, runtime.currentRunId ? "running" : "idle");
@@ -1381,14 +1390,14 @@ export class AgentHost {
                         this.publish(runtime, {
                             type: "notice",
                             level: "warning",
-                            text: `本轮命令执行结果未能写入代码审阅记录。${errorMessage(error)}`,
+                            text: `本轮命令执行结果未能写入代码审阅记录。${errorMessage(error, runtime.apiKey)}`,
                         });
                     }
                 }
                 if (event.type === "usage.updated" || event.type === "context.updated") {
                     this.persistSession(runtime);
                 }
-                const safeEvent = safeAgentEvent(event, runtime.workspaceRoot);
+                const safeEvent = safeAgentEvent(event, runtime.workspaceRoot, runtime.apiKey);
                 const nextActivities = activityFromEvent(runtime.activities, safeEvent, runtime.currentRunId ?? undefined);
                 let shouldPersist = false;
                 if (nextActivities) {
@@ -1417,13 +1426,14 @@ export class AgentHost {
             revision: data.revision ?? 0,
             store,
             agent,
+            apiKey,
             currentRunId: null,
             runPromise: null,
             releaseRunLease: null,
             cancelRequested: false,
             reviewCaptureEnabled: false,
             partialAssistantText: null,
-            activities: safeSessionActivities(data.desktopActivities),
+            activities: safeSessionActivities(data.desktopActivities, apiKey),
             sessionPersistWarningShown: false,
             sessionRevisionConflict: false,
         };
@@ -1451,13 +1461,13 @@ export class AgentHost {
                 : runtime.agent.history());
             const saved = runtime.store.save(
                 runtime.sessionId,
-                snapshot,
+                redactSessionMessages(snapshot, runtime.apiKey),
                 runtime.agent.getModel(),
                 runtime.revision,
                 status,
                 runtime.activities,
                 usageSnapshot(runtime.agent.getUsage(), runtime.agent.getContextUsage()),
-                safeSessionPermissionGrants(runtime.agent.getPersistedSessionPermissionGrants()),
+                safeSessionPermissionGrants(runtime.agent.getPersistedSessionPermissionGrants(), runtime.apiKey),
                 runtime.desktopSettings,
                 [...this.permissions.values()].some((pending) => pending.workspaceId === runtime.workspaceId && pending.sessionId === runtime.sessionId)
                     ? "approval"
@@ -1494,9 +1504,9 @@ export class AgentHost {
         request: PermissionRequest,
     ): Promise<"once" | "session" | false> {
         const requestId = randomUUID();
-        const operation = safeToolInput(request.toolName, request.input, runtime.workspaceRoot);
-        const message = redact(request.message);
-        const source = safePermissionSource(request.source);
+        const operation = safeToolInput(request.toolName, request.input, runtime.workspaceRoot, runtime.apiKey);
+        const message = redact(request.message, runtime.apiKey);
+        const source = safePermissionSource(request.source, runtime.apiKey);
         return new Promise((resolve) => {
             const timer = setTimeout(() => {
                 const pending = this.permissions.get(requestId);
@@ -1578,8 +1588,8 @@ export class AgentHost {
 
     private askUser(runtime: SessionRuntime, question: string, options?: string[]): Promise<string> {
         const requestId = randomUUID();
-        const safeQuestion = redact(question);
-        const safeOptions = options?.map((option) => redact(option));
+        const safeQuestion = redact(question, runtime.apiKey);
+        const safeOptions = options?.map((option) => redact(option, runtime.apiKey));
         this.publish(runtime, {
             type: "question.requested",
             requestId,
@@ -1639,7 +1649,7 @@ export class AgentHost {
             || payload.type === "permission.requested" || payload.type === "permission.resolved"
             || payload.type === "question.requested" || payload.type === "question.resolved")
                 ? payload
-                : { type: "agent", event: safeAgentEvent(payload as AgentEvent) };
+                : { type: "agent", event: safeAgentEvent(payload as AgentEvent, runtime.workspaceRoot, runtime.apiKey) };
         try {
             const key = sessionKey(runtime.workspaceId, runtime.sessionId);
             const sequence = this.eventSequences.next(key);
