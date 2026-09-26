@@ -35,6 +35,8 @@ User-question activity records answered, skipped, expired, and cancelled
 outcomes without saving the answer text. Choice questions also offer Skip.
 When an API key changes during an open conversation, later visible events and
 saved session copies redact both the previous and current keys.
+Deleting a conversation removes its saved session and desktop review snapshots;
+project files and saved API keys remain. The app reports if review cleanup fails.
 Closing the window with a running task or open terminal asks whether to stop
 them or stay in the app. Exit waits for task cancellation and PowerShell's exit
 event; if the shell does not exit, the app reports the failure and stays open.

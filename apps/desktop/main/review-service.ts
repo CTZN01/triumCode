@@ -22,6 +22,7 @@ import type {
     SessionSummary,
 } from "../shared/contracts.js";
 import { readGitDiffFromHead, readGitSnapshot } from "./git-service.js";
+import { removeSessionReviewFiles } from "./review-cleanup.js";
 import { DesktopServiceError } from "./workspace-store.js";
 
 const MAX_REVIEW_FILE_BYTES = 2 * 1024 * 1024;
@@ -283,6 +284,10 @@ export class ReviewService {
 
     constructor(userDataPath: string) {
         this.root = resolve(userDataPath, "reviews");
+    }
+
+    removeSession(workspaceId: string, sessionId: string): void {
+        removeSessionReviewFiles(this.directory(workspaceId), sessionId);
     }
 
     recoverInterrupted(): void {

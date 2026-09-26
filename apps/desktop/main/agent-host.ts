@@ -942,7 +942,7 @@ export class AgentHost {
         return toSummary({ ...item, messageCount: item.messages.length });
     }
 
-    deleteSession(workspaceId: string, sessionId: string): void {
+    deleteSession(workspaceId: string, sessionId: string): { reviewRemoved: boolean } {
         const key = sessionKey(workspaceId, sessionId);
         const runtime = this.sessions.get(key);
         if (runtime?.currentRunId) throw new DesktopServiceError("SESSION_BUSY", "请先停止当前任务，再删除此会话。");
@@ -958,6 +958,12 @@ export class AgentHost {
         }
         this.sessions.delete(key);
         this.eventSequences.delete(key);
+        try {
+            this.reviews.removeSession(workspaceId, sessionId);
+            return { reviewRemoved: true };
+        } catch {
+            return { reviewRemoved: false };
+        }
     }
 
     async startRun(workspaceId: string, sessionId: string, text: string, requestId: string): Promise<{ runId: string }> {

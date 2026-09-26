@@ -1259,9 +1259,9 @@ export function App() {
     };
 
     const deleteSession = async (session: SessionSummary) => {
-        if (!activeWorkspace || !window.confirm(`删除会话“${session.title}”？工作区文件不会被删除。`)) return;
+        if (!activeWorkspace || !window.confirm(`删除会话“${session.title}”及其本地审阅快照？工作区文件和 API Key 不会被删除。`)) return;
         try {
-            await window.desktop.deleteSession(activeWorkspace.id, session.id);
+            const result = await window.desktop.deleteSession(activeWorkspace.id, session.id);
             const key = `${activeWorkspace.id}:${session.id}`;
             eventTracker.delete(key);
             const remaining = await refreshSessions(activeWorkspace.id);
@@ -1275,6 +1275,7 @@ export function App() {
                 activeRef.current = { workspaceId: activeWorkspace.id, sessionId: "" };
                 if (remaining.length) await openSession(activeWorkspace.id, remaining[0].id);
             }
+            if (!result.reviewRemoved) setError("会话已删除，但审阅快照未能完全清除。请检查本机用户数据目录中的 reviews 文件夹。");
         } catch (failure) { setError(displayError(failure)); }
     };
 

@@ -310,7 +310,7 @@ export interface DesktopApi {
     openSession(workspaceId: string, sessionId: string): Promise<OpenSessionData>;
     updateSessionRoute(workspaceId: string, sessionId: string, modelPreset: string | null, effort: string): Promise<void>;
     renameSession(workspaceId: string, sessionId: string, title: string): Promise<SessionSummary>;
-    deleteSession(workspaceId: string, sessionId: string): Promise<void>;
+    deleteSession(workspaceId: string, sessionId: string): Promise<{ reviewRemoved: boolean }>;
     getGitSnapshot(workspaceId: string): Promise<GitSnapshot>;
     getGitDiff(workspaceId: string, path: string, staged: boolean): Promise<GitFileDiff>;
     stageGitPath(workspaceId: string, path: string): Promise<void>;
