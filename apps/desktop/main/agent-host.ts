@@ -1126,7 +1126,7 @@ export class AgentHost {
     respondToQuestion(requestId: string, answer: string): void {
         const pending = this.questions.get(requestId);
         if (!pending) return;
-        if (pending.options && !pending.options.includes(answer)) {
+        if (pending.options?.length && answer.trim() && !pending.options.includes(answer)) {
             throw new DesktopServiceError("INVALID_ANSWER", "Choose one of the displayed options.");
         }
         if (!pending.options && answer.length > 20_000) {
