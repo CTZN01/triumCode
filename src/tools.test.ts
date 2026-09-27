@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getTool, toolResultLimit, type ReadFileState, type TodoItem, type ToolContext } from "./tools.js";
@@ -162,6 +162,41 @@ test("git_diff reports an invalid working directory cleanly", async () => {
 
     const result = await tool.call({ cwd: "this-directory-does-not-exist" }, {});
     assert.match(result, /working directory does not exist/);
+});
+
+test("grep_search uses the same structured result for hidden files and skips noisy directories", async () => {
+    const tool = getTool("grep_search")!;
+    const dir = mkdtempSync(join(tmpdir(), "triumcode-search-"));
+    writeFileSync(join(dir, ".hidden.ts"), "needle\n");
+    mkdirSync(join(dir, "node_modules"));
+    writeFileSync(join(dir, "node_modules", "ignored.ts"), "needle\n");
+
+    assert.deepEqual(tool.inputSchema.required, ["pattern", "path"]);
+    assert.equal(tool.isReadOnly({ pattern: "needle", path: dir }), true);
+    assert.equal(tool.isDestructive({ pattern: "needle", path: dir }), false);
+    assert.equal(tool.isConcurrencySafe({ pattern: "needle", path: dir }), true);
+    const result = await tool.call({ pattern: "needle", path: dir }, {});
+    assert.equal(result, ".hidden.ts:1:needle");
+});
+
+test("grep_search falls back to its in-process scanner when command-line search is unavailable", async () => {
+    const tool = getTool("grep_search")!;
+    const path = tempFile("fallback.txt", "alpha\nbeta\n");
+    const originalPath = process.env.PATH;
+    try {
+        process.env.PATH = "";
+        assert.equal(await tool.call({ pattern: "beta", path }, {}), "fallback.txt:2:beta");
+    } finally {
+        if (originalPath === undefined) delete process.env.PATH;
+        else process.env.PATH = originalPath;
+    }
+});
+
+test("grep_search reports invalid patterns and missing paths as errors", async () => {
+    const tool = getTool("grep_search")!;
+    const path = tempFile("valid.txt", "text\n");
+    assert.match(await tool.call({ pattern: "[", path }, {}), /^Error: invalid regex:/);
+    assert.match(await tool.call({ pattern: "text", path: `${path}.missing` }, {}), /^Error searching:/);
 });
 
 // ─── todo tool ─────────────────────────────────────────────

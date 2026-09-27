@@ -1071,8 +1071,47 @@ function renderMatches(matches: Match[], notes: string[], capped = false): strin
     return footer.length === 0 ? body : `${body}\n\n${footer.map((line) => `(${line})`).join("\n")}`;
 }
 
+function parseSearchOutput(out: string, backend: string): Match[] | string {
+    const matches: Match[] = [];
+    let unparsed = 0;
+    for (const raw of out.split("\n")) {
+        if (raw === "") continue;
+        const m = /^([^:]+):(\d+):([\s\S]*)$/.exec(raw);
+        if (m) {
+            const file = process.platform === "win32" ? m[1].replaceAll("\\", "/") : m[1];
+            matches.push({ file: file.replace(/^\.\//, ""), line: Number(m[2]), text: m[3] });
+        }
+        else unparsed++;
+    }
+    return unparsed === 0 ? matches : renderMatches(matches, [`could not parse ${unparsed} line(s) of ${backend} output`]);
+}
+
+function grepWithRipgrep(pattern: string, root: string, operand: string): Match[] | string | null {
+    const args = ["--line-number", "--with-filename", "--color=never", "--no-heading", "--hidden", "--no-ignore", "--no-config", "--engine=auto"];
+    for (const dir of NOISE_DIRS) args.push(`--glob=!**/${dir}/**`);
+    args.push("--", pattern, operand);
+
+    let out: string;
+    try {
+        out = execFileSync("rg", args, {
+            cwd: root,
+            encoding: "utf-8",
+            maxBuffer: 8 * 1024 * 1024,
+            timeout: 10_000,
+            stdio: ["ignore", "pipe", "ignore"],
+        });
+    } catch (e: any) {
+        if (e.code === "ENOENT" || e.status === 2) return null;
+        if (e.status === 1) return "No matches found.";
+        if (e.code === "ETIMEDOUT") return "Error: search timed out after 10s — narrow the path or the pattern.";
+        if (e.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") return "Too many matches (over 8MB) — narrow the path or the pattern.";
+        return `Error searching: ${e.message}`;
+    }
+    return parseSearchOutput(out, "ripgrep");
+}
+
 function grepWithSystemGrep(pattern: string, root: string, operand: string): Match[] | string | null {
-    const args = ["--line-number", "--with-filename", "--color=never", "--recursive", "-I"];
+    const args = ["--line-number", "--with-filename", "--color=never", "--recursive", "-I", "-E"];
     for (const dir of NOISE_DIRS) args.push(`--exclude-dir=${dir}`);
     args.push("--", pattern, operand);
 
@@ -1086,22 +1125,14 @@ function grepWithSystemGrep(pattern: string, root: string, operand: string): Mat
             stdio: ["ignore", "pipe", "ignore"],
         });
     } catch (e: any) {
-        if (e.code === "ENOENT") return null;
+        if (e.code === "ENOENT" || e.status === 2) return null;
         if (e.status === 1) return "No matches found.";
         if (e.code === "ETIMEDOUT") return `Error: search timed out after 10s — narrow the path or the pattern.`;
         if (e.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") return `Too many matches (over 8MB) — narrow the path or the pattern.`;
         return `Error searching: ${e.message}`;
     }
 
-    const matches: Match[] = [];
-    let unparsed = 0;
-    for (const raw of out.split("\n")) {
-        if (raw === "") continue;
-        const m = /^([^:]+):(\d+):([\s\S]*)$/.exec(raw);
-        if (m) matches.push({ file: m[1].replace(/^\.\//, ""), line: Number(m[2]), text: m[3] });
-        else unparsed++;
-    }
-    return unparsed === 0 ? matches : renderMatches(matches, [`could not parse ${unparsed} line(s) of grep output`]);
+    return parseSearchOutput(out, "grep");
 }
 
 function grepInProcess(re: RegExp, root: string, operand: string, isFile: boolean): { matches: Match[]; notes: string[]; capped: boolean } {
@@ -1141,9 +1172,13 @@ function grepSearchImpl(input: { pattern: string; path: string }): string {
     const root = isFile ? dirname(input.path) : input.path;
     const operand = isFile ? basename(input.path) : ".";
 
-    const viaSystem = grepWithSystemGrep(input.pattern, root, operand);
-    if (typeof viaSystem === "string") return viaSystem;
-    if (viaSystem !== null) return renderMatches(viaSystem, []);
+    const viaRipgrep = grepWithRipgrep(input.pattern, root, operand);
+    if (typeof viaRipgrep === "string") return viaRipgrep;
+    if (viaRipgrep !== null) return renderMatches(viaRipgrep, []);
+
+    const viaGrep = grepWithSystemGrep(input.pattern, root, operand);
+    if (typeof viaGrep === "string") return viaGrep;
+    if (viaGrep !== null) return renderMatches(viaGrep, []);
 
     const { matches, notes, capped } = grepInProcess(re, root, operand, isFile);
     return renderMatches(matches, notes, capped);
@@ -1151,7 +1186,7 @@ function grepSearchImpl(input: { pattern: string; path: string }): string {
 
 const grepSearchTool = register({
     name: "grep_search",
-    description: "Search for a regex pattern in files. Recurses through a directory, or searches a single file. Returns matches as \"path:line: text\", one per line, with paths relative to the searched directory. Skips node_modules/.git/dist-style directories and binary files, stops after 100 matches, and clips very long lines.",
+    description: "Search for a regex pattern in files. Uses ripgrep first, then system grep, then an in-process scanner if needed. Recurses through a directory, or searches a single file. Returns matches as \"path:line: text\", one per line, with paths relative to the searched directory. Skips node_modules/.git/dist-style directories and binary files, stops after 100 matches, and clips very long lines.",
     inputSchema: {
         type: "object",
         properties: {
@@ -1170,7 +1205,7 @@ const grepSearchTool = register({
         return grepSearchImpl({ ...(input as { pattern: string; path: string }), path });
     },
 
-    prompt: () => "grep_search uses JavaScript regex syntax. Anchor with ^/$ when needed. Results are capped at 100 matches — narrow the path or pattern if truncated.",
+    prompt: () => "Prefer grep_search for code search: it uses ripgrep when available and falls back to grep or an in-process scanner. Patterns use JavaScript regex syntax. Anchor with ^/$ when needed. Results are capped at 100 matches — narrow the path or pattern if truncated.",
 });
 
 // ─── run_command ─────────────────────────────────────────────
