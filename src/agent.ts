@@ -831,9 +831,9 @@ export class Agent {
     /**
      * Record the prompt-side half of a request's usage.
      *
-     * Anthropic reports it once, in message_start. The OpenAI translators
-     * report it in their closing message_delta, so the caller decides which
-     * event is authoritative for the protocol — see the stream loop.
+     * Anthropic normally reports it in message_start; some compatible
+     * gateways send a zero placeholder and fill it in at message_delta.
+     * The OpenAI translators report it only in message_delta.
      */
     private addPromptUsage(usage: any): void {
         if (typeof usage.input_tokens === "number" && Number.isSafeInteger(usage.input_tokens) && usage.input_tokens >= 0) {
@@ -1284,8 +1284,15 @@ export class Agent {
             // Which event carries the prompt-side usage differs by protocol:
             // Anthropic sends it in message_start and echoes it in
             // message_delta, the OpenAI translators only in message_delta.
-            // Taking the first one that arrives counts it exactly once.
+            // A zero-only start can be a placeholder; some gateways fill in
+            // the prompt counts only in message_delta.
             let promptUsageCounted = false;
+            let promptUsageWasZero = false;
+            const hasPositivePromptUsage = (usage: any): boolean => [
+                usage.input_tokens,
+                usage.cache_read_input_tokens,
+                usage.cache_creation_input_tokens,
+            ].some((count) => typeof count === "number" && Number.isSafeInteger(count) && count > 0);
             // "end_turn" / "tool_use" / "max_tokens" / "refusal" / ...
             // max_tokens is the one that matters: it means the turn was cut off.
             let stopReason: string | null = null;
@@ -1491,6 +1498,7 @@ export class Agent {
                             if (usage) {
                                 this.addPromptUsage(usage);
                                 promptUsageCounted = true;
+                                promptUsageWasZero = !hasPositivePromptUsage(usage);
                                 if (!this.isSubAgent) this.emit({ type: "usage.updated", usage: this.getUsage() });
                             }
                             break;
@@ -1499,9 +1507,10 @@ export class Agent {
                             // Track token usage from the stream.
                             const usage = (event as any).usage;
                             if (usage) {
-                                if (!promptUsageCounted) {
+                                if (!promptUsageCounted || (promptUsageWasZero && hasPositivePromptUsage(usage))) {
                                     this.addPromptUsage(usage);
                                     promptUsageCounted = true;
+                                    promptUsageWasZero = false;
                                 }
                                 if (typeof usage.output_tokens === "number" && Number.isSafeInteger(usage.output_tokens) && usage.output_tokens >= 0) {
                                     this.totalOutputTokens += usage.output_tokens;

@@ -44,7 +44,7 @@ interface FakeApi {
     close(): void;
 }
 
-async function fakeApi(turns: Turn[], failOn: Set<number> = new Set()): Promise<FakeApi> {
+async function fakeApi(turns: Turn[], failOn: Set<number> = new Set(), startUsage = MESSAGE_START.message.usage): Promise<FakeApi> {
     let n = 0;
     const bodies: any[] = [];
     const headers: any[] = [];
@@ -68,7 +68,7 @@ async function fakeApi(turns: Turn[], failOn: Set<number> = new Set()): Promise<
 
         res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
         const write = (event: any) => res.write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
-        write(MESSAGE_START);
+        write({ ...MESSAGE_START, message: { ...MESSAGE_START.message, usage: startUsage } });
         // Repeat the last scripted turn forever, so a loop that fails to
         // terminate shows up as a turn-limit hit rather than a hung test.
         turns[Math.min(index, turns.length - 1)](write);
@@ -97,6 +97,7 @@ async function runChat(
         askUser?: (question: string, options?: string[]) => Promise<string>;
         onBeforeFileWrite?: (absolutePath: string) => void | Promise<void>;
         failOn?: Set<number>;
+        startUsage?: typeof MESSAGE_START.message.usage;
     } = {},
 ): Promise<{ agent: Agent; api: FakeApi; output: string; error: any }> {
     // Memory dirs resolve from the cwd (memory.ts), so a memory saved in the
@@ -108,7 +109,7 @@ async function runChat(
     const originalCwd = process.cwd();
     process.chdir(mkdtempSync(join(tmpdir(), "triumcode-agent-cwd-")));
 
-    const api = await fakeApi(turns, options.failOn);
+    const api = await fakeApi(turns, options.failOn, options.startUsage);
     const agent = new Agent({
         model: "test-model", apiKey: "k", apiBase: api.url,
         // Plan mode is the default sandbox: it denies everything that writes,
@@ -433,6 +434,28 @@ test("prompt usage is counted once when the gateway echoes it", async () => {
     assert.equal(usage.output, 5);
     assert.equal(usage.cacheRead, 4);
     assert.equal(usage.cacheHitRate, 4 / 5);
+});
+
+test("zero-only start usage is replaced by final prompt and cache counts", async () => {
+    const { agent, api } = await runChat([
+        (w) => {
+            w(start(0, { type: "text", text: "" }));
+            w(textDelta(0, "done"));
+            w(stop(0));
+            w({
+                type: "message_delta",
+                delta: { stop_reason: "end_turn" },
+                usage: { input_tokens: 161, output_tokens: 32, cache_read_input_tokens: 4352, cache_creation_input_tokens: 0 },
+            });
+        },
+    ], { startUsage: { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0 } });
+
+    const usage = agent.getUsage();
+    assert.equal(usage.input, 161);
+    assert.equal(usage.output, 32);
+    assert.equal(usage.cacheRead, 4352);
+    assert.equal(usage.cacheHitRate, 4352 / (161 + 4352));
+    assert.equal(api.requests, 1);
 });
 
 // ── Memory recall ────────────────────────────────────────────
