@@ -51,15 +51,14 @@ export function GitChangesPanel({
     review: CodeReviewSnapshot | null;
     loading: boolean;
     busy: boolean;
-    onRefresh: () => void;
+    onRefresh: () => Promise<void>;
 }) {
     const [view, setView] = useState<ReviewView>("run");
     const [filter, setFilter] = useState<FileFilter>("all");
     const [selectedPath, setSelectedPath] = useState<string | null>(null);
     const [selectedStaged, setSelectedStaged] = useState(false);
-    const [diff, setDiff] = useState<GitFileDiff | null>(null);
-    const [diffLoading, setDiffLoading] = useState(false);
-    const [diffError, setDiffError] = useState("");
+    const [diff, setDiff] = useState<{ key: string; result: GitFileDiff } | null>(null);
+    const [diffError, setDiffError] = useState<{ key: string; message: string } | null>(null);
     const [fileStale, setFileStale] = useState(false);
     const [restoreConfirm, setRestoreConfirm] = useState(false);
     const [restoreBusy, setRestoreBusy] = useState(false);
@@ -68,6 +67,7 @@ export function GitChangesPanel({
     const [gitActionMessage, setGitActionMessage] = useState("");
     const [commitResult, setCommitResult] = useState("");
     const [commitMessage, setCommitMessage] = useState("");
+    const [manualRefreshing, setManualRefreshing] = useState(false);
 
     const currentFiles = snapshot?.isGit ? snapshot.files : [];
     const files = view === "run" ? review?.files ?? []
@@ -75,6 +75,9 @@ export function GitChangesPanel({
             : currentFiles;
     const selectedReviewFile = view === "run" ? (review?.files.find((file) => file.path === selectedPath) ?? null) : null;
     const selectedFile = view === "run" ? null : (files.find((file) => file.path === selectedPath) as GitFileChange | undefined) ?? null;
+    const selectedDiffKey = selectedFile ? `${workspaceId}\0${selectedFile.path}\0${selectedStaged}\0${selectedFile.staged}\0${selectedFile.unstaged}\0${selectedFile.untracked}` : null;
+    const visibleDiff = diff?.key === selectedDiffKey ? diff.result : null;
+    const visibleDiffError = diffError?.key === selectedDiffKey ? diffError.message : "";
     const visibleFiles = view === "worktree" && filter !== "all"
         ? (files as GitFileChange[]).filter((file) => filter === "staged" ? file.staged : file.unstaged || file.untracked)
         : files;
@@ -88,8 +91,7 @@ export function GitChangesPanel({
     useEffect(() => {
         if (!selectedFile) {
             setDiff(null);
-            setDiffError("");
-            setDiffLoading(false);
+            setDiffError(null);
             return;
         }
         const hasSelectedSide = selectedStaged ? selectedFile.staged : selectedFile.unstaged || selectedFile.untracked;
@@ -99,21 +101,17 @@ export function GitChangesPanel({
     useEffect(() => {
         if (view === "run" || !selectedFile || !snapshot?.isGit) {
             setDiff(null);
-            setDiffError("");
-            setDiffLoading(false);
+            setDiffError(null);
             return;
         }
         const staged = selectedStaged;
+        const key = selectedDiffKey!;
         let live = true;
-        setDiff(null);
-        setDiffError("");
-        setDiffLoading(true);
+        setDiffError(null);
         void window.desktop.getGitDiff(workspaceId, selectedFile.path, staged).then((result) => {
-            if (live) setDiff(result);
+            if (live) setDiff({ key, result });
         }).catch((error: unknown) => {
-            if (live) setDiffError(error instanceof Error ? error.message : String(error));
-        }).finally(() => {
-            if (live) setDiffLoading(false);
+            if (live) setDiffError({ key, message: error instanceof Error ? error.message : String(error) });
         });
         return () => { live = false; };
     }, [view, snapshot, workspaceId, selectedFile?.path, selectedFile?.staged, selectedFile?.unstaged, selectedFile?.untracked, selectedStaged]);
@@ -227,7 +225,7 @@ export function GitChangesPanel({
 
     return <section className="git-changes-panel" aria-label="代码审阅和 Git 改动">
         <div className="git-panel-toolbar">
-            <div className="git-panel-heading"><div><strong>代码审阅</strong><small>{review?.startedAt ? `最近任务 ${new Date(review.startedAt).toLocaleString()}` : "按任务检查改动"}</small></div><button className="secondary-button compact" onClick={onRefresh} disabled={loading}>{loading ? "刷新中..." : "刷新"}</button></div>
+            <div className="git-panel-heading"><div><strong>代码审阅</strong><small>{review?.startedAt ? `最近任务 ${new Date(review.startedAt).toLocaleString()}` : "按任务检查改动"}</small></div><button className="secondary-button compact" onClick={() => { setManualRefreshing(true); void onRefresh().finally(() => setManualRefreshing(false)); }} disabled={manualRefreshing || loading && !snapshot}>{manualRefreshing ? "刷新中..." : "刷新"}</button></div>
             <div className="review-tabs" role="tablist" aria-label="代码审阅范围" onKeyDown={handleTabListKeyDown}>
                 <button id="review-scope-run" role="tab" aria-selected={view === "run"} aria-controls="review-scope-content" tabIndex={view === "run" ? 0 : -1} className={view === "run" ? "selected" : ""} onClick={() => setView("run")}>本轮任务{review?.files.length ? <span>{review.files.length}</span> : null}</button>
                 <button id="review-scope-preexisting" role="tab" aria-selected={view === "preexisting"} aria-controls="review-scope-content" tabIndex={view === "preexisting" ? 0 : -1} className={view === "preexisting" ? "selected" : ""} onClick={() => setView("preexisting")}>运行前已有{review?.preexisting.length ? <span>{review.preexisting.length}</span> : null}</button>
@@ -313,13 +311,13 @@ export function GitChangesPanel({
                                             <DiffViewer diff={selectedReviewFile.diff} />
                                         </> : !selectedReviewFile?.notice && <div className="git-panel-state">文件状态已读取，但当前没有可显示的文本差异。</div>}
                                     </>
-                                        : diffLoading ? <div className="git-panel-state">正在生成差异...</div>
-                                            : diffError ? <div className="git-panel-state git-panel-error">{diffError}</div>
-                                                : diff?.stale ? <div className="git-panel-state">这个文件的 Git 状态刚刚变化。刷新列表后重新选择。</div>
-                                                    : diff?.notice ? <div className="git-panel-state">{diff.notice}</div>
-                                                        : diff?.content ? <>
-                                                            {diff.truncated && <div className="git-truncated-notice">差异超过 512 KiB，已截断显示。</div>}
-                                                            <DiffViewer diff={diff.content} />
+                                        : visibleDiffError ? <div className="git-panel-state git-panel-error">{visibleDiffError}</div>
+                                            : !visibleDiff ? <div className="git-panel-state">正在生成差异...</div>
+                                                : visibleDiff?.stale ? <div className="git-panel-state">这个文件的 Git 状态刚刚变化。刷新列表后重新选择。</div>
+                                                    : visibleDiff?.notice ? <div className="git-panel-state">{visibleDiff.notice}</div>
+                                                        : visibleDiff?.content ? <>
+                                                            {visibleDiff.truncated && <div className="git-truncated-notice">差异超过 512 KiB，已截断显示。</div>}
+                                                            <DiffViewer diff={visibleDiff.content} />
                                                         </>
                                                             : <div className="git-panel-state">文件状态已读取，但当前没有可显示的文本差异。</div>}
                                 </div>
