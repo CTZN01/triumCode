@@ -9,6 +9,8 @@ import type {
     DesktopModelPreset,
     DesktopSettings,
     GitSnapshot,
+    GitHistory,
+    GitCommitDetail,
     OpenSessionData,
     PendingPermissionRequest,
     PendingUserQuestion,
@@ -20,6 +22,7 @@ import type {
     WorkspaceSummary,
 } from "../shared/contracts.js";
 import type { AgentContextUsage, AgentEvent, AgentFailureCategory, AgentUsage } from "../../../src/agent.js";
+import { layoutGitGraph } from "../shared/git-graph-layout.js";
 import type { PermissionAction, PermissionSource } from "../../../src/permissions.js";
 import type { SessionPermissionGrantSummary } from "../../../src/permissions.js";
 import { DesktopRunEventTracker } from "../../../src/desktop-events.js";
@@ -86,6 +89,11 @@ function readInspectorOpen(): boolean {
         const saved = JSON.parse(window.localStorage.getItem(PANEL_WIDTHS_STORAGE_KEY) ?? "null") as { inspectorOpen?: unknown } | null;
         return saved?.inspectorOpen !== false;
     } catch { return true; }
+}
+
+function defaultTerminalHeight(): number {
+    const maximum = Math.max(145, Math.floor(window.innerHeight * 0.72));
+    return Math.min(maximum, Math.min(560, Math.max(320, Math.round(window.innerHeight * 0.45))));
 }
 
 function displayError(error: unknown): string {
@@ -403,6 +411,150 @@ type PendingDialog =
     | { kind: "confirm"; message: string; confirmLabel: string; danger: boolean; resolve: (accepted: boolean) => void }
     | { kind: "prompt"; message: string; value: string; resolve: (value: string | null) => void };
 
+function GitBranchDialog({ workspace, managed, onClose, onChanged, onOpenGraph }: {
+    workspace: WorkspaceSummary;
+    managed: boolean;
+    onClose: (restoreFocus?: boolean) => void;
+    onChanged: () => Promise<void>;
+    onOpenGraph: (history: GitHistory) => void;
+}) {
+    const [history, setHistory] = useState<GitHistory | null>(null);
+    const [search, setSearch] = useState("");
+    const [newBranch, setNewBranch] = useState("codex/");
+    const [loading, setLoading] = useState(true);
+    const [busy, setBusy] = useState(false);
+    const [error, setError] = useState("");
+    const dialog = useRef<HTMLElement | null>(null);
+
+    const reload = useCallback(async () => {
+        setLoading(true);
+        try {
+            setHistory(await window.desktop.getGitHistory(workspace.id));
+            setError("");
+        } catch (failure) { setError(displayError(failure)); }
+        finally { setLoading(false); }
+    }, [workspace.id]);
+
+    useEffect(() => {
+        dialog.current?.querySelector<HTMLInputElement>(".git-branch-search")?.focus();
+        void reload();
+    }, [reload]);
+
+    useEffect(() => {
+        const closeOnOutside = (event: PointerEvent): void => {
+            if (event.target instanceof Node && !dialog.current?.parentElement?.contains(event.target) && !busy) onClose();
+        };
+        const closeOnEscape = (event: globalThis.KeyboardEvent): void => {
+            if (event.key === "Escape" && !busy) {
+                event.stopPropagation();
+                onClose(true);
+            }
+        };
+        document.addEventListener("pointerdown", closeOnOutside);
+        document.addEventListener("keydown", closeOnEscape);
+        return () => {
+            document.removeEventListener("pointerdown", closeOnOutside);
+            document.removeEventListener("keydown", closeOnEscape);
+        };
+    }, [busy, onClose]);
+
+    const changeBranch = async (branch: string | null) => {
+        if (busy) return;
+        setBusy(true);
+        setError("");
+        try {
+            if (branch === null) await window.desktop.createGitBranch(workspace.id, newBranch.trim());
+            else await window.desktop.switchGitBranch(workspace.id, branch);
+            await onChanged();
+            await reload();
+            if (branch === null) setNewBranch("codex/");
+        } catch (failure) { setError(displayError(failure)); }
+        finally { setBusy(false); }
+    };
+
+    const visibleBranches = history?.branches.filter((branch) => branch.toLocaleLowerCase().includes(search.toLocaleLowerCase())) ?? [];
+    return <section ref={dialog} id="git-branch-popover" className="git-history-dialog" role="dialog" aria-labelledby="git-history-title">
+            <div className="git-history-head"><div><small>GIT</small><h2 id="git-history-title">分支</h2><p>{workspace.name} · {history?.currentBranch ?? workspace.branch ?? "无当前分支"}</p></div><div><button type="button" onClick={() => void reload()} disabled={loading || busy}>刷新</button><button type="button" onClick={() => onClose(true)} disabled={busy} aria-label="关闭分支窗口">×</button></div></div>
+            {error && <div className="task-center-error" role="alert">{error}</div>}
+            <section className="git-branch-section" aria-label="本地分支"><div className="git-history-section-title"><h3>切换分支</h3><span>{history?.branches.length ?? 0} 个本地分支</span></div>
+                <input className="git-branch-search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索本地分支" aria-label="搜索本地分支" />
+                <div className="git-branch-list">{loading && <span className="git-history-empty">正在读取 Git 历史...</span>}{visibleBranches.map((branch) => <button className={branch === history?.currentBranch ? "current" : ""} key={branch} type="button" disabled={busy || managed || history?.dirty || branch === history?.currentBranch} onClick={() => void changeBranch(branch)}><Icon name="branch" size={14} /><span>{branch}</span>{branch === history?.currentBranch && <strong>当前</strong>}</button>)}{!loading && visibleBranches.length === 0 && <span className="git-history-empty">没有匹配的本地分支</span>}</div>
+                {history?.dirty && <p className="git-history-note">工作区有未提交改动；请先提交或清理，再切换已有分支。新建分支会保留这些改动。</p>}
+                {managed && <p className="git-history-note">此隔离工作区的分支用于审阅和合并，不能在这里切换或新建分支。</p>}
+            </section>
+            <form className="git-create-branch" onSubmit={(event) => { event.preventDefault(); void changeBranch(null); }}><label htmlFor="git-new-branch">新建分支</label><input id="git-new-branch" value={newBranch} onChange={(event) => setNewBranch(event.target.value)} maxLength={120} placeholder="codex/new-feature" disabled={busy || managed} /><button type="submit" disabled={busy || managed || !newBranch.trim() || newBranch.trim() === "codex/"}>创建并切换</button></form>
+            <button className="git-graph-open" type="button" disabled={!history || busy} onClick={() => { if (history) onOpenGraph(history); }}><span><strong>Git Graph</strong><small>在大窗口查看最近 {history?.commits.length ?? 0} 条提交</small></span><Icon name="chevron" size={16} /></button>
+    </section>;
+}
+
+const GIT_GRAPH_COLORS = ["light-dark(#0969da, #20a7f5)", "light-dark(#a50072, #f222af)", "light-dark(#1f883d, #3fb950)", "light-dark(#8250df, #b78cff)", "light-dark(#bf8700, #d29922)"];
+
+function GitGraphDialog({ workspace, initialHistory, onClose }: {
+    workspace: WorkspaceSummary;
+    initialHistory: GitHistory;
+    onClose: () => void;
+}) {
+    const [history, setHistory] = useState(initialHistory);
+    const [detail, setDetail] = useState<GitCommitDetail | null>(null);
+    const [selectedHash, setSelectedHash] = useState<string | null>(null);
+    const [loading, setLoading] = useState(false);
+    const [detailLoading, setDetailLoading] = useState(false);
+    const [error, setError] = useState("");
+    const dialog = useRef<HTMLElement | null>(null);
+    const detailRequest = useRef(0);
+    const graph = useMemo(() => layoutGitGraph(history.commits), [history.commits]);
+    const graphWidth = Math.max(70, graph.width);
+
+    useEffect(() => { dialog.current?.querySelector<HTMLButtonElement>(".git-graph-close")?.focus(); }, []);
+
+    const reload = async () => {
+        setLoading(true);
+        setError("");
+        try {
+            setHistory(await window.desktop.getGitHistory(workspace.id));
+            detailRequest.current += 1;
+            setDetail(null);
+            setSelectedHash(null);
+            setDetailLoading(false);
+        } catch (failure) { setError(displayError(failure)); }
+        finally { setLoading(false); }
+    };
+
+    const loadDetail = async (hash: string) => {
+        const request = ++detailRequest.current;
+        setSelectedHash(hash);
+        setDetail(null);
+        setDetailLoading(true);
+        setError("");
+        try {
+            const result = await window.desktop.getGitCommitDetail(workspace.id, hash);
+            if (request === detailRequest.current) setDetail(result);
+        } catch (failure) { if (request === detailRequest.current) setError(displayError(failure)); }
+        finally { if (request === detailRequest.current) setDetailLoading(false); }
+    };
+
+    return <div className="modal-scrim git-graph-scrim" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+        <section ref={dialog} className="git-graph-dialog" role="dialog" aria-modal="true" aria-labelledby="git-graph-title" tabIndex={-1}
+            onKeyDown={(event) => {
+                if (event.key === "Escape") { event.stopPropagation(); onClose(); return; }
+                if (event.key !== "Tab") return;
+                const focusable = [...(dialog.current?.querySelectorAll<HTMLElement>("button:not(:disabled)") ?? [])];
+                const first = focusable[0];
+                const last = focusable.at(-1);
+                if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+                else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+            }}>
+            <div className="git-graph-dialog-head"><div><small>GIT HISTORY</small><h2 id="git-graph-title">Git Graph</h2><p>{workspace.name} · {history.currentBranch ?? "无当前分支"} · 最近 {history.commits.length} 条</p></div><div><button type="button" onClick={() => void reload()} disabled={loading}>刷新</button><button className="git-graph-close" type="button" onClick={onClose} aria-label="关闭 Git Graph">×</button></div></div>
+            {error && <div className="task-center-error" role="alert">{error}</div>}
+            <div className={`git-graph-dialog-body ${selectedHash ? "with-detail" : ""}`}><div className="git-graph-list" style={{ "--git-graph-width": `${graphWidth}px` } as CSSProperties}><div className="git-graph-columns"><span>Graph</span><span>提交</span><span>日期</span><span>作者</span><span>Hash</span></div>
+                <div className="git-graph-rows"><svg className="git-graph-lines" width={graphWidth} height={graph.height} viewBox={`0 0 ${graphWidth} ${graph.height}`} aria-hidden="true">{graph.edges.map((edge) => <path key={`${edge.child}-${edge.parent}`} d={edge.path} fill="none" stroke={GIT_GRAPH_COLORS[edge.color % GIT_GRAPH_COLORS.length]} strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />)}{graph.nodes.map((node) => <circle key={node.hash} cx={node.x} cy={node.y} r="4.2" fill={history.commits[node.row].decorations.includes("HEAD ->") ? "var(--surface)" : GIT_GRAPH_COLORS[node.color % GIT_GRAPH_COLORS.length]} stroke={GIT_GRAPH_COLORS[node.color % GIT_GRAPH_COLORS.length]} strokeWidth="2" />)}</svg>
+                {history.commits.map((commit) => <button className={`git-graph-row ${selectedHash === commit.hash ? "selected" : ""}`} aria-pressed={selectedHash === commit.hash} key={commit.hash} type="button" onClick={() => void loadDetail(commit.hash)}><span aria-hidden="true" /><span className="git-graph-subject" title={commit.subject}>{commit.decorations && <em className={commit.decorations.includes("HEAD ->") ? "current" : ""}>{commit.decorations}</em>}{commit.subject}</span><time>{new Date(commit.authoredAt).toLocaleDateString("zh-CN")}</time><span className="git-graph-author">{commit.author}</span><code>{commit.hash.slice(0, 8)}</code></button>)}</div>
+                {history.commits.length === 0 && <div className="git-history-empty">还没有可显示的提交记录。</div>}
+            </div>{selectedHash && <aside className="git-commit-detail" aria-label="提交详情"><button className="git-commit-detail-close" type="button" onClick={() => { detailRequest.current += 1; setSelectedHash(null); setDetail(null); setDetailLoading(false); }}>关闭详情</button>{detailLoading ? <p>正在读取提交详情...</p> : detail ? <><strong>{detail.message.split("\n")[0]}</strong><code>{detail.hash}</code><p>{detail.author} &lt;{detail.authorEmail}&gt;</p><time>{new Date(detail.authoredAt).toLocaleString("zh-CN")}</time>{detail.parents.length > 0 && <small>父提交：{detail.parents.map((parent) => parent.slice(0, 8)).join(", ")}</small>}<pre>{detail.message}</pre><pre>{detail.stats}{detail.statsTruncated ? "\n...文件统计已截断" : ""}</pre></> : null}</aside>}</div>
+        </section>
+    </div>;
+}
+
 export function App() {
     const [bootstrap, setBootstrap] = useState<BootstrapData | null>(null);
     const [activeWorkspace, setActiveWorkspace] = useState<WorkspaceSummary | null>(null);
@@ -442,7 +594,12 @@ export function App() {
     const [settingsOpen, setSettingsOpen] = useState(false);
     const [worktreeDialogOpen, setWorktreeDialogOpen] = useState(false);
     const [worktreeManagerOpen, setWorktreeManagerOpen] = useState(false);
+    const [gitHistoryOpen, setGitHistoryOpen] = useState(false);
+    const [gitGraphHistory, setGitGraphHistory] = useState<{ workspaceId: string; history: GitHistory } | null>(null);
+    const gitBranchButtonRef = useRef<HTMLButtonElement | null>(null);
     const [terminalOpen, setTerminalOpen] = useState(false);
+    const [terminalMounted, setTerminalMounted] = useState(false);
+    const [terminalHeight, setTerminalHeight] = useState(defaultTerminalHeight);
     const [terminalWorkspaceId, setTerminalWorkspaceId] = useState<string | null>(null);
     const [rightPanel, setRightPanel] = useState<"activity" | "details" | "changes">("activity");
     const [taskCenterOpen, setTaskCenterOpen] = useState(false);
@@ -462,7 +619,8 @@ export function App() {
     const resolvedTheme = theme === "system" ? (systemDark ? "dark" : "light") : theme;
     const commandModifier = /Mac|iPhone|iPad/.test(navigator.userAgent) ? "⌘" : "Ctrl";
     const appShellRef = useRef<HTMLDivElement | null>(null);
-    const resizingPanel = useRef<"sidebar" | "inspector" | null>(null);
+    const terminalCloseTimer = useRef<number | null>(null);
+    const resizingPanel = useRef<{ panel: "sidebar" | "inspector"; pointerId: number; widths: PanelWidths; next: PanelWidths } | null>(null);
     const endOfMessages = useRef<HTMLDivElement | null>(null);
     const conversationRef = useRef<HTMLDivElement | null>(null);
     const historyRequestSequence = useRef(0);
@@ -583,27 +741,39 @@ export function App() {
     }, []);
 
     const resizePanelAt = (panel: "sidebar" | "inspector", clientX: number): void => {
+        const drag = resizingPanel.current;
         const bounds = appShellRef.current?.getBoundingClientRect();
-        if (!bounds) return;
-        setPanelWidths((current) => fitPanelWidths({
-            ...current,
+        if (!drag || !bounds) return;
+        drag.next = fitPanelWidths({
+            ...drag.widths,
             [panel]: panel === "sidebar" ? clientX - bounds.left : bounds.right - clientX,
-        }, bounds.width));
+        }, bounds.width);
+        appShellRef.current?.style.setProperty("--sidebar-width", `${drag.next.sidebar}px`);
+        appShellRef.current?.style.setProperty("--inspector-width", `${drag.next.inspector}px`);
     };
 
     const startPanelResize = (panel: "sidebar" | "inspector", event: ReactPointerEvent<HTMLDivElement>): void => {
         if (event.button !== 0) return;
         event.preventDefault();
-        resizingPanel.current = panel;
+        resizingPanel.current = { panel, pointerId: event.pointerId, widths: panelWidths, next: panelWidths };
+        appShellRef.current?.classList.add("resizing-panels");
+        document.body.classList.add("panel-resizing");
         event.currentTarget.setPointerCapture(event.pointerId);
     };
 
     const movePanelResize = (panel: "sidebar" | "inspector", event: ReactPointerEvent<HTMLDivElement>): void => {
-        if (resizingPanel.current === panel) resizePanelAt(panel, event.clientX);
+        if (resizingPanel.current?.panel !== panel || resizingPanel.current.pointerId !== event.pointerId) return;
+        resizePanelAt(panel, event.clientX);
+        event.currentTarget.setAttribute("aria-valuenow", String(resizingPanel.current.next[panel]));
     };
 
     const finishPanelResize = (event: ReactPointerEvent<HTMLDivElement>): void => {
+        const drag = resizingPanel.current;
+        if (!drag || drag.pointerId !== event.pointerId) return;
         resizingPanel.current = null;
+        setPanelWidths(drag.next);
+        appShellRef.current?.classList.remove("resizing-panels");
+        document.body.classList.remove("panel-resizing");
         if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
     };
 
@@ -1422,13 +1592,25 @@ export function App() {
     const toggleTerminal = async () => {
         if (!terminalOpen) {
             if (!activeWorkspace?.available) return;
+            if (terminalCloseTimer.current !== null) window.clearTimeout(terminalCloseTimer.current);
+            terminalCloseTimer.current = null;
             setTerminalWorkspaceId(activeWorkspace.id);
-            setTerminalOpen(true);
+            setTerminalMounted(true);
+            requestAnimationFrame(() => setTerminalOpen(true));
             return;
         }
         if (!(await confirmInApp("关闭终端会结束此 PowerShell 会话和它启动的前台程序。继续吗？", "继续"))) return;
         setTerminalOpen(false);
+        terminalCloseTimer.current = window.setTimeout(() => {
+            setTerminalMounted(false);
+            setTerminalWorkspaceId(null);
+            terminalCloseTimer.current = null;
+        }, window.matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 260);
     };
+
+    useEffect(() => () => {
+        if (terminalCloseTimer.current !== null) window.clearTimeout(terminalCloseTimer.current);
+    }, []);
 
     const handleNewSession = useCallback(async () => {
         if (!activeWorkspace?.available) return;
@@ -1697,7 +1879,12 @@ export function App() {
                 {activeWorkspace ? <><span className="crumb-project">{activeWorkspace.name}</span><Icon name="chevron" size={14} /><span className="crumb-session">{activeSession?.title || "新会话"}</span></> : <span className="crumb-session">桌面工作区</span>}
             </div>
             <div className="topbar-actions">
-                {activeWorkspace?.branch && <span className="topbar-chip"><span className="git-branch-icon"><Icon name="branch" size={15} /></span>{activeWorkspace.branch}</span>}
+                {activeWorkspace?.branch && <div className="git-branch-picker"><button ref={gitBranchButtonRef} type="button" className="topbar-chip git-branch-toggle" title="切换分支并查看提交历史" aria-haspopup="dialog" aria-controls="git-branch-popover" aria-expanded={gitHistoryOpen} onClick={() => setGitHistoryOpen((open) => !open)}><span className="git-branch-icon"><Icon name="branch" size={15} /></span><span className="git-branch-label">{activeWorkspace.branch}</span><Icon name="chevron" size={12} /></button>
+                    {gitHistoryOpen && <GitBranchDialog key={activeWorkspace.id} workspace={activeWorkspace} managed={worktreeAssociation?.workspaceId === activeWorkspace.id} onClose={(restoreFocus) => { setGitHistoryOpen(false); if (restoreFocus) gitBranchButtonRef.current?.focus(); }} onOpenGraph={(history) => { setGitHistoryOpen(false); setGitGraphHistory({ workspaceId: activeWorkspace.id, history }); }} onChanged={async () => {
+                        await refreshGitSnapshot(activeWorkspace.id);
+                        if (activeSession) await refreshCodeReview(activeWorkspace.id, activeSession.id);
+                    }} />}
+                </div>}
                 <button className={`topbar-chip task-center-toggle ${taskCenterOpen ? "selected" : ""}`} onClick={() => setTaskCenterOpen(true)} title="查看所有工作区的任务">任务中心</button>
                 <button className={`topbar-chip terminal-toggle ${terminalOpen ? "selected" : ""}`} onClick={toggleTerminal} disabled={!terminalOpen && !activeWorkspace?.available} title={terminalOpen ? "关闭工作区终端" : "打开绑定当前工作区的 PowerShell 终端"}>终端</button>
                 {activeWorkspace && <button className={`icon-button inspector-toggle ${inspectorOpen ? "panel-selected" : ""}`} title={inspectorOpen ? "收起右侧面板" : "展开右侧面板"} aria-label={inspectorOpen ? "收起右侧面板" : "展开右侧面板"} aria-expanded={inspectorOpen} onClick={() => setInspectorOpen((current) => !current)}><Icon name="panel-right" size={17} /></button>}
@@ -1755,7 +1942,7 @@ export function App() {
             aria-valuemin={200} aria-valuemax={340} aria-valuenow={panelWidths.sidebar} tabIndex={0}
             onPointerDown={(event) => startPanelResize("sidebar", event)}
             onPointerMove={(event) => movePanelResize("sidebar", event)}
-            onPointerUp={finishPanelResize} onPointerCancel={finishPanelResize}
+            onPointerUp={finishPanelResize} onPointerCancel={finishPanelResize} onLostPointerCapture={finishPanelResize}
             onKeyDown={(event) => resizePanelFromKeyboard("sidebar", event)} />
 
         <main className="main-column">
@@ -1878,11 +2065,14 @@ export function App() {
                         </>}
                 </section>
             </div>}
-            {terminalOpen && terminalWorkspaceId && bootstrap && (() => {
+            <div className={`terminal-drawer ${terminalOpen ? "open" : ""}`} aria-hidden={!terminalOpen} inert={!terminalOpen} style={{ height: terminalOpen ? `${terminalHeight}px` : "0px" }}>
+                {terminalMounted && terminalWorkspaceId && bootstrap && (() => {
                 const workspace = bootstrap.workspaces.find((item) => item.id === terminalWorkspaceId);
                 return workspace ? <TerminalPanel
                     key={workspace.id}
                     theme={resolvedTheme}
+                    panelHeight={terminalHeight}
+                    onPanelHeightChange={setTerminalHeight}
                     workspaceId={workspace.id}
                     workspaceName={workspace.name}
                     workspacePath={workspace.path}
@@ -1898,17 +2088,18 @@ export function App() {
                         setDraft(combined);
                     }}
                 /> : null;
-            })()}
+                })()}
+            </div>
         </main>
 
         <div className="column-resizer inspector-resizer" role="separator" aria-orientation="vertical" aria-label="调整右侧面板宽度"
             aria-valuemin={230} aria-valuemax={720} aria-valuenow={panelWidths.inspector} tabIndex={0}
             onPointerDown={(event) => startPanelResize("inspector", event)}
             onPointerMove={(event) => movePanelResize("inspector", event)}
-            onPointerUp={finishPanelResize} onPointerCancel={finishPanelResize}
+            onPointerUp={finishPanelResize} onPointerCancel={finishPanelResize} onLostPointerCapture={finishPanelResize}
             onKeyDown={(event) => resizePanelFromKeyboard("inspector", event)} />
 
-        {activeWorkspace && inspectorOpen && <aside className="inspector" aria-label="工作区检查面板">
+        {activeWorkspace && <aside className="inspector" aria-label="工作区检查面板" aria-hidden={!inspectorOpen} inert={!inspectorOpen}>
             <div className="inspector-tabs">
                 <div className="inspector-tablist" role="tablist" aria-label="检查面板" onKeyDown={handleTabListKeyDown}>
                     <button id="inspector-tab-activity" role="tab" aria-selected={rightPanel === "activity"} aria-controls="inspector-panel-content" tabIndex={rightPanel === "activity" ? 0 : -1} className={rightPanel === "activity" ? "selected" : ""} onClick={() => selectRightPanel("activity")}>任务活动{activities.length > 0 && <span>{activities.length}</span>}</button>
@@ -2027,6 +2218,7 @@ export function App() {
             onOpen={(task) => void openTask(task)}
             onStop={stopTask}
         />}
+        {activeWorkspace && gitGraphHistory?.workspaceId === activeWorkspace.id && <GitGraphDialog key={activeWorkspace.id} workspace={activeWorkspace} initialHistory={gitGraphHistory.history} onClose={() => { setGitGraphHistory(null); gitBranchButtonRef.current?.focus(); }} />}
         {worktreeDialogOpen && activeWorkspace && <NewWorktreeDialog
             workspace={activeWorkspace}
             onClose={() => setWorktreeDialogOpen(false)}

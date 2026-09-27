@@ -22,6 +22,8 @@ import type {
     DesktopSettings,
     DesktopTaskCenterData,
     GitFileDiff,
+    GitCommitDetail,
+    GitHistory,
     GitSnapshot,
     CodeReviewSnapshot,
     CreateWorktreeRequest,
@@ -48,9 +50,13 @@ import { redactConfiguredKey, redactSessionMessages, type RedactionKeys } from "
 import { CredentialStore } from "./credential-store.js";
 import {
     commitGitChanges as createGitCommit,
+    createGitBranch as createWorkspaceGitBranch,
+    readGitCommitDetail,
     readGitDiff,
+    readGitHistory,
     readGitSnapshot,
     stageGitPath as stageWorkspaceGitPath,
+    switchGitBranch as switchWorkspaceGitBranch,
     unstageGitPath as unstageWorkspaceGitPath,
 } from "./git-service.js";
 import { ReviewService } from "./review-service.js";
@@ -588,6 +594,32 @@ export class AgentHost {
 
     getGitSnapshot(workspaceId: string): Promise<GitSnapshot> {
         return readGitSnapshot(this.workspaces.getPath(workspaceId));
+    }
+
+    getGitHistory(workspaceId: string): Promise<GitHistory> {
+        return readGitHistory(this.workspaces.getPath(workspaceId));
+    }
+
+    getGitCommitDetail(workspaceId: string, hash: string): Promise<GitCommitDetail> {
+        return readGitCommitDetail(this.workspaces.getPath(workspaceId), hash);
+    }
+
+    switchGitBranch(workspaceId: string, branch: string): Promise<void> {
+        return this.withWorkspaceGitMutation(workspaceId, () => {
+            if (this.worktreeStore.get(workspaceId)) {
+                throw new DesktopServiceError("WORKTREE_BRANCH_PINNED", "隔离工作区的分支用于审阅和合并，不能在此切换。");
+            }
+            return switchWorkspaceGitBranch(this.workspaces.getPath(workspaceId), branch);
+        });
+    }
+
+    createGitBranch(workspaceId: string, branch: string): Promise<void> {
+        return this.withWorkspaceGitMutation(workspaceId, () => {
+            if (this.worktreeStore.get(workspaceId)) {
+                throw new DesktopServiceError("WORKTREE_BRANCH_PINNED", "隔离工作区的分支用于审阅和合并，不能在此新建并切换分支。");
+            }
+            return createWorkspaceGitBranch(this.workspaces.getPath(workspaceId), branch);
+        });
     }
 
     assertTerminalCanOpen(workspaceId: string): void {

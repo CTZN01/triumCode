@@ -27,6 +27,8 @@ const terminalPalettes = {
 
 export function TerminalPanel({
     theme,
+    panelHeight,
+    onPanelHeightChange,
     workspaceId,
     workspaceName,
     workspacePath,
@@ -35,6 +37,8 @@ export function TerminalPanel({
     confirm,
 }: {
     theme: "light" | "dark";
+    panelHeight: number;
+    onPanelHeightChange: (height: number | ((current: number) => number)) => void;
     workspaceId: string;
     workspaceName: string;
     workspacePath: string;
@@ -51,20 +55,33 @@ export function TerminalPanel({
     const [selectedText, setSelectedText] = useState("");
     const [generation, setGeneration] = useState(0);
     const maxPanelHeight = Math.max(145, Math.floor(window.innerHeight * 0.72));
-    const defaultPanelHeight = Math.min(maxPanelHeight, Math.min(560, Math.max(320, Math.round(window.innerHeight * 0.45))));
-    const [panelHeight, setPanelHeight] = useState(defaultPanelHeight);
     const panel = useRef<HTMLElement | null>(null);
-    const resizeStart = useRef<{ pointerId: number; y: number; height: number } | null>(null);
+    const resizeStart = useRef<{ pointerId: number; y: number; height: number; next: number; frame: number | null } | null>(null);
+    const resizeHandle = useRef<HTMLDivElement | null>(null);
     const exited = useRef(false);
     const clampPanelHeight = (height: number): number => Math.max(145, Math.min(maxPanelHeight, height));
+
+    const applyPanelHeight = (height: number): void => {
+        const drawer = panel.current?.parentElement;
+        if (!drawer || !panel.current) return;
+        drawer.style.height = `${height}px`;
+        panel.current.style.height = `${height}px`;
+        resizeHandle.current?.setAttribute("aria-valuenow", String(Math.round(height)));
+    };
 
     const startPanelResize = (event: React.PointerEvent<HTMLDivElement>) => {
         if (event.button !== 0 || !panel.current) return;
         event.preventDefault();
+        const height = Math.round(panel.current.parentElement?.getBoundingClientRect().height ?? panelHeight);
+        applyPanelHeight(height);
+        panel.current.parentElement?.classList.add("resizing");
+        document.body.classList.add("terminal-resizing");
         resizeStart.current = {
             pointerId: event.pointerId,
             y: event.clientY,
-            height: panel.current.getBoundingClientRect().height,
+            height,
+            next: height,
+            frame: null,
         };
         event.currentTarget.setPointerCapture(event.pointerId);
     };
@@ -72,19 +89,31 @@ export function TerminalPanel({
     const movePanelResize = (event: React.PointerEvent<HTMLDivElement>) => {
         const start = resizeStart.current;
         if (!start || start.pointerId !== event.pointerId) return;
-        setPanelHeight(clampPanelHeight(start.height + start.y - event.clientY));
+        start.next = clampPanelHeight(start.height + start.y - event.clientY);
+        if (start.frame === null) start.frame = requestAnimationFrame(() => {
+            const current = resizeStart.current;
+            if (!current) return;
+            current.frame = null;
+            applyPanelHeight(current.next);
+        });
     };
 
     const finishPanelResize = (event: React.PointerEvent<HTMLDivElement>) => {
-        if (resizeStart.current?.pointerId !== event.pointerId) return;
+        const start = resizeStart.current;
+        if (!start || start.pointerId !== event.pointerId) return;
+        if (start.frame !== null) cancelAnimationFrame(start.frame);
+        applyPanelHeight(start.next);
         resizeStart.current = null;
+        onPanelHeightChange(start.next);
+        panel.current?.parentElement?.classList.remove("resizing");
+        document.body.classList.remove("terminal-resizing");
         if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
     };
 
     const resizePanelFromKeyboard = (event: React.KeyboardEvent<HTMLDivElement>) => {
         if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
         event.preventDefault();
-        setPanelHeight((height) => clampPanelHeight(height + (event.key === "ArrowUp" ? 16 : -16)));
+        onPanelHeightChange((height) => clampPanelHeight(height + (event.key === "ArrowUp" ? 16 : -16)));
     };
 
     useEffect(() => {
@@ -129,15 +158,24 @@ export function TerminalPanel({
         const selection = terminal.onSelectionChange(() => setSelectedText(terminal.getSelection()));
         terminal.onTitleChange(setTitle);
 
+        let lastSize = { cols: terminal.cols, rows: terminal.rows };
+        let fitFrame: number | null = null;
         const resize = () => {
-            try {
-                fit.fit();
-                if (terminalId) void window.desktop.resizeTerminal(terminalId, terminal.cols, terminal.rows).catch(() => undefined);
-            } catch { /* the panel may not have a measurable size yet */ }
+            if (fitFrame !== null) return;
+            fitFrame = requestAnimationFrame(() => {
+                fitFrame = null;
+                try {
+                    fit.fit();
+                    if (terminalId && (terminal.cols !== lastSize.cols || terminal.rows !== lastSize.rows)) {
+                        lastSize = { cols: terminal.cols, rows: terminal.rows };
+                        void window.desktop.resizeTerminal(terminalId, terminal.cols, terminal.rows).catch(() => undefined);
+                    }
+                } catch { /* the panel may not have a measurable size yet */ }
+            });
         };
         const observer = new ResizeObserver(resize);
         observer.observe(root);
-        requestAnimationFrame(resize);
+        resize();
 
         void window.desktop.createTerminal(workspaceId, terminal.cols, terminal.rows).then((created) => {
             if (!live) {
@@ -154,6 +192,9 @@ export function TerminalPanel({
 
         return () => {
             live = false;
+            if (fitFrame !== null) cancelAnimationFrame(fitFrame);
+            if (resizeStart.current?.frame != null) cancelAnimationFrame(resizeStart.current.frame);
+            document.body.classList.remove("terminal-resizing");
             observer.disconnect();
             unsubscribe();
             input.dispose();
@@ -177,11 +218,11 @@ export function TerminalPanel({
         setGeneration((current) => current + 1);
     };
 
-    return <section ref={panel} className="terminal-panel" aria-label="集成终端" style={{ flexBasis: `${panelHeight}px` }}>
-        <div className="terminal-resize-handle" role="separator" aria-orientation="horizontal" aria-label="调整终端高度"
+    return <section ref={panel} className="terminal-panel" aria-label="集成终端" style={{ height: `${panelHeight}px` }}>
+        <div ref={resizeHandle} className="terminal-resize-handle" role="separator" aria-orientation="horizontal" aria-label="调整终端高度"
             aria-valuemin={145} aria-valuemax={maxPanelHeight} aria-valuenow={Math.round(panelHeight)} tabIndex={0}
             onPointerDown={startPanelResize} onPointerMove={movePanelResize}
-            onPointerUp={finishPanelResize} onPointerCancel={finishPanelResize} onKeyDown={resizePanelFromKeyboard} />
+            onPointerUp={finishPanelResize} onPointerCancel={finishPanelResize} onLostPointerCapture={finishPanelResize} onKeyDown={resizePanelFromKeyboard} />
         <div className="terminal-toolbar">
             <div className="terminal-heading"><strong>终端</strong><span>{summary ? `${summary.shell} · ${title || summary.cwd}` : `${workspaceName} · ${workspacePath}`}</span></div>
             <div className="terminal-actions"><button disabled={!selectedText.trim()} onClick={() => onCopySelection(selectedText)}>插入到 Agent</button><button onClick={() => void restart()}>{exitCode === null ? "重启" : "重新启动"}</button><button className="terminal-close" onClick={onClose}>关闭</button></div>

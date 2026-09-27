@@ -120,6 +120,34 @@ export interface GitSnapshot {
     error?: string;
 }
 
+export interface GitCommitSummary {
+    hash: string;
+    subject: string;
+    author: string;
+    authoredAt: string;
+    decorations: string;
+    graph: string;
+    parents: string[];
+}
+
+export interface GitHistory {
+    currentBranch: string | null;
+    branches: string[];
+    dirty: boolean;
+    commits: GitCommitSummary[];
+}
+
+export interface GitCommitDetail {
+    hash: string;
+    parents: string[];
+    author: string;
+    authorEmail: string;
+    authoredAt: string;
+    message: string;
+    stats: string;
+    statsTruncated: boolean;
+}
+
 export interface GitFileDiff {
     path: string;
     staged: boolean;
@@ -337,6 +365,10 @@ export interface DesktopApi {
     renameSession(workspaceId: string, sessionId: string, title: string): Promise<SessionSummary>;
     deleteSession(workspaceId: string, sessionId: string): Promise<{ reviewRemoved: boolean }>;
     getGitSnapshot(workspaceId: string): Promise<GitSnapshot>;
+    getGitHistory(workspaceId: string): Promise<GitHistory>;
+    getGitCommitDetail(workspaceId: string, hash: string): Promise<GitCommitDetail>;
+    switchGitBranch(workspaceId: string, branch: string): Promise<void>;
+    createGitBranch(workspaceId: string, branch: string): Promise<void>;
     getGitDiff(workspaceId: string, path: string, staged: boolean): Promise<GitFileDiff>;
     stageGitPath(workspaceId: string, path: string): Promise<void>;
     unstageGitPath(workspaceId: string, path: string): Promise<void>;

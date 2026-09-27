@@ -1,7 +1,7 @@
 import { execFile, type ExecFileException } from "node:child_process";
 import { lstat } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
-import type { GitFileChange, GitFileDiff, GitSnapshot } from "../shared/contracts.js";
+import type { GitCommitDetail, GitCommitSummary, GitFileChange, GitFileDiff, GitHistory, GitSnapshot } from "../shared/contracts.js";
 import { DesktopServiceError } from "./workspace-store.js";
 
 const STATUS_OUTPUT_LIMIT = 8 * 1024 * 1024;
@@ -171,6 +171,115 @@ export async function readGitSnapshot(workspaceRoot: string): Promise<GitSnapsho
         return { isGit: true, branch, files: parsed.files, filesTruncated: parsed.truncated };
     } catch (error) {
         return { isGit: true, branch, files: [], error: gitErrorMessage(error) };
+    }
+}
+
+async function localBranches(workspaceRoot: string): Promise<string[]> {
+    const result = await runGit(workspaceRoot, ["for-each-ref", "--format=%(refname:short)", "refs/heads"], 128 * 1024);
+    return result.stdout.split(/\r?\n/).filter(Boolean).sort((left, right) => left.localeCompare(right));
+}
+
+export async function readGitHistory(workspaceRoot: string): Promise<GitHistory> {
+    const snapshot = await readGitSnapshot(workspaceRoot);
+    if (snapshot.error) throw new DesktopServiceError("GIT_UNAVAILABLE", snapshot.error);
+    if (!snapshot.isGit) throw new DesktopServiceError("NOT_A_GIT_REPOSITORY", "此工作区不是 Git 仓库。");
+    try {
+        const branches = await localBranches(workspaceRoot);
+        const refs = await runGit(workspaceRoot, ["for-each-ref", "--format=%(refname)", "refs/heads", "refs/remotes", "refs/tags"], 128 * 1024);
+        const head = await runGit(workspaceRoot, ["rev-parse", "--verify", "--quiet", "HEAD"], 128, true);
+        if (!refs.stdout.trim() && head.exitCode !== 0) {
+            return { currentBranch: snapshot.branch, branches, dirty: snapshot.files.length > 0 || snapshot.filesTruncated === true, commits: [] };
+        }
+        const result = await runGit(workspaceRoot, [
+            "log", "--all", ...(head.exitCode === 0 ? ["HEAD"] : []), "--graph", "--date-order", "--max-count=100",
+            "--format=%H%x1f%s%x1f%an%x1f%aI%x1f%D%x1f%P",
+        ], 512 * 1024);
+        const commits: GitCommitSummary[] = [];
+        for (const line of result.stdout.split(/\r?\n/)) {
+            const fields = line.split("\x1f");
+            if (fields.length !== 6) continue;
+            const hash = /[a-f0-9]{40,64}$/i.exec(fields[0])?.[0];
+            if (!hash) continue;
+            commits.push({
+                hash,
+                graph: fields[0].slice(0, -hash.length),
+                parents: fields[5].split(" ").filter(Boolean),
+                subject: fields[1],
+                author: fields[2],
+                authoredAt: fields[3],
+                decorations: fields[4],
+            });
+        }
+        return { currentBranch: snapshot.branch, branches, dirty: snapshot.files.length > 0 || snapshot.filesTruncated === true, commits };
+    } catch (error) {
+        throw mutationError(error);
+    }
+}
+
+export async function readGitCommitDetail(workspaceRoot: string, hash: string): Promise<GitCommitDetail> {
+    if (!/^[a-f0-9]{40,64}$/i.test(hash)) {
+        throw new DesktopServiceError("INVALID_GIT_COMMIT", "提交编号无效。");
+    }
+    try {
+        const [header, stats] = await Promise.all([
+            runGit(workspaceRoot, ["show", "--no-color", "-s", "--format=%H%x00%P%x00%an%x00%ae%x00%aI%x00%B", hash], 128 * 1024),
+            runGit(workspaceRoot, ["show", "--no-color", "--stat", "--format=", "--no-renames", "--root", hash], 256 * 1024),
+        ]);
+        const fields = header.stdout.split("\0");
+        return {
+            hash: fields[0].trim(),
+            parents: fields[1].trim().split(" ").filter(Boolean),
+            author: fields[2],
+            authorEmail: fields[3],
+            authoredAt: fields[4],
+            message: fields.slice(5).join("\0").trim(),
+            stats: stats.stdout.trim(),
+            statsTruncated: stats.truncated,
+        };
+    } catch (error) {
+        throw mutationError(error);
+    }
+}
+
+export async function switchGitBranch(workspaceRoot: string, branch: string): Promise<void> {
+    const snapshot = await readGitSnapshot(workspaceRoot);
+    if (snapshot.error) throw new DesktopServiceError("GIT_UNAVAILABLE", snapshot.error);
+    if (!snapshot.isGit) throw new DesktopServiceError("NOT_A_GIT_REPOSITORY", "此工作区不是 Git 仓库。");
+    if (snapshot.files.length > 0 || snapshot.filesTruncated) {
+        throw new DesktopServiceError("GIT_WORKTREE_DIRTY", "切换已有分支前，请先提交或清理当前工作区的改动。");
+    }
+    try {
+        if (!(await localBranches(workspaceRoot)).includes(branch)) {
+            throw new DesktopServiceError("GIT_BRANCH_NOT_FOUND", "所选本地分支已不存在，请刷新后重试。");
+        }
+        await runGit(workspaceRoot, ["switch", "--no-guess", branch], 256 * 1024, false, GIT_WRITE_TIMEOUT_MS);
+    } catch (error) {
+        if (error instanceof DesktopServiceError) throw error;
+        throw mutationError(error);
+    }
+}
+
+export async function createGitBranch(workspaceRoot: string, branch: string): Promise<void> {
+    const name = branch.trim();
+    if (!name || name.length > 120 || name.startsWith("-") || /[\u0000-\u001f\u007f]/.test(name)) {
+        throw new DesktopServiceError("INVALID_GIT_BRANCH", "分支名称无效。");
+    }
+    const snapshot = await readGitSnapshot(workspaceRoot);
+    if (snapshot.error) throw new DesktopServiceError("GIT_UNAVAILABLE", snapshot.error);
+    if (!snapshot.isGit) throw new DesktopServiceError("NOT_A_GIT_REPOSITORY", "此工作区不是 Git 仓库。");
+    try {
+        await runGit(workspaceRoot, ["check-ref-format", "--branch", name], 16 * 1024);
+    } catch {
+        throw new DesktopServiceError("INVALID_GIT_BRANCH", "Git 分支名称格式无效。");
+    }
+    try {
+        if ((await localBranches(workspaceRoot)).includes(name)) {
+            throw new DesktopServiceError("GIT_BRANCH_EXISTS", "该分支已存在，请换一个名称。");
+        }
+        await runGit(workspaceRoot, ["switch", "-c", name], 256 * 1024, false, GIT_WRITE_TIMEOUT_MS);
+    } catch (error) {
+        if (error instanceof DesktopServiceError) throw error;
+        throw mutationError(error);
     }
 }
 

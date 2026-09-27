@@ -215,6 +215,13 @@ export function registerIpcHandlers({ host, terminals, workspaceWatch, getWindow
         host.renameSession(workspaceId(workspace), sessionId(session), stringArg(title, "title", 120)));
     handle("desktop:delete-session", (workspace, session) => host.deleteSession(workspaceId(workspace), sessionId(session)));
     handle("desktop:git-snapshot", (workspace) => host.getGitSnapshot(workspaceId(workspace)));
+    handle("desktop:git-history", (workspace) => host.getGitHistory(workspaceId(workspace)));
+    handle("desktop:git-commit-detail", (workspace, hash) =>
+        host.getGitCommitDetail(workspaceId(workspace), stringArg(hash, "hash", 64)));
+    handle("desktop:git-switch-branch", (workspace, branch) =>
+        host.switchGitBranch(workspaceId(workspace), stringArg(branch, "branch", 120)));
+    handle("desktop:git-create-branch", (workspace, branch) =>
+        host.createGitBranch(workspaceId(workspace), stringArg(branch, "branch", 120)));
     handle("desktop:git-diff", (workspace, path, staged) => {
         if (typeof staged !== "boolean") throw new DesktopServiceError("INVALID_ARGUMENT", "Diff type is invalid.");
         return host.getGitDiff(workspaceId(workspace), stringArg(path, "path", 32_000), staged);

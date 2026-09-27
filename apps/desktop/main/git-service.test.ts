@@ -4,7 +4,8 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { commitGitChanges, readGitSnapshot, stageGitPath, unstageGitPath } from "./git-service.js";
+import { layoutGitGraph } from "../shared/git-graph-layout.js";
+import { commitGitChanges, createGitBranch, readGitCommitDetail, readGitHistory, readGitSnapshot, stageGitPath, switchGitBranch, unstageGitPath } from "./git-service.js";
 
 const gitAvailable = spawnSync("git", ["--version"], { stdio: "ignore", windowsHide: true }).status === 0;
 
@@ -104,6 +105,90 @@ test("commitGitChanges commits staged content only and rejects an empty staged a
         assert.equal(git(repository.root, "show", "HEAD:staged.txt"), "commit this");
         assert.equal(git(repository.root, "show", "HEAD:unstaged.txt"), "before");
         await assert.rejects(commitGitChanges(repository.root, "nothing to commit"), { code: "GIT_NOTHING_STAGED" });
+    } finally {
+        await repository.dispose();
+    }
+});
+
+test("Git history lists branches and commits, and commit detail includes the full message", { skip: !gitAvailable }, async () => {
+    const repository = await createRepository();
+    try {
+        await seedCommit(repository.root, { "tracked.txt": "before\n" });
+        git(repository.root, "commit", "--amend", "-q", "-m", "Initial subject", "-m", "Detail line");
+        const history = await readGitHistory(repository.root);
+        assert.deepEqual(history.branches, ["main"]);
+        assert.equal(history.currentBranch, "main");
+        assert.equal(history.commits[0]?.subject, "Initial subject");
+        assert.match(history.commits[0]?.graph ?? "", /\*/);
+
+        const detail = await readGitCommitDetail(repository.root, history.commits[0].hash);
+        assert.match(detail.message, /Detail line/);
+        assert.match(detail.stats, /tracked\.txt/);
+        await assert.rejects(readGitCommitDetail(repository.root, "HEAD"), { code: "INVALID_GIT_COMMIT" });
+    } finally {
+        await repository.dispose();
+    }
+});
+
+test("Git history exposes real parent links across branches", { skip: !gitAvailable }, async () => {
+    const repository = await createRepository();
+    try {
+        await seedCommit(repository.root, { "base.txt": "base\n" });
+        git(repository.root, "checkout", "-q", "-b", "feature");
+        await seedCommit(repository.root, { "feature.txt": "feature\n" });
+        git(repository.root, "checkout", "-q", "main");
+        await seedCommit(repository.root, { "main.txt": "main\n" });
+
+        const history = await readGitHistory(repository.root);
+        assert.equal(history.commits.length, 3);
+        const base = history.commits.find((commit) => commit.parents.length === 0);
+        assert.ok(base);
+        assert.equal(history.commits.filter((commit) => commit.parents.includes(base.hash)).length, 2);
+    } finally {
+        await repository.dispose();
+    }
+});
+
+test("Git graph lines match both parents of a real merge commit", { skip: !gitAvailable }, async () => {
+    const repository = await createRepository();
+    try {
+        await seedCommit(repository.root, { "base.txt": "base\n" });
+        git(repository.root, "checkout", "-q", "-b", "feature");
+        await seedCommit(repository.root, { "feature.txt": "feature\n" });
+        git(repository.root, "checkout", "-q", "main");
+        await seedCommit(repository.root, { "main.txt": "main\n" });
+        git(repository.root, "merge", "-q", "--no-ff", "feature", "-m", "Merge feature");
+
+        const history = await readGitHistory(repository.root);
+        const merge = history.commits.find((commit) => commit.subject === "Merge feature");
+        assert.ok(merge);
+        assert.equal(merge.parents.length, 2);
+        const edges = layoutGitGraph(history.commits).edges.filter((edge) => edge.child === merge.hash);
+        assert.deepEqual(edges.map((edge) => edge.parent), merge.parents);
+    } finally {
+        await repository.dispose();
+    }
+});
+
+test("branch creation keeps local edits while switching existing branches requires a clean worktree", { skip: !gitAvailable }, async () => {
+    const repository = await createRepository();
+    try {
+        await seedCommit(repository.root, { "tracked.txt": "before\n" });
+        await writeFile(join(repository.root, "tracked.txt"), "draft\n", "utf8");
+        await createGitBranch(repository.root, "feature/new-work");
+        assert.equal(git(repository.root, "branch", "--show-current"), "feature/new-work");
+        assert.equal(await readFile(join(repository.root, "tracked.txt"), "utf8"), "draft\n");
+        await assert.rejects(switchGitBranch(repository.root, "main"), { code: "GIT_WORKTREE_DIRTY" });
+        git(repository.root, "add", "tracked.txt");
+        git(repository.root, "commit", "-q", "-m", "Save draft");
+        const history = await readGitHistory(repository.root);
+        assert.equal(history.commits.length, 2);
+        assert.equal(history.currentBranch, "feature/new-work");
+        assert.equal(history.dirty, false);
+        await switchGitBranch(repository.root, "main");
+        assert.equal(git(repository.root, "branch", "--show-current"), "main");
+        assert.equal(await readFile(join(repository.root, "tracked.txt"), "utf8"), "before\n");
+        await assert.rejects(createGitBranch(repository.root, "bad name"), { code: "INVALID_GIT_BRANCH" });
     } finally {
         await repository.dispose();
     }

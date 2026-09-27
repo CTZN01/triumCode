@@ -100,9 +100,21 @@ the conversation composer stays visible.
 The context usage popover uses distinct color markers for each token metric.
 The changes panel colors file status letters by Git status and shows diff hunk
 headers in a muted GitHub-style palette.
+Click the branch name in the title bar to open a compact popover for switching
+between local branches or creating a new branch. Git Graph opens a larger window
+with the latest 100 local commits; selecting one shows its full message and file
+summary. The branch popover stays neutral; graph lines follow actual commit parent
+links, with color marking branch lanes. The commit list fills the window until a
+commit is selected; its detail pane can be closed to restore that space. Click outside the popover or press
+Escape to close it. Switching to an existing branch requires a clean worktree;
+creating a branch carries local edits into it. Managed isolated worktrees keep
+their assigned branch. The terminal and
+right inspector open and close with a short motion that respects reduced-motion
+settings. Resizing follows the pointer directly and settles without an animation.
+Code block headers use the interface font, while code stays monospaced.
 Common actions expose the visible `Ctrl+N` / `Ctrl+,` shortcuts on Windows and
 their `Command` equivalents on macOS. Inspector and review tabs support arrow,
-Home, and End navigation; dialogs keep keyboard focus inside, restore it when
+Home, and End navigation; modal dialogs keep keyboard focus inside, restore it when
 closed, and close with Escape. Approval actions, file selection, and collapsible
 diff hunks remain reachable by keyboard and expose their selected or status
 labels to assistive technology.

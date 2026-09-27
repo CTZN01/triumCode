@@ -1592,3 +1592,74 @@
 @media (prefers-color-scheme: light) {
     :root[data-theme="system"] .message.user .message-body { background: var(--hover); }
 }
+
+.titlebar { position: relative; z-index: 11; }
+.git-branch-picker { position: relative; display: flex; align-items: center; -webkit-app-region: no-drag; }
+.git-branch-toggle { max-width: 250px; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
+.git-branch-toggle:hover { border-color: var(--muted); color: var(--text); }
+.git-branch-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.git-branch-toggle > svg:last-child { flex: 0 0 auto; transform: rotate(90deg); }
+.git-history-dialog { position: absolute; top: calc(100% + 9px); right: 0; z-index: 12; width: min(430px, calc(100vw - 24px)); max-height: calc(100vh - 64px); display: flex; flex-direction: column; gap: 12px; padding: 16px; overflow-x: hidden; overflow-y: auto; border: 1px solid var(--border); border-radius: 13px; background: var(--surface); color: var(--text); box-shadow: 0 18px 48px #0006; -webkit-app-region: no-drag; }
+.git-history-head, .git-history-head > div:last-child, .git-history-section-title { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.git-history-head { flex: 0 0 auto; }
+.git-history-head small { color: var(--muted); font-size: 10px; letter-spacing: .1em; }
+.git-history-head h2 { margin: 2px 0; font-size: 16px; }
+.git-history-head p { max-width: 240px; overflow: hidden; margin: 0; color: var(--muted); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.git-history-head button, .git-create-branch button { min-height: 30px; padding: 0 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--field); color: var(--text); cursor: pointer; }
+.git-history-head button:hover:not(:disabled), .git-create-branch button:hover:not(:disabled) { background: var(--hover); }
+.git-history-head button:disabled, .git-create-branch button:disabled { opacity: .45; cursor: default; }
+.git-branch-section { flex: 0 0 auto; display: grid; gap: 7px; min-height: 0; }
+.git-history-section-title h3 { margin: 0; font-size: 13px; }
+.git-history-section-title span { color: var(--muted); font-size: 11px; }
+.git-branch-search, .git-create-branch input { width: 100%; min-width: 0; height: 30px; padding: 0 9px; border: 1px solid var(--border); border-radius: 6px; background: var(--field); color: var(--text); font-size: 12px; }
+.git-branch-search:focus-visible, .git-create-branch input:focus-visible { outline-color: var(--muted) !important; }
+.git-history-dialog button:focus-visible { outline-color: var(--muted) !important; }
+.git-branch-list { display: grid; gap: 4px; max-height: 112px; overflow: auto; }
+.git-branch-list button { display: flex; align-items: center; gap: 7px; min-width: 0; min-height: 28px; padding: 3px 7px; border: 1px solid transparent; border-radius: 5px; background: transparent; color: var(--text); cursor: pointer; text-align: left; }
+.git-branch-list button:hover:not(:disabled) { background: var(--hover); border-color: var(--border); }
+.git-branch-list button:disabled { opacity: .55; cursor: default; }
+.git-branch-list button.current { background: var(--field); opacity: 1; }
+.git-branch-list button span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 11px "Cascadia Code", Consolas, monospace; }
+.git-branch-list button strong { margin-left: auto; color: var(--muted); font-size: 10px; }
+.git-history-note { margin: 0; color: var(--muted); font-size: 11px; }
+.git-history-empty { display: block; padding: 10px; color: var(--muted); font-size: 12px; }
+.git-create-branch { flex: 0 0 auto; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 7px; padding-top: 10px; border-top: 1px solid var(--border); }
+.git-create-branch label { grid-column: 1 / -1; font-size: 12px; font-weight: 600; }
+.git-graph-open { display: flex; align-items: center; justify-content: space-between; width: 100%; padding: 12px; border: 1px solid var(--border); border-radius: 9px; background: var(--field); color: var(--text); cursor: pointer; text-align: left; }
+.git-graph-open:hover:not(:disabled) { background: var(--hover); }
+.git-graph-open:disabled { opacity: .55; cursor: default; }
+.git-graph-open span { display: grid; gap: 3px; }
+.git-graph-open strong { font-size: 13px; }
+.git-graph-open small, .git-graph-open svg { color: var(--muted); font-size: 11px; }
+.git-graph-scrim { z-index: 20; }
+.git-graph-dialog { width: min(1200px, 100%); height: min(820px, calc(100vh - 88px)); min-height: 420px; display: flex; flex-direction: column; gap: 10px; padding: 16px; overflow: hidden; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); color: var(--text); box-shadow: 0 24px 80px #0008; }
+.git-graph-dialog-head, .git-graph-dialog-head > div:last-child { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.git-graph-dialog-head small { color: var(--muted); font-size: 10px; letter-spacing: .1em; }
+.git-graph-dialog-head h2 { margin: 2px 0; font-size: 18px; }
+.git-graph-dialog-head p { margin: 0; color: var(--muted); font-size: 12px; }
+.git-graph-dialog-head button { min-height: 30px; padding: 0 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--field); color: var(--text); cursor: pointer; }
+.git-graph-dialog-head button:hover:not(:disabled) { background: var(--hover); }
+.git-graph-dialog-body { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; }
+.git-graph-dialog-body.with-detail { grid-template-columns: minmax(0, 1fr) minmax(250px, 31%); }
+.git-graph-list { min-width: 0; overflow: auto; border: 1px solid var(--border); border-radius: 7px; }
+.git-graph-columns, .git-graph-row { display: grid; grid-template-columns: var(--git-graph-width, 70px) minmax(210px, 1fr) 88px 90px 68px; align-items: center; gap: 6px; min-width: calc(390px + var(--git-graph-width, 70px)); }
+.git-graph-columns { position: sticky; top: 0; z-index: 1; min-height: 32px; padding: 0 9px; border-bottom: 1px solid var(--border); background: var(--field); color: var(--muted); font-size: 11px; }
+.git-graph-rows { position: relative; }
+.git-graph-lines { position: absolute; z-index: 1; top: 0; left: 9px; pointer-events: none; }
+.git-graph-row { width: 100%; height: 34px; padding: 0 9px; border: 0; border-bottom: 1px solid var(--border); background: transparent; color: var(--text); text-align: left; cursor: pointer; font-size: 12px; font-weight: 400; }
+.git-graph-row:hover { background: var(--hover); }
+.git-graph-row.selected { background: var(--hover); }
+.git-graph-subject { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.git-graph-subject em { display: inline-block; max-width: 45%; overflow: hidden; margin-right: 6px; padding: 2px 5px; border: 1px solid var(--border); border-radius: 4px; background: var(--field); color: var(--muted); font: 10px "Cascadia Code", Consolas, monospace; text-overflow: ellipsis; vertical-align: middle; }
+.git-graph-subject em.current { color: var(--text); }
+.git-graph-row time, .git-graph-row code { color: var(--muted); font-size: 11px; }
+.git-graph-author { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.git-commit-detail { min-width: 0; display: flex; flex-direction: column; gap: 7px; overflow: auto; padding: 12px; border: 1px solid var(--border); border-radius: 7px; background: var(--field); font-size: 12px; }
+.git-commit-detail-close { align-self: flex-end; padding: 3px 7px; border: 1px solid var(--border); border-radius: 5px; background: var(--surface); color: var(--muted); cursor: pointer; font-size: 11px; }
+.git-commit-detail strong { font-size: 13px; overflow-wrap: anywhere; }
+.git-commit-detail code { color: var(--muted); overflow-wrap: anywhere; font-size: 10px; }
+.git-commit-detail p { margin: 0; color: var(--muted); }
+.git-commit-detail time, .git-commit-detail small { color: var(--muted); }
+.git-commit-detail pre { max-height: 170px; overflow: auto; margin: 0; padding: 8px; border: 1px solid var(--border); border-radius: 5px; background: var(--surface); color: var(--text); font: 10px/1.5 "Cascadia Code", Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+@media (max-width: 1020px) { .topbar-chip.git-branch-toggle { display: inline-flex; max-width: 150px; } }
+@media (max-width: 850px) { .git-graph-dialog-body.with-detail { grid-template-columns: minmax(0, 1fr); } .git-commit-detail { max-height: 190px; } }
