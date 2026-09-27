@@ -344,7 +344,6 @@ kbd { font-family: inherit; font-size: 10px; color: #a1a5b2; background: #1c1e24
 .git-commit-box small { align-self: center; color: #777c88; font-size: 8px; line-height: 1.45; }
 .primary-button.compact { min-height: 27px; padding: 0 8px; font-size: 9px; }
 .git-mutation-message { flex: 0 0 auto; grid-column: 1 / -1; overflow-wrap: anywhere; color: #a7c6ae; font-size: 8px; line-height: 1.5; }
-.git-stage-note { flex: 0 0 auto; padding: 6px 12px; color: #8b8f9a; font-size: 8px; line-height: 1.45; }
 .git-write-button { flex: 0 0 auto; min-height: 23px; padding: 0 7px; border: 1px solid #49435f; border-radius: 5px; background: #28253a; color: #d8d1ff; font-size: 9px; cursor: pointer; }
 .git-write-button:hover:not(:disabled) { background: #363149; }
 .git-write-button:disabled { opacity: .4; cursor: default; }

@@ -297,7 +297,6 @@ export function GitChangesPanel({
                                     {selectedFile && view === "worktree" && (selectedFile.unstaged || selectedFile.untracked) && <button className="git-write-button" onClick={() => void stageSelected()} disabled={busy || gitActionBusy}>{gitActionBusy ? "处理中..." : "暂存文件"}</button>}
                                     {selectedFile && view === "worktree" && selectedFile.staged && <button className="git-write-button" onClick={() => void unstageSelected()} disabled={busy || gitActionBusy}>{gitActionBusy ? "处理中..." : "取消暂存"}</button>}
                                 </div>
-                                {selectedFile && view === "worktree" && (selectedFile.unstaged || selectedFile.untracked) && <div className="git-stage-note">暂存会将此文件当前全部内容放入 Git 暂存区。</div>}
                                 {gitActionMessage && view === "worktree" && <div className="git-mutation-message" role="status">{gitActionMessage}</div>}
                                 {restoreConfirm && selectedReviewFile && <div className="review-restore-confirm">
                                     <strong>确认还原 {selectedReviewFile.path}？</strong>

@@ -852,9 +852,6 @@
 :root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .git-mutation-message {
     color: var(--text);
 }
-:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .git-stage-note {
-    color: var(--muted);
-}
 :root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .git-write-button {
     border: 1px solid var(--border);
     background: var(--surface);

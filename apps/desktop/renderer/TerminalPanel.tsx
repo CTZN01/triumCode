@@ -187,6 +187,6 @@ export function TerminalPanel({
             <div className="terminal-actions"><button disabled={!selectedText.trim()} onClick={() => onCopySelection(selectedText)}>插入到 Agent</button><button onClick={() => void restart()}>{exitCode === null ? "重启" : "重新启动"}</button><button className="terminal-close" onClick={onClose}>关闭</button></div>
         </div>
         <div className="terminal-surface" ref={surface} style={{ background: terminalPalettes[theme].background }} />
-        <div className="terminal-status-row"><span>当前终端固定绑定此工作区；输入的命令由你直接运行，独立于 Agent。</span>{error && <span className="terminal-error" role="alert">{error}</span>}</div>
+        {error && <div className="terminal-status-row"><span className="terminal-error" role="alert">{error}</span></div>}
     </section>;
 }
