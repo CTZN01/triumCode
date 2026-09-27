@@ -81,6 +81,13 @@ function readFontScale(): number {
     } catch { return 1.1; }
 }
 
+function readInspectorOpen(): boolean {
+    try {
+        const saved = JSON.parse(window.localStorage.getItem(PANEL_WIDTHS_STORAGE_KEY) ?? "null") as { inspectorOpen?: unknown } | null;
+        return saved?.inspectorOpen !== false;
+    } catch { return true; }
+}
+
 function displayError(error: unknown): string {
     return error instanceof Error ? error.message : String(error);
 }
@@ -183,11 +190,16 @@ function formatTokenCount(value: number): string {
     return Math.round(value).toLocaleString("en-US");
 }
 
+function hasMissingPromptUsage(usage: AgentUsage): boolean {
+    return usage.outputAvailable && usage.output > 0
+        && usage.input + usage.cacheRead + usage.cacheWrite === 0;
+}
+
 function usageDetails(usage: AgentUsage): string {
     const entries = ["本会话累计用量（provider 实际报告）"];
-    if (usage.inputAvailable) entries.push(`未缓存输入：${usage.input.toLocaleString("en-US")} tokens`);
-    if (usage.cacheReadAvailable) entries.push(`缓存读取：${usage.cacheRead.toLocaleString("en-US")} tokens`);
-    if (usage.cacheWriteAvailable) entries.push(`缓存写入：${usage.cacheWrite.toLocaleString("en-US")} tokens`);
+    if (usage.inputAvailable && !hasMissingPromptUsage(usage)) entries.push(`未缓存输入：${usage.input.toLocaleString("en-US")} tokens`);
+    if (usage.cacheReadAvailable && !hasMissingPromptUsage(usage)) entries.push(`缓存读取：${usage.cacheRead.toLocaleString("en-US")} tokens`);
+    if (usage.cacheWriteAvailable && !hasMissingPromptUsage(usage)) entries.push(`缓存写入：${usage.cacheWrite.toLocaleString("en-US")} tokens`);
     if (usage.outputAvailable) entries.push(`输出：${usage.output.toLocaleString("en-US")} tokens`);
     return entries.join("\n");
 }
@@ -322,7 +334,7 @@ function MessageBody({ text }: { text: string }) {
 
 const MemoMessageBody = memo(MessageBody);
 
-function Icon({ name, size = 16 }: { name: "plus" | "folder" | "settings" | "search" | "more" | "close" | "trash" | "copy" | "check" | "thumb-up" | "thumb-down" | "arrow" | "spark" | "chevron" | "branch" | "alert"; size?: number }) {
+function Icon({ name, size = 16 }: { name: "plus" | "folder" | "settings" | "search" | "more" | "close" | "trash" | "copy" | "check" | "thumb-up" | "thumb-down" | "arrow" | "spark" | "chevron" | "branch" | "alert" | "panel-right"; size?: number }) {
     const paths: Record<string, ReactNode> = {
         plus: <><path d="M12 5v14" /><path d="M5 12h14" /></>,
         folder: <><path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" /></>,
@@ -340,6 +352,7 @@ function Icon({ name, size = 16 }: { name: "plus" | "folder" | "settings" | "sea
         chevron: <path d="m9 18 6-6-6-6" />,
         branch: <><circle cx="7" cy="5" r="2" /><circle cx="17" cy="19" r="2" /><circle cx="17" cy="7" r="2" /><path d="M7 7v4a4 4 0 0 0 4 4h4a2 2 0 0 0 2-2V9" /><path d="M7 3v0" /></>,
         alert: <><circle cx="12" cy="12" r="9" /><path d="M12 7.5v5.5" /><path d="M12 16.5h.01" /></>,
+        "panel-right": <><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M15 4v16" /></>,
     };
     return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name]}</svg>;
 }
@@ -441,6 +454,7 @@ export function App() {
     const [error, setError] = useState("");
     const [starting, setStarting] = useState(true);
     const [panelWidths, setPanelWidths] = useState(readPanelWidths);
+    const [inspectorOpen, setInspectorOpen] = useState(readInspectorOpen);
     const [theme, setTheme] = useState<AppTheme>(readThemePreference);
     const [fontScale, setFontScale] = useState(readFontScale);
     const [quickSettingsSaving, setQuickSettingsSaving] = useState(false);
@@ -457,6 +471,7 @@ export function App() {
     const stickToBottom = useRef(true);
     const historyCompacted = useRef(false);
     const scrollAnchor = useRef<{ id: string; top: number } | null>(null);
+    const pendingLatestScroll = useRef<string | null>(null);
     const activityList = useRef<HTMLDivElement | null>(null);
     const composerInput = useRef<HTMLTextAreaElement | null>(null);
     const attachmentInput = useRef<HTMLInputElement | null>(null);
@@ -507,11 +522,11 @@ export function App() {
 
     useEffect(() => {
         const timer = window.setTimeout(() => {
-            try { window.localStorage.setItem(PANEL_WIDTHS_STORAGE_KEY, JSON.stringify({ ...panelWidths, theme, fontScale })); }
+            try { window.localStorage.setItem(PANEL_WIDTHS_STORAGE_KEY, JSON.stringify({ ...panelWidths, theme, fontScale, inspectorOpen })); }
             catch { /* panel width preferences are optional */ }
         }, 180);
         return () => window.clearTimeout(timer);
-    }, [panelWidths, theme, fontScale]);
+    }, [panelWidths, theme, fontScale, inspectorOpen]);
 
     const confirmInApp = useCallback((message: string, confirmLabel = "确定", danger = false): Promise<boolean> => {
         return new Promise((resolve) => { setPendingDialog({ kind: "confirm", message, confirmLabel, danger, resolve }); });
@@ -604,6 +619,7 @@ export function App() {
 
     const selectRightPanel = (panel: "activity" | "details" | "changes"): void => {
         setRightPanel(panel);
+        setInspectorOpen(true);
         if (panel === "changes" && activeWorkspace?.available) {
             void refreshGitSnapshot(activeWorkspace.id);
             if (activeSession) void refreshCodeReview(activeWorkspace.id, activeSession.id);
@@ -706,6 +722,7 @@ export function App() {
         pendingAssistantDelta.current = null;
         resetMessageHistory(opened.messageCursor);
         activeRef.current = { workspaceId, sessionId };
+        pendingLatestScroll.current = key;
         setActiveSession(opened.session);
         setSessionRoute(opened.route);
         setSessionCredentialState(routeCredentialState);
@@ -856,6 +873,7 @@ export function App() {
         await openWorkspace(task.workspace, true, task.session.id);
         if (activeRef.current.workspaceId !== task.workspace.id || activeRef.current.sessionId !== task.session.id) return;
         setRightPanel("activity");
+        setInspectorOpen(true);
         setActivityFocusId(task.latestActivityId);
     }, [openWorkspace]);
 
@@ -1242,6 +1260,20 @@ export function App() {
     useLayoutEffect(() => {
         const container = conversationRef.current;
         if (!container) return;
+        const key = `${activeRef.current.workspaceId}:${activeRef.current.sessionId}`;
+        if (pendingLatestScroll.current === key) {
+            pendingLatestScroll.current = null;
+            stickToBottom.current = true;
+            const scrollToLatest = () => {
+                if (conversationRef.current !== container
+                    || `${activeRef.current.workspaceId}:${activeRef.current.sessionId}` !== key) return;
+                container.scrollTo({ top: container.scrollHeight, behavior: "instant" });
+                stickToBottom.current = true;
+            };
+            scrollToLatest();
+            const frame = requestAnimationFrame(scrollToLatest);
+            return () => cancelAnimationFrame(frame);
+        }
         const anchor = scrollAnchor.current;
         if (anchor) {
             scrollAnchor.current = null;
@@ -1255,8 +1287,13 @@ export function App() {
 
     const handleConversationScroll = (event: UIEvent<HTMLDivElement>) => {
         const container = event.currentTarget;
-        stickToBottom.current = container.scrollHeight - container.scrollTop - container.clientHeight < 80;
-        if (container.scrollTop < 180 && messageCursor !== null) void loadOlderMessages();
+        const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
+        stickToBottom.current = distanceFromBottom < 80;
+        const openingLatest = pendingLatestScroll.current
+            === `${activeRef.current.workspaceId}:${activeRef.current.sessionId}`;
+        if (!openingLatest && container.scrollTop < 180 && distanceFromBottom > 1 && messageCursor !== null) {
+            void loadOlderMessages();
+        }
         if (!stickToBottom.current || messages.length <= 160 || olderRequestPending.current) return;
         if (historyCompacted.current) {
             if (!busy && !runId) void refreshRecentMessages();
@@ -1649,9 +1686,12 @@ export function App() {
 
     if (starting) return <div className="launch-screen"><span>正在启动 TriumCode...</span></div>;
 
-    return <div ref={appShellRef} className={`app-shell ${activeWorkspace ? "" : "no-inspector"}`}
+    return <div ref={appShellRef} className={`app-shell ${activeWorkspace && inspectorOpen ? "" : "no-inspector"}`}
         style={{ "--sidebar-width": `${panelWidths.sidebar}px`, "--inspector-width": `${panelWidths.inspector}px` } as CSSProperties}>
-        <header className="titlebar" onDoubleClick={() => void window.desktop.toggleWindowMaximize()}>
+        <header className="titlebar" onDoubleClick={(event) => {
+            if ((event.target as HTMLElement).closest("button")) return;
+            void window.desktop.toggleWindowMaximize();
+        }}>
             <span className="brand-name">TriumCode</span>
             <div className="breadcrumbs">
                 {activeWorkspace ? <><span className="crumb-project">{activeWorkspace.name}</span><Icon name="chevron" size={14} /><span className="crumb-session">{activeSession?.title || "新会话"}</span></> : <span className="crumb-session">桌面工作区</span>}
@@ -1660,7 +1700,7 @@ export function App() {
                 {activeWorkspace?.branch && <span className="topbar-chip"><span className="git-branch-icon"><Icon name="branch" size={15} /></span>{activeWorkspace.branch}</span>}
                 <button className={`topbar-chip task-center-toggle ${taskCenterOpen ? "selected" : ""}`} onClick={() => setTaskCenterOpen(true)} title="查看所有工作区的任务">任务中心</button>
                 <button className={`topbar-chip terminal-toggle ${terminalOpen ? "selected" : ""}`} onClick={toggleTerminal} disabled={!terminalOpen && !activeWorkspace?.available} title={terminalOpen ? "关闭工作区终端" : "打开绑定当前工作区的 PowerShell 终端"}>终端</button>
-                <button className={`icon-button ${rightPanel === "activity" ? "panel-selected" : ""}`} title="任务活动" aria-label="切换任务活动面板" aria-pressed={rightPanel === "activity"} onClick={() => selectRightPanel(rightPanel === "activity" ? "details" : "activity")}><span className="activity-bars"><i /><i /><i /></span></button>
+                {activeWorkspace && <button className={`icon-button inspector-toggle ${inspectorOpen ? "panel-selected" : ""}`} title={inspectorOpen ? "收起右侧面板" : "展开右侧面板"} aria-label={inspectorOpen ? "收起右侧面板" : "展开右侧面板"} aria-expanded={inspectorOpen} onClick={() => setInspectorOpen((current) => !current)}><Icon name="panel-right" size={17} /></button>}
             </div>
         </header>
         <div className="app-columns">
@@ -1791,11 +1831,11 @@ export function App() {
                                     <div className="context-popover-bar"><span style={{ width: `${Math.min(100, Math.round(contextUsage.utilization * 100))}%` }} /></div>
                                     <div className="context-popover-rows">
                                         {tokenUsage ? <>
-                                            <div><span>输入 tokens</span><strong>{tokenUsage.inputAvailable ? formatTokenCount(tokenUsage.input) : "暂无数据"}</strong></div>
-                                            <div><span>输出 tokens</span><strong>{tokenUsage.outputAvailable ? formatTokenCount(tokenUsage.output) : "暂无数据"}</strong></div>
-                                            <div><span>缓存读取</span><strong>{tokenUsage.cacheReadAvailable ? formatTokenCount(tokenUsage.cacheRead) : "暂无数据"}</strong></div>
-                                            <div><span>缓存写入</span><strong>{tokenUsage.cacheWriteAvailable ? formatTokenCount(tokenUsage.cacheWrite) : "暂无数据"}</strong></div>
-                                            <div><span>平均缓存命中率</span><strong>{Math.round(tokenUsage.cacheHitRate * 100)}%</strong></div>
+                                            <div className="context-metric metric-input"><span className="context-metric-label">输入 tokens</span><strong>{tokenUsage.inputAvailable && !hasMissingPromptUsage(tokenUsage) ? formatTokenCount(tokenUsage.input) : "暂无数据"}</strong></div>
+                                            <div className="context-metric metric-output"><span className="context-metric-label">输出 tokens</span><strong>{tokenUsage.outputAvailable ? formatTokenCount(tokenUsage.output) : "暂无数据"}</strong></div>
+                                            <div className="context-metric metric-cache-read"><span className="context-metric-label">缓存读取</span><strong>{tokenUsage.cacheReadAvailable && !hasMissingPromptUsage(tokenUsage) ? formatTokenCount(tokenUsage.cacheRead) : "暂无数据"}</strong></div>
+                                            <div className="context-metric metric-cache-write"><span className="context-metric-label">缓存写入</span><strong>{tokenUsage.cacheWriteAvailable && !hasMissingPromptUsage(tokenUsage) ? formatTokenCount(tokenUsage.cacheWrite) : "暂无数据"}</strong></div>
+                                            <div className="context-metric metric-cache-hit"><span className="context-metric-label">平均缓存命中率</span><strong>{tokenUsage.cacheReadAvailable && tokenUsage.input + tokenUsage.cacheRead + tokenUsage.cacheWrite > 0 ? `${Math.round(tokenUsage.cacheHitRate * 100)}%` : "暂无数据"}</strong></div>
                                         </> : <div><span>发送任务后显示 token 用量。</span></div>}
                                     </div>
                                     <small className="context-popover-note">仅统计当前会话的模型窗口占用；服务商账户额度以账单为准。</small>
@@ -1868,11 +1908,14 @@ export function App() {
             onPointerUp={finishPanelResize} onPointerCancel={finishPanelResize}
             onKeyDown={(event) => resizePanelFromKeyboard("inspector", event)} />
 
-        {activeWorkspace && <aside className="inspector" aria-label="工作区检查面板">
-            <div className="inspector-tabs" role="tablist" aria-label="检查面板" onKeyDown={handleTabListKeyDown}>
-                <button id="inspector-tab-activity" role="tab" aria-selected={rightPanel === "activity"} aria-controls="inspector-panel-content" tabIndex={rightPanel === "activity" ? 0 : -1} className={rightPanel === "activity" ? "selected" : ""} onClick={() => selectRightPanel("activity")}>任务活动{activities.length > 0 && <span>{activities.length}</span>}</button>
-                <button id="inspector-tab-changes" role="tab" aria-selected={rightPanel === "changes"} aria-controls="inspector-panel-content" tabIndex={rightPanel === "changes" ? 0 : -1} className={rightPanel === "changes" ? "selected" : ""} onClick={() => selectRightPanel("changes")}>改动{reviewView?.workspaceId === activeWorkspace.id && reviewView.sessionId === activeSession?.id && reviewView.snapshot.files.length > 0 ? <span>{reviewView.snapshot.files.length}</span> : gitView?.workspaceId === activeWorkspace.id && gitView.snapshot.isGit && gitView.snapshot.files.length > 0 && <span>{gitView.snapshot.files.length}</span>}</button>
-                <button id="inspector-tab-details" role="tab" aria-selected={rightPanel === "details"} aria-controls="inspector-panel-content" tabIndex={rightPanel === "details" ? 0 : -1} className={rightPanel === "details" ? "selected" : ""} onClick={() => selectRightPanel("details")}>会话信息</button>
+        {activeWorkspace && inspectorOpen && <aside className="inspector" aria-label="工作区检查面板">
+            <div className="inspector-tabs">
+                <div className="inspector-tablist" role="tablist" aria-label="检查面板" onKeyDown={handleTabListKeyDown}>
+                    <button id="inspector-tab-activity" role="tab" aria-selected={rightPanel === "activity"} aria-controls="inspector-panel-content" tabIndex={rightPanel === "activity" ? 0 : -1} className={rightPanel === "activity" ? "selected" : ""} onClick={() => selectRightPanel("activity")}>任务活动{activities.length > 0 && <span>{activities.length}</span>}</button>
+                    <button id="inspector-tab-changes" role="tab" aria-selected={rightPanel === "changes"} aria-controls="inspector-panel-content" tabIndex={rightPanel === "changes" ? 0 : -1} className={rightPanel === "changes" ? "selected" : ""} onClick={() => selectRightPanel("changes")}>改动{reviewView?.workspaceId === activeWorkspace.id && reviewView.sessionId === activeSession?.id && reviewView.snapshot.files.length > 0 ? <span>{reviewView.snapshot.files.length}</span> : gitView?.workspaceId === activeWorkspace.id && gitView.snapshot.isGit && gitView.snapshot.files.length > 0 && <span>{gitView.snapshot.files.length}</span>}</button>
+                    <button id="inspector-tab-details" role="tab" aria-selected={rightPanel === "details"} aria-controls="inspector-panel-content" tabIndex={rightPanel === "details" ? 0 : -1} className={rightPanel === "details" ? "selected" : ""} onClick={() => selectRightPanel("details")}>会话信息</button>
+                </div>
+                <button className="inspector-collapse" title="收起右侧面板" aria-label="收起右侧面板" onClick={() => setInspectorOpen(false)}><Icon name="chevron" size={15} /></button>
             </div>
             <div id="inspector-panel-content" className="inspector-panel-content" role="tabpanel" aria-labelledby={`inspector-tab-${rightPanel}`} tabIndex={0}>
             {rightPanel === "changes" ? activeWorkspace.available
@@ -1932,7 +1975,7 @@ export function App() {
                 <div className="detail-card"><span className="detail-label">当前分支</span><strong>{activeWorkspace.branch || "非 Git 项目"}</strong></div>
                 <div className="detail-card"><span className="detail-label">模型</span><strong>{sessionRoute?.modelPreset || sessionRoute?.model || "未配置"}</strong><small>{sessionRoute ? `${sessionRoute.model} · ${sessionRoute.protocol} · 思考 ${sessionRoute.effort}` : ""}</small></div>
                 {contextUsage && <div className="detail-card"><span className="detail-label">上下文</span><strong>{Math.round(contextUsage.utilization * 100)}% 已使用</strong><small>剩余约 {formatTokenCount(contextUsage.remainingTokens)} tokens · 模型窗口 {formatTokenCount(contextUsage.contextWindow)}</small></div>}
-                {tokenUsage && (tokenUsage.inputAvailable || tokenUsage.outputAvailable) && <div className="detail-card"><span className="detail-label">Token 用量</span><strong>{[tokenUsage.inputAvailable ? `输入 ${formatTokenCount(tokenUsage.input)}` : "", tokenUsage.outputAvailable ? `输出 ${formatTokenCount(tokenUsage.output)}` : ""].filter(Boolean).join(" · ")}</strong><small>{usageDetails(tokenUsage)}</small></div>}
+                {tokenUsage && (tokenUsage.inputAvailable || tokenUsage.outputAvailable) && <div className="detail-card"><span className="detail-label">Token 用量</span><strong>{[tokenUsage.inputAvailable && !hasMissingPromptUsage(tokenUsage) ? `输入 ${formatTokenCount(tokenUsage.input)}` : "", tokenUsage.outputAvailable ? `输出 ${formatTokenCount(tokenUsage.output)}` : ""].filter(Boolean).join(" · ")}</strong><small>{usageDetails(tokenUsage)}</small></div>}
                 <div className="detail-card"><span className="detail-label">权限模式</span><strong>{permissionMode === "plan" ? "计划模式" : permissionMode === "bypassPermissions" ? "完全访问" : permissionMode === "desktopAcceptEdits" ? "自动接受编辑" : "默认 - 逐项确认"}</strong><small>{permissionMode === "plan" ? "仅允许读取、提问和写计划文件。" : permissionMode === "bypassPermissions" ? "工具操作自动运行；用户或项目的明确拒绝规则仍然生效。" : permissionMode === "desktopAcceptEdits" ? "文件编辑自动允许；其他操作仍按规则确认。" : "读取自动允许；文件写入和命令执行需审批。"}</small></div>
                 <div className="detail-card grant-card"><span className="detail-label">本会话授权</span>{permissionGrants.length === 0
                     ? <small>当前没有本会话授权。</small>
@@ -2199,7 +2242,7 @@ function SettingsDialog({
             <form onSubmit={(event) => void saveSettings(event)}>
                 {section === "general" && <div className="settings-page"><section className="settings-section"><h3>权限</h3><div className="settings-list"><div className="settings-row stacked"><div><strong>当前会话权限</strong><small>运行任务前可在输入区随时调整；运行中不可切换。</small></div><div className="settings-permission-options">{([{"mode": "desktopDefault", "label": "默认", "hint": "逐项确认"}, {"mode": "desktopAcceptEdits", "label": "接受编辑", "hint": "命令仍需确认"}, {"mode": "bypassPermissions", "label": "完全访问", "hint": "工具免审批"}] as const).map((choice) => <button type="button" key={choice.mode} className={permissionMode === choice.mode ? "selected" : ""} disabled={permissionMode === "plan"} aria-pressed={permissionMode === choice.mode} onClick={() => onPermissionModeChanged(choice.mode)}><strong>{choice.label}</strong><small>{choice.hint}</small></button>)}</div></div></div></section><section className="settings-section"><h3>任务</h3><div className="settings-list"><label className="settings-row"><span><strong>同时运行上限</strong><small>不同工作区可并行，同一工作树一次运行一个任务。</small></span><select value={form.maxParallelRuns} onChange={(event) => update("maxParallelRuns", Number(event.target.value))}>{Array.from({ length: 8 }, (_, index) => index + 1).map((count) => <option key={count} value={count}>{count} 个任务</option>)}</select></label></div><div className="settings-actions settings-page-actions"><button className="primary-button" disabled={saving}>{saving ? "保存中..." : saved ? "已保存" : "保存设置"}</button></div></section></div>}
                 {section === "appearance" && <section className="settings-section" aria-labelledby="appearance-heading"><h3 id="appearance-heading">外观</h3><div className="settings-list"><div className="settings-row stacked"><div><strong>应用主题</strong><small>跟随系统会在系统外观变化时自动切换。</small></div><div className="appearance-options" role="group" aria-label="外观主题">{(["system", "light", "dark"] as const).map((option) => <button key={option} type="button" className={theme === option ? "selected" : ""} aria-pressed={theme === option} onClick={() => onThemeChanged(option)}>{option === "system" ? "跟随系统" : option === "light" ? "浅色" : "深色"}</button>)}</div></div><label className="settings-row"><span><strong>界面字号</strong><small>同时调整对话、导航和面板文字。</small></span><select aria-label="界面字号" value={fontScale} onChange={(event) => onFontScaleChanged(Number(event.target.value))}><option value={1}>标准</option><option value={1.1}>较大</option><option value={1.2}>最大</option></select></label></div></section>}
-                {section === "usage" && <section className="settings-section usage-section"><h3>当前会话用量</h3>{usage ? <><div className="usage-grid"><div><span>输入 tokens</span><strong>{usage.inputAvailable ? usage.input.toLocaleString("en-US") : "暂无数据"}</strong></div><div><span>输出 tokens</span><strong>{usage.outputAvailable ? usage.output.toLocaleString("en-US") : "暂无数据"}</strong></div><div><span>缓存读取</span><strong>{usage.cacheReadAvailable ? usage.cacheRead.toLocaleString("en-US") : "暂无数据"}</strong></div><div><span>缓存写入</span><strong>{usage.cacheWriteAvailable ? usage.cacheWrite.toLocaleString("en-US") : "暂无数据"}</strong></div></div>{contextUsage && <div className="usage-context"><span>上下文已用 {Math.round(contextUsage.utilization * 100)}%</span><progress value={contextUsage.utilization} max={1} /></div>}</> : <p>打开会话后可查看模型返回的用量。</p>}<p>这些数字仅统计当前会话；服务商账户限额和剩余额度以服务商账单为准。</p></section>}
+                {section === "usage" && <section className="settings-section usage-section"><h3>当前会话用量</h3>{usage ? <><div className="usage-grid"><div><span>输入 tokens</span><strong>{usage.inputAvailable && !hasMissingPromptUsage(usage) ? usage.input.toLocaleString("en-US") : "暂无数据"}</strong></div><div><span>输出 tokens</span><strong>{usage.outputAvailable ? usage.output.toLocaleString("en-US") : "暂无数据"}</strong></div><div><span>缓存读取</span><strong>{usage.cacheReadAvailable && !hasMissingPromptUsage(usage) ? usage.cacheRead.toLocaleString("en-US") : "暂无数据"}</strong></div><div><span>缓存写入</span><strong>{usage.cacheWriteAvailable && !hasMissingPromptUsage(usage) ? usage.cacheWrite.toLocaleString("en-US") : "暂无数据"}</strong></div></div>{contextUsage && <div className="usage-context"><span>上下文已用 {Math.round(contextUsage.utilization * 100)}%</span><progress value={contextUsage.utilization} max={1} /></div>}</> : <p>打开会话后可查看模型返回的用量。</p>}<p>这些数字仅统计当前会话；服务商账户限额和剩余额度以服务商账单为准。</p></section>}
                 {section === "model" && <><section className="settings-section" aria-labelledby="model-heading"><h3 id="model-heading">模型与连接</h3>
                 <div className="settings-form-grid">
                     <label className="field wide"><span>命名模型预设</span><select value={form.modelPreset ?? ""} onChange={(event) => chooseModelPreset(event.target.value)} disabled={modelPresets.length === 0}><option value="">自定义配置</option>{modelPresets.map((preset) => <option key={preset.name} value={preset.name}>{preset.name}</option>)}</select>

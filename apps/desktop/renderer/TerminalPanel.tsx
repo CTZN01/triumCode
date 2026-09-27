@@ -50,7 +50,42 @@ export function TerminalPanel({
     const [exitCode, setExitCode] = useState<number | null>(null);
     const [selectedText, setSelectedText] = useState("");
     const [generation, setGeneration] = useState(0);
+    const maxPanelHeight = Math.max(145, Math.floor(window.innerHeight * 0.72));
+    const defaultPanelHeight = Math.min(maxPanelHeight, Math.min(560, Math.max(320, Math.round(window.innerHeight * 0.45))));
+    const [panelHeight, setPanelHeight] = useState(defaultPanelHeight);
+    const panel = useRef<HTMLElement | null>(null);
+    const resizeStart = useRef<{ pointerId: number; y: number; height: number } | null>(null);
     const exited = useRef(false);
+    const clampPanelHeight = (height: number): number => Math.max(145, Math.min(maxPanelHeight, height));
+
+    const startPanelResize = (event: React.PointerEvent<HTMLDivElement>) => {
+        if (event.button !== 0 || !panel.current) return;
+        event.preventDefault();
+        resizeStart.current = {
+            pointerId: event.pointerId,
+            y: event.clientY,
+            height: panel.current.getBoundingClientRect().height,
+        };
+        event.currentTarget.setPointerCapture(event.pointerId);
+    };
+
+    const movePanelResize = (event: React.PointerEvent<HTMLDivElement>) => {
+        const start = resizeStart.current;
+        if (!start || start.pointerId !== event.pointerId) return;
+        setPanelHeight(clampPanelHeight(start.height + start.y - event.clientY));
+    };
+
+    const finishPanelResize = (event: React.PointerEvent<HTMLDivElement>) => {
+        if (resizeStart.current?.pointerId !== event.pointerId) return;
+        resizeStart.current = null;
+        if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+    };
+
+    const resizePanelFromKeyboard = (event: React.KeyboardEvent<HTMLDivElement>) => {
+        if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+        event.preventDefault();
+        setPanelHeight((height) => clampPanelHeight(height + (event.key === "ArrowUp" ? 16 : -16)));
+    };
 
     useEffect(() => {
         const root = surface.current;
@@ -142,12 +177,16 @@ export function TerminalPanel({
         setGeneration((current) => current + 1);
     };
 
-    return <section className="terminal-panel" aria-label="集成终端">
+    return <section ref={panel} className="terminal-panel" aria-label="集成终端" style={{ flexBasis: `${panelHeight}px` }}>
+        <div className="terminal-resize-handle" role="separator" aria-orientation="horizontal" aria-label="调整终端高度"
+            aria-valuemin={145} aria-valuemax={maxPanelHeight} aria-valuenow={Math.round(panelHeight)} tabIndex={0}
+            onPointerDown={startPanelResize} onPointerMove={movePanelResize}
+            onPointerUp={finishPanelResize} onPointerCancel={finishPanelResize} onKeyDown={resizePanelFromKeyboard} />
         <div className="terminal-toolbar">
             <div className="terminal-heading"><strong>终端</strong><span>{summary ? `${summary.shell} · ${title || summary.cwd}` : `${workspaceName} · ${workspacePath}`}</span></div>
             <div className="terminal-actions"><button disabled={!selectedText.trim()} onClick={() => onCopySelection(selectedText)}>插入到 Agent</button><button onClick={() => void restart()}>{exitCode === null ? "重启" : "重新启动"}</button><button className="terminal-close" onClick={onClose}>关闭</button></div>
         </div>
-        <div className="terminal-surface" ref={surface} />
+        <div className="terminal-surface" ref={surface} style={{ background: terminalPalettes[theme].background }} />
         <div className="terminal-status-row"><span>当前终端固定绑定此工作区；输入的命令由你直接运行，独立于 Agent。</span>{error && <span className="terminal-error" role="alert">{error}</span>}</div>
     </section>;
 }

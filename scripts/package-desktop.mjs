@@ -71,6 +71,9 @@ try {
 
     const appRoot = resolve(stageRoot, "resources/app");
     await mkdir(appRoot, { recursive: true });
+    const appIconRoot = resolve(appRoot, "apps/desktop/assets");
+    await mkdir(appIconRoot, { recursive: true });
+    await cp(resolve(projectRoot, "apps/desktop/assets/icon.ico"), resolve(appIconRoot, "icon.ico"));
 
     const packageJson = JSON.parse(await readFile(resolve(projectRoot, "package.json"), "utf8"));
     packageJson.version = release.version;

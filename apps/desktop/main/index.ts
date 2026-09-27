@@ -104,6 +104,7 @@ function createWindow(): BrowserWindow {
         minWidth: 920,
         minHeight: 620,
         show: false,
+        icon: resolve(here, "../../apps/desktop/assets/icon.ico"),
         backgroundColor: "#111318",
         title: "TriumCode",
         titleBarStyle: "hidden",
@@ -170,11 +171,11 @@ function createWindow(): BrowserWindow {
         });
     });
     window.on("close", (event) => {
-        if (closeAfterStopping || (!host?.hasRunningTasks() && !terminals?.hasOpenTerminals())) return;
+        if (closeAfterStopping || !host?.hasRunningTasks()) return;
         event.preventDefault();
         if (closePromptOpen) return;
         closePromptOpen = true;
-        void requestRendererDialog(window, "仍有任务或终端在运行；退出会停止它们，待审批的请求将被拒绝。已完成的文件改动会保留在本地。", "停止并退出", true)
+        void requestRendererDialog(window, "仍有任务在运行；退出会停止任务并关闭打开的终端，待审批的请求将被拒绝。已完成的文件改动会保留在本地。", "停止并退出", true)
             .then(async (accepted) => {
                 if (!accepted) return;
                 await Promise.all([host?.stopAll(), terminals?.closeAll()]);

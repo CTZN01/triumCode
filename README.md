@@ -68,7 +68,8 @@ conversation menu provides Rename and Delete actions. Settings has Appearance,
 current-conversation Usage, and Model sections; Appearance includes a saved
 interface text-size choice. Usage is based on tokens reported by the model
 and does not represent the provider account's remaining quota.
-Opening a conversation loads its latest 40 visible messages; scroll upward or
+Opening a conversation loads its latest 40 visible messages and starts at the
+newest message; scroll upward or
 use Load earlier messages to fetch older history. Returning to the bottom keeps
 only recent messages in the view; earlier messages still present in the session
 can be fetched again. The
@@ -92,6 +93,13 @@ neutral light and dark themes follow the system appearance by default, including
 changes while the app is open; you can also choose either theme in Settings. Drag
 either vertical divider to resize the workspace sidebar or
 inspector; keyboard users can focus a divider and adjust it with the arrow keys.
+The button in the title bar collapses or restores the inspector to give the
+conversation more room. Its state is saved across app restarts, and reopening it
+keeps the previously selected tab. Large diffs scroll inside the inspector while
+the conversation composer stays visible.
+The context usage popover uses distinct color markers for each token metric.
+The changes panel colors file status letters by Git status and shows diff hunk
+headers in a muted GitHub-style palette.
 Common actions expose the visible `Ctrl+N` / `Ctrl+,` shortcuts on Windows and
 their `Command` equivalents on macOS. Inspector and review tabs support arrow,
 Home, and End navigation; dialogs keep keyboard focus inside, restore it when
@@ -184,7 +192,9 @@ The conversation details show an estimate of context use and remaining usable wi
 last request. Input, output, and cache token totals appear only when the
 provider actually reports those fields. Automatic context compaction is recorded
 in the activity timeline. Context figures are local estimates, not exact
-provider metering or account quota.
+provider metering or account quota. If a saved conversation has output tokens
+but no usable prompt totals, the desktop shows prompt and cache usage as
+unavailable; older missing totals cannot be reconstructed.
 Desktop conversation messages render Markdown tables and HTTPS links. The main
 process asks before opening an external link in the default browser.
 
