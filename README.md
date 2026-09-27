@@ -53,14 +53,16 @@ When the limit is reached, the draft stays in the composer and the app explains
 that a running task must finish before retrying.
 Named model presets from the CLI config can be selected in desktop settings.
 The composer offers model-preset and reasoning-effort choices for the current
-conversation; they apply to its next request and persist after restart. Changes
-are unavailable while a request is running. Settings has a separate Appearance section with System, Light,
+conversation; they apply to its next request and persist after restart. Model and
+effort changes are unavailable while a request is running. Settings has a separate Appearance section with System, Light,
 and Dark choices. The context-window field accepts exact token counts such as
 1,000,000.
 The composer groups model selection with a five-step reasoning slider on the right.
 On the left, it offers per-conversation permission choices (confirm operations,
-accept file edits, or full access without approval except explicit deny rules)
-and a file picker for up to
+accept file edits, or full access without approval except explicit deny rules).
+A permission change applies immediately, including while a task is running, and
+takes effect for the operations that follow; it persists after restart. The composer also has
+a file picker for up to
 four UTF-8 text files (50 KB each, 70 KB total). Selected file contents are
 included in the next message; binary files and images are not yet supported.
 For tasks that need tools, the Agent first sends a brief progress message before calling them.

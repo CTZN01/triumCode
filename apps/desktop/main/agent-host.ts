@@ -984,9 +984,21 @@ export class AgentHost {
         const store = this.storeFor(workspaceId);
         const data = store.load(sessionId);
         if (!data) throw new DesktopServiceError("SESSION_NOT_FOUND", "找不到这段会话。");
-        if (store.isRunActive(sessionId)) throw new DesktopServiceError("SESSION_BUSY", "请等待当前任务结束后再切换权限。");
+        // A run owned by another process holds the lock but cannot be retargeted
+        // from here; only a run this process owns can pick up the mode live.
+        const existing = this.sessions.get(sessionKey(workspaceId, sessionId));
+        if (store.isRunActive(sessionId) && !existing?.currentRunId) {
+            throw new DesktopServiceError("SESSION_BUSY", "该会话正在另一个进程中运行，请等待任务完成后再切换权限。");
+        }
         const runtime = this.runtimeFor(workspaceId, sessionId, data, store);
-        if (runtime.currentRunId) throw new DesktopServiceError("SESSION_BUSY", "请等待当前任务结束后再切换权限。");
+        if (runtime.currentRunId) {
+            // The run lock is held for the whole run, so the revision-checked
+            // writer below cannot take it. Apply to the live agent and let the
+            // run's own persistence save the setting with its final snapshot.
+            runtime.desktopSettings = { ...runtime.desktopSettings, permissionMode: mode };
+            runtime.agent.setDesktopPermissionMode(mode);
+            return;
+        }
         const settings = { ...runtime.desktopSettings, permissionMode: mode };
         try {
             const saved = store.updateDesktopSettings(sessionId, runtime.revision, settings);
