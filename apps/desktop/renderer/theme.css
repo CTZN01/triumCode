@@ -792,13 +792,6 @@
 :root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .settings-inline:hover {
     background: var(--hover);
 }
-:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .inspector-footer {
-    border-top: 1px solid var(--border);
-    color: var(--muted);
-}
-:root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .privacy-dot {
-    background: var(--surface);
-}
 :root:is([data-theme="light"], [data-theme="dark"], [data-theme="system"]) .git-panel-toolbar {
     border-bottom: 1px solid var(--border);
 }
@@ -1428,7 +1421,7 @@
 .new-task-button, .settings-entry, .workspace-name, .session-title, .search-box input,
 .crumb-project, .crumb-session, .topbar-chip, .permission-chip { font-size: 13px !important; }
 .section-head, .local-status, .settings-shortcut, .composer-footer,
-.inspector-tabs button, .inspector-empty p, .inspector-footer { font-size: 12px !important; }
+.inspector-tabs button, .inspector-empty p { font-size: 12px !important; }
 .empty-conversation p { font-size: 13px; }
 .activity-empty-icon { display: none; }
 .detail-card strong { font-size: 13px; }

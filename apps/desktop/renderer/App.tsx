@@ -1991,7 +1991,6 @@ export function App() {
                 <button className="settings-inline" onClick={() => setSettingsOpen(true)}><Icon name="settings" size={15} />打开模型与连接设置<Icon name="arrow" size={14} /></button>
             </div>}
             </div>
-            <div className="inspector-footer"><span className="privacy-dot" />本地运行 · 不向 TriumCode 上传代码</div>
         </aside>}
         </div>
 
