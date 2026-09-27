@@ -24,7 +24,7 @@ TriumCode supports three API protocols, so it can connect to Anthropic directly 
 
 This repository also contains a Windows-first Electron desktop alpha. It reuses
 the same Agent and tools as the CLI. The alpha includes local workspaces,
-workspace-scoped conversations, streamed replies, tool activity, approval
+workspace-scoped conversations, streamed replies, collapsible tool activity in the chat, approval
 cards that identify the default policy or matching user/project rule and record
 approval outcomes in activity, stop/cancel, model settings, per-run code review, Git status,
 staged/unstaged file diffs with old/new line numbers and collapsible hunks,
@@ -63,7 +63,10 @@ accept file edits, or full access without approval except explicit deny rules)
 and a file picker for up to
 four UTF-8 text files (50 KB each, 70 KB total). Selected file contents are
 included in the next message; binary files and images are not yet supported.
-The active Agent status appears in the conversation while a task runs. The
+For tasks that need tools, the Agent first sends a brief progress message before calling them.
+The active Agent status and concise progress updates appear in the conversation while a task runs, with
+`thinking` shown during model reasoning. Recent tool calls appear between progress messages with their original tool names and file, pattern, or command arguments in muted text;
+expand the list for older calls and each call for full input, results, and approval details. The
 conversation menu provides Rename and Delete actions. Settings has Appearance,
 current-conversation Usage, and Model sections; Appearance includes a saved
 interface text-size choice. Usage is based on tokens reported by the model
@@ -192,7 +195,8 @@ settings and workspace recents live in `%APPDATA%\triumcode`; conversation files
 session store, including a bounded history of desktop tool and sub-agent
 activity that remains visible when a conversation is reopened. Tool activity
 shows explicit completed, failed, denied, or cancelled states alongside its
-result, which can be copied from the activity panel. Session grants
+result, which can be copied from its inline activity details. The right panel
+contains code review and conversation details. Session grants
 you explicitly approve are saved with that conversation and remain active
 after restart; only an exact tool call with matching parameters is allowed.
 You can revoke a grant from conversation details. Revocation blocks future
@@ -606,7 +610,7 @@ returns to the prompt. **Ctrl+C** twice while idle exits.
 | `edit_file` | Replace an exact, unique string in a file (requires a prior read). Returns the edited region with line numbers, or `replace_all: true` to change every occurrence |
 | `multi_edit` | Apply several edits to one file in a single call; validated together and written once, so a failing edit discards the whole batch |
 | `list_files` | List a directory recursively, skipping `node_modules`/`.git`/`dist`-style directories; capped at 200 entries |
-| `grep_search` | Regex search across files (uses the system `grep` when available, otherwise an in-process chunked scanner) |
+| `grep_search` | Regex search across files (prefers system `rg`, falls back to `grep`, then to an in-process chunked scanner) |
 | `run_command` | Run a program directly (no shell — pipes and redirects are unsupported); 30-second timeout |
 | `git_diff` | Show the working-tree or staged diff, optionally limited to a path |
 | `ask_user` | Ask the user a question mid-task, with optional arrow-key choices |
