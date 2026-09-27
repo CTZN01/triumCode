@@ -9,6 +9,7 @@ export function updateQuestionActivity(
     question: string | undefined,
     timestamp: string,
     outcome?: QuestionOutcome,
+    messageIndex?: number,
 ): SessionActivity[] {
     const id = `question-${requestId}`;
     const previous = activities.find((item) => item.id === id);
@@ -22,6 +23,7 @@ export function updateQuestionActivity(
     const next: SessionActivity = {
         id,
         ...(runId ? { runId } : previous?.runId ? { runId: previous.runId } : {}),
+        ...(messageIndex === undefined ? previous?.messageIndex === undefined ? {} : { messageIndex: previous.messageIndex } : { messageIndex }),
         title: "用户问题",
         detail: previous?.detail ?? question ?? "问题内容不可用",
         state,

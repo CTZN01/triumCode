@@ -3,12 +3,13 @@ import { test } from "node:test";
 import { updateQuestionActivity } from "./question-activity.js";
 
 test("question activity survives a decision without persisting the answer text", () => {
-    const started = updateQuestionActivity([], "request", "run", "Which file?", "2026-09-26T00:00:00.000Z");
+    const started = updateQuestionActivity([], "request", "run", "Which file?", "2026-09-26T00:00:00.000Z", undefined, 12);
     assert.equal(started[0].state, "running");
     const answered = updateQuestionActivity(started, "request", "run", undefined, "2026-09-26T00:00:01.000Z", "answered");
     assert.equal(answered.length, 1);
     assert.equal(answered[0].detail, "Which file?");
     assert.equal(answered[0].startedAt, started[0].startedAt);
+    assert.equal(answered[0].messageIndex, 12);
     assert.equal(answered[0].output, "已回答");
 });
 

@@ -1,8 +1,9 @@
 import type { ConversationMessage, ConversationPage } from "../shared/contracts.js";
 
 export const CONVERSATION_PAGE_SIZE = 40;
+const NO_RUN_IDS = new Map<number, string[]>();
 
-function visibleMessage(value: unknown, index: number, redact: (text: string) => string): ConversationMessage | null {
+function visibleMessage(value: unknown, index: number, redact: (text: string) => string, runIds: ReadonlyMap<number, string[]>): ConversationMessage | null {
     if (!value || typeof value !== "object") return null;
     const message = value as { role?: unknown; content?: unknown };
     if (message.role !== "user" && message.role !== "assistant") return null;
@@ -16,7 +17,7 @@ function visibleMessage(value: unknown, index: number, redact: (text: string) =>
             : [];
     let text = blocks.join("");
     if (message.role === "user") text = text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, " ").trim();
-    return text.trim() ? { id: `history-${index}`, role: message.role, text: redact(text) } : null;
+    return text.trim() ? { id: `history-${index}`, role: message.role, text: redact(text), ...(runIds.has(index) ? { runIds: runIds.get(index) } : {}) } : null;
 }
 
 export function pageConversationMessages(
@@ -24,15 +25,24 @@ export function pageConversationMessages(
     before: number,
     redact: (text: string) => string,
     limit = CONVERSATION_PAGE_SIZE,
+    runIds: ReadonlyMap<number, string[]> = NO_RUN_IDS,
 ): ConversationPage {
     const messages: ConversationMessage[] = [];
     let index = Math.min(before, history.length) - 1;
     while (index >= 0 && messages.length < limit) {
-        const message = visibleMessage(history[index], index, redact);
+        const message = visibleMessage(history[index], index, redact, runIds);
         if (message) messages.push(message);
         index--;
     }
     let probe = index;
-    while (probe >= 0 && !visibleMessage(history[probe], probe, redact)) probe--;
+    while (probe >= 0 && !visibleMessage(history[probe], probe, redact, runIds)) probe--;
     return { messages: messages.reverse(), nextCursor: probe >= 0 ? index + 1 : null };
+}
+
+export function findRunMessageIndex(history: readonly unknown[], retry: boolean): number {
+    if (!retry) return history.length;
+    for (let index = history.length - 1; index >= 0; index--) {
+        if (visibleMessage(history[index], index, (text) => text, NO_RUN_IDS)?.role === "user") return index;
+    }
+    return -1;
 }

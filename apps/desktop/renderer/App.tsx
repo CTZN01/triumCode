@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type CSSProperties, type FormEvent, type KeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type UIEvent } from "react";
+import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type CSSProperties, type FormEvent, type KeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type UIEvent } from "react";
 import type {
     BootstrapData,
     ConversationMessage,
@@ -31,8 +31,9 @@ import { NewWorktreeDialog, WorktreeManagementDialog } from "./NewWorktreeDialog
 import { TaskCenterDialog } from "./TaskCenterDialog.js";
 import { TerminalPanel } from "./TerminalPanel.js";
 import { updateQuestionActivity } from "../shared/question-activity.js";
+import { activityLine, groupConversationActivities, type PlacedActivity } from "../shared/conversation-activity.js";
 
-type ActivityRow = SessionActivity;
+type ActivityRow = PlacedActivity;
 
 interface PanelWidths {
     sidebar: number;
@@ -179,7 +180,7 @@ function failureNextStep(category: AgentFailureCategory, retryable: boolean): st
         ? "模型服务暂时不可用，稍后可恢复请求。"
         : "检查 API 地址、模型名称和协议设置。";
     if (category === "network") return "检查网络连接和 API 地址后，确认工作区改动再恢复请求。";
-    return retryable ? "检查工作区改动后再恢复请求。" : "查看任务活动中的错误详情，再决定下一步。";
+    return retryable ? "检查工作区改动后再恢复请求。" : "查看聊天中运行记录的错误详情，再决定下一步。";
 }
 
 function sessionStatusLabel(status: SessionSummary["status"]): string {
@@ -398,6 +399,56 @@ function MessageActions({ text, showFeedback }: { text: string; showFeedback: bo
     </div>;
 }
 
+const ActivityGroup = memo(function ActivityGroup({ activities, running, focusId, onFocusHandled }: {
+    activities: ActivityRow[];
+    running: boolean;
+    focusId: string | null;
+    onFocusHandled: () => void;
+}) {
+    const [open, setOpen] = useState(true);
+    const [showAll, setShowAll] = useState(false);
+    const groupRef = useRef<HTMLElement | null>(null);
+    useEffect(() => {
+        if (!focusId || !activities.some((activity) => activity.id === focusId)) return;
+        setOpen(true);
+        setShowAll(true);
+        const frame = requestAnimationFrame(() => {
+            const row = [...(groupRef.current?.querySelectorAll<HTMLDetailsElement>("[data-activity-id]") ?? [])]
+                .find((item) => item.dataset.activityId === focusId);
+            if (row) {
+                row.open = true;
+                row.scrollIntoView({ behavior: "smooth", block: "center" });
+            }
+            onFocusHandled();
+        });
+        return () => cancelAnimationFrame(frame);
+    }, [focusId, activities, onFocusHandled]);
+    const failed = activities.some((activity) => activity.state === "failed" || activity.state === "denied");
+    const visibleActivities = showAll ? activities : activities.slice(-3);
+    return <section className="chat-activity-group" ref={groupRef}>
+        <button type="button" className="chat-activity-toggle" aria-expanded={open} onClick={() => setOpen((current) => !current)}>
+            <span className={`chat-activity-mark ${running ? "running" : failed ? "failed" : "complete"}`} aria-hidden="true">{running ? "" : failed ? "!" : "✓"}</span>
+            <span className="chat-activity-count">{activities.length} 项操作</span><Icon name="chevron" size={13} />
+        </button>
+        {open && <div className="chat-activity-items">{visibleActivities.map((activity) => <details className={`activity-row ${activity.state}`} key={activity.id} data-activity-id={activity.id}>
+            <summary>
+                <span className="activity-state-mark">{activity.state === "complete" ? "✓" : activity.state === "denied" || activity.state === "failed" ? "×" : activity.state === "interrupted" ? "!" : activity.state === "running" ? <i /> : "·"}</span>
+                <span className="activity-title" title={activityLine(activity)}>{activityLine(activity)}</span>
+                <span className={`activity-state-label ${activity.state}`}>{activity.state === "complete" ? "已完成" : activity.state === "denied" ? "已拒绝" : activity.state === "failed" ? "失败" : activity.state === "interrupted" ? "已取消" : activity.state === "running" ? "运行中" : "提示"}</span>
+                {activity.updatedAt && <time className="activity-time" dateTime={activity.updatedAt}>{activityTime(activity.updatedAt)}</time>}
+                {activity.durationMs !== undefined && <span className="activity-duration">{activity.durationMs < 1000 ? `${activity.durationMs}ms` : `${(activity.durationMs / 1000).toFixed(1)}s`}</span>}
+            </summary>
+            <div className="activity-detail">
+                <pre>{activity.detail}</pre>
+                {activity.permissionSource && <div className="activity-policy"><span>策略来源</span><strong>{permissionSourceLabel(activity.permissionSource)}</strong>{activity.permissionDecision && <small>{permissionDecisionLabel(activity.permissionDecision)}</small>}</div>}
+                {permissionOutcomeLabel(activity.permissionOutcome) && <div className="activity-policy outcome"><span>审批结果</span><strong>{permissionOutcomeLabel(activity.permissionOutcome)}</strong></div>}
+                {activity.permissionGrantRevoked && <div className="activity-policy outcome"><span>授权状态</span><strong>已撤销，不再放行后续匹配操作</strong></div>}
+                {activity.output && <div className="activity-output"><div className="activity-output-heading"><span>结果</span><CopyButton text={activity.output} title="复制当前结果" className="activity-copy" size={12} /></div><pre>{activity.output}</pre></div>}
+            </div>
+        </details>)}{activities.length > 3 && <button type="button" className="chat-activity-more" onClick={() => setShowAll((current) => !current)}>{showAll ? "只看最近 3 项" : `查看其余 ${activities.length - 3} 项`}</button>}</div>}
+    </section>;
+});
+
 function ContextRing({ utilization }: { utilization: number | null }) {
     const circumference = 2 * Math.PI * 9;
     const value = utilization === null ? 0 : Math.min(1, Math.max(0, utilization));
@@ -601,7 +652,7 @@ export function App() {
     const [terminalMounted, setTerminalMounted] = useState(false);
     const [terminalHeight, setTerminalHeight] = useState(defaultTerminalHeight);
     const [terminalWorkspaceId, setTerminalWorkspaceId] = useState<string | null>(null);
-    const [rightPanel, setRightPanel] = useState<"activity" | "details" | "changes">("activity");
+    const [rightPanel, setRightPanel] = useState<"details" | "changes">("changes");
     const [taskCenterOpen, setTaskCenterOpen] = useState(false);
     const [taskCenterData, setTaskCenterData] = useState<DesktopTaskCenterData | null>(null);
     const [taskCenterLoading, setTaskCenterLoading] = useState(false);
@@ -621,17 +672,24 @@ export function App() {
     const appShellRef = useRef<HTMLDivElement | null>(null);
     const terminalCloseTimer = useRef<number | null>(null);
     const resizingPanel = useRef<{ panel: "sidebar" | "inspector"; pointerId: number; widths: PanelWidths; next: PanelWidths } | null>(null);
-    const endOfMessages = useRef<HTMLDivElement | null>(null);
     const conversationRef = useRef<HTMLDivElement | null>(null);
     const historyRequestSequence = useRef(0);
     const olderRequestPending = useRef(false);
     const recentRequestPending = useRef(false);
     const stickToBottom = useRef(true);
+    const lastConversationScrollTop = useRef(0);
     const historyCompacted = useRef(false);
     const scrollAnchor = useRef<{ id: string; top: number } | null>(null);
     const pendingLatestScroll = useRef<string | null>(null);
-    const activityList = useRef<HTMLDivElement | null>(null);
     const composerInput = useRef<HTMLTextAreaElement | null>(null);
+    const [composerDock, setComposerDock] = useState<HTMLDivElement | null>(null);
+    const [composerSpace, setComposerSpace] = useState(0);
+    useEffect(() => {
+        if (!composerDock) return;
+        const observer = new ResizeObserver(() => setComposerSpace(composerDock.offsetHeight));
+        observer.observe(composerDock);
+        return () => observer.disconnect();
+    }, [composerDock]);
     const attachmentInput = useRef<HTMLInputElement | null>(null);
     const activeRef = useRef({ workspaceId: "", sessionId: "" });
     const eventTracker = useMemo(() => new DesktopRunEventTracker(), []);
@@ -640,8 +698,9 @@ export function App() {
     const reviewRequestSequence = useRef(0);
     const taskRequestSequence = useRef(0);
     const worktreeRequestSequence = useRef(0);
-    const pendingAssistantDelta = useRef<{ key: string; runId: string; text: string } | null>(null);
+    const pendingAssistantDelta = useRef<{ key: string; messageId: string; text: string } | null>(null);
     const assistantDeltaFrame = useRef<number | null>(null);
+    const assistantSegment = useRef<{ runId: string; index: number } | null>(null);
 
     const invalidateMessageRequests = useCallback(() => {
         historyRequestSequence.current++;
@@ -653,6 +712,7 @@ export function App() {
     const resetMessageHistory = useCallback((cursor: number | null) => {
         invalidateMessageRequests();
         stickToBottom.current = true;
+        lastConversationScrollTop.current = 0;
         historyCompacted.current = false;
         scrollAnchor.current = null;
         setMessageCursor(cursor);
@@ -665,7 +725,7 @@ export function App() {
         pendingAssistantDelta.current = null;
         if (!pending || `${activeRef.current.workspaceId}:${activeRef.current.sessionId}` !== pending.key) return;
         setMessages((current) => {
-            const id = `assistant-${pending.runId}`;
+            const id = pending.messageId;
             const index = current.findIndex((message) => message.id === id);
             if (index < 0) return [...current, { id, role: "assistant", text: pending.text }];
             const next = [...current];
@@ -787,7 +847,7 @@ export function App() {
         }, appShellRef.current?.getBoundingClientRect().width ?? window.innerWidth));
     };
 
-    const selectRightPanel = (panel: "activity" | "details" | "changes"): void => {
+    const selectRightPanel = (panel: "details" | "changes"): void => {
         setRightPanel(panel);
         setInspectorOpen(true);
         if (panel === "changes" && activeWorkspace?.available) {
@@ -890,6 +950,10 @@ export function App() {
         if (assistantDeltaFrame.current !== null) window.cancelAnimationFrame(assistantDeltaFrame.current);
         assistantDeltaFrame.current = null;
         pendingAssistantDelta.current = null;
+        const lastUser = opened.messages.map((message) => message.role).lastIndexOf("user");
+        const completedSegments = opened.messages.slice(lastUser + 1)
+            .filter((message) => message.role === "assistant" && /^history-\d+$/.test(message.id)).length;
+        assistantSegment.current = opened.runId ? { runId: opened.runId, index: completedSegments } : null;
         resetMessageHistory(opened.messageCursor);
         activeRef.current = { workspaceId, sessionId };
         pendingLatestScroll.current = key;
@@ -1042,8 +1106,6 @@ export function App() {
         setActivityFocusId(null);
         await openWorkspace(task.workspace, true, task.session.id);
         if (activeRef.current.workspaceId !== task.workspace.id || activeRef.current.sessionId !== task.session.id) return;
-        setRightPanel("activity");
-        setInspectorOpen(true);
         setActivityFocusId(task.latestActivityId);
     }, [openWorkspace]);
 
@@ -1091,6 +1153,13 @@ export function App() {
     useEffect(() => window.desktop.onEvent((event) => {
         const key = `${event.workspaceId}:${event.sessionId}`;
         const payload = event.payload;
+        const appendRunActivity = (items: ActivityRow[], activity: ActivityRow): ActivityRow[] =>
+            appendActivity(items, event.runId ? {
+                ...activity,
+                runId: event.runId,
+                ...(assistantSegment.current?.runId === event.runId
+                    ? { afterMessageId: `assistant-${event.runId}-${assistantSegment.current.index}` } : {}),
+            } : activity);
         const isRunStart = payload.type === "agent" && payload.event.type === "turn.started";
         const kind = payload.type === "session.status" ? "finish" : isRunStart ? "start" : "event";
         if (!eventTracker.accepts(key, event.sequence, event.runId, kind)) return;
@@ -1155,7 +1224,7 @@ export function App() {
                 };
                 return previous
                     ? items.map((activity) => activity.id === payload.toolCallId ? next : activity)
-                    : appendActivity(items, next);
+                    : appendRunActivity(items, next);
             });
             return;
         }
@@ -1191,25 +1260,37 @@ export function App() {
             setTokenUsage(agentEvent.usage);
         } else if (agentEvent.type === "turn.started") {
             setBusy(true);
-            setStatusLabel("正在处理");
+            setStatusLabel("thinking");
+            if (event.runId) assistantSegment.current = { runId: event.runId, index: 0 };
             setActiveSession((current) => current?.id === event.sessionId ? { ...current, status: "running" } : current);
-            if (event.runId) setMessages((current) => current.some((message) => message.id === `assistant-${event.runId}`)
+            if (event.runId) setMessages((current) => {
+                const index = current.map((message) => message.role).lastIndexOf("user");
+                if (index < 0 || current[index].runIds?.includes(event.runId!)) return current;
+                const next = [...current];
+                next[index] = { ...next[index], runIds: [...(next[index].runIds ?? []), event.runId!] };
+                return next;
+            });
+            if (event.runId) setMessages((current) => current.some((message) => message.id === `assistant-${event.runId}-0`)
                 ? current
-                : [...current, { id: `assistant-${event.runId}`, role: "assistant", text: "" }]);
+                : [...current, { id: `assistant-${event.runId}-0`, role: "assistant", text: "" }]);
         } else if (agentEvent.type === "assistant.delta") {
             if (!event.runId) return;
+            const segment = assistantSegment.current;
+            const messageId = `assistant-${event.runId}-${segment?.runId === event.runId ? segment.index : 0}`;
             const pending = pendingAssistantDelta.current;
-            if (pending && (pending.key !== key || pending.runId !== event.runId)) flushAssistantDelta();
+            if (pending && (pending.key !== key || pending.messageId !== messageId)) flushAssistantDelta();
             if (pendingAssistantDelta.current) pendingAssistantDelta.current.text += agentEvent.text;
-            else pendingAssistantDelta.current = { key, runId: event.runId, text: agentEvent.text };
+            else pendingAssistantDelta.current = { key, messageId, text: agentEvent.text };
             if (assistantDeltaFrame.current === null) assistantDeltaFrame.current = window.requestAnimationFrame(flushAssistantDelta);
+        } else if (agentEvent.type === "assistant.message.end") {
+            if (event.runId && assistantSegment.current?.runId === event.runId) assistantSegment.current.index++;
         } else if (agentEvent.type === "status.changed") {
-            setStatusLabel(agentEvent.status === "thinking" ? "正在思考"
-                : agentEvent.status === "running-tools" ? agentEvent.label || "正在运行工具"
+            setStatusLabel(agentEvent.status === "thinking" ? "thinking"
+                : agentEvent.status === "running-tools" ? agentEvent.label || "Running tools"
                     : agentEvent.status === "working" ? agentEvent.label || "正在处理" : "整理结果中");
         } else if (agentEvent.type === "tool.started") {
             const timestamp = new Date().toISOString();
-            setActivities((current) => appendActivity(current, {
+            setActivities((current) => appendRunActivity(current, {
                 id: agentEvent.id,
                 title: agentEvent.name,
                 detail: JSON.stringify(agentEvent.input, null, 2),
@@ -1235,7 +1316,7 @@ export function App() {
                     startedAt: previous?.startedAt ?? timestamp,
                     updatedAt: timestamp,
                 };
-                return previous ? current.map((activity) => activity.id === agentEvent.id ? next : activity) : appendActivity(current, next);
+                return previous ? current.map((activity) => activity.id === agentEvent.id ? next : activity) : appendRunActivity(current, next);
             });
         } else if (agentEvent.type === "permission.checked") {
             setActivities((current) => {
@@ -1252,14 +1333,14 @@ export function App() {
                     startedAt: previous?.startedAt ?? timestamp,
                     updatedAt: timestamp,
                 };
-                return previous ? current.map((activity) => activity.id === agentEvent.id ? next : activity) : appendActivity(current, next);
+                return previous ? current.map((activity) => activity.id === agentEvent.id ? next : activity) : appendRunActivity(current, next);
             });
             if (agentEvent.action === "allow" && agentEvent.source.kind === "session") {
                 void refreshPermissionGrants(event.workspaceId, event.sessionId);
             }
         } else if (agentEvent.type === "notice") {
             const timestamp = new Date().toISOString();
-            setActivities((current) => appendActivity(current, {
+            setActivities((current) => appendRunActivity(current, {
                 id: event.eventId,
                 title: agentEvent.level === "warning" ? "需要留意" : "提示",
                 detail: agentEvent.text,
@@ -1270,7 +1351,7 @@ export function App() {
         } else if (agentEvent.type === "context.compaction.started") {
             const timestamp = new Date().toISOString();
             setStatusLabel("正在整理上下文");
-            setActivities((current) => appendActivity(current, {
+            setActivities((current) => appendRunActivity(current, {
                 id: `context-${agentEvent.id}`,
                 title: "整理上下文",
                 detail: "上下文接近可用窗口上限，正在整理较早的对话。",
@@ -1292,12 +1373,11 @@ export function App() {
                     startedAt: previous?.startedAt ?? timestamp,
                     updatedAt: timestamp,
                 };
-                return previous ? current.map((activity) => activity.id === id ? completed : activity) : appendActivity(current, completed);
+                return previous ? current.map((activity) => activity.id === id ? completed : activity) : appendRunActivity(current, completed);
             });
         } else if (agentEvent.type === "plan.review") {
-            setRightPanel("details");
             const timestamp = new Date().toISOString();
-            setActivities((current) => appendActivity(current, {
+            setActivities((current) => appendRunActivity(current, {
                 id: event.eventId,
                 title: "计划待审核",
                 detail: agentEvent.content,
@@ -1310,7 +1390,7 @@ export function App() {
             setStatusLabel(agentEvent.enabled ? "计划模式 - 只读与规划" : "默认模式 - 操作逐项确认");
             if (!agentEvent.enabled) {
                 const timestamp = new Date().toISOString();
-                setActivities((current) => appendActivity(current, {
+                setActivities((current) => appendRunActivity(current, {
                     id: event.eventId,
                     title: "已退出计划模式",
                     detail: "当前权限为默认确认。文件写入和程序执行仍会逐项请求批准。",
@@ -1321,7 +1401,7 @@ export function App() {
             }
         } else if (agentEvent.type === "subagent.started") {
             const timestamp = new Date().toISOString();
-            setActivities((current) => appendActivity(current, {
+            setActivities((current) => appendRunActivity(current, {
                 id: `sub-${agentEvent.id}`,
                 title: `${agentEvent.name} 子代理`,
                 detail: agentEvent.description,
@@ -1352,7 +1432,7 @@ export function App() {
             setQuestions([]);
             setQuestionDraft("");
             const timestamp = new Date().toISOString();
-            setActivities((current) => appendActivity(current, {
+            setActivities((current) => appendRunActivity(current, {
                 id: event.eventId,
                 title: "任务已停止",
                 detail: "任务已停止，已完成的文件改动仍保留在工作区。",
@@ -1371,7 +1451,7 @@ export function App() {
             setQuestions([]);
             setQuestionDraft("");
             const timestamp = new Date().toISOString();
-            setActivities((current) => appendActivity(current, {
+            setActivities((current) => appendRunActivity(current, {
                 id: event.eventId,
                 title: `任务失败 - ${category}`,
                 detail: agentEvent.message,
@@ -1451,14 +1531,17 @@ export function App() {
                 .find((element) => element.dataset.messageId === anchor.id);
             if (item) container.scrollTo({ top: container.scrollTop + item.getBoundingClientRect().top - anchor.top, behavior: "instant" });
         } else if (stickToBottom.current) {
-            endOfMessages.current?.scrollIntoView({ behavior: "instant", block: "end" });
+            container.scrollTop = container.scrollHeight;
         }
-    }, [messages, approvals, questions, busy, statusLabel]);
+    }, [messages, activities, approvals, questions, busy, statusLabel]);
 
     const handleConversationScroll = (event: UIEvent<HTMLDivElement>) => {
         const container = event.currentTarget;
         const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
-        stickToBottom.current = distanceFromBottom < 80;
+        if (container.scrollTop < lastConversationScrollTop.current - 1 || distanceFromBottom < 80) {
+            stickToBottom.current = distanceFromBottom < 80;
+        }
+        lastConversationScrollTop.current = container.scrollTop;
         const openingLatest = pendingLatestScroll.current
             === `${activeRef.current.workspaceId}:${activeRef.current.sessionId}`;
         if (!openingLatest && container.scrollTop < 180 && distanceFromBottom > 1 && messageCursor !== null) {
@@ -1514,16 +1597,12 @@ export function App() {
         return () => { document.removeEventListener("pointerdown", closeOnOutside); document.removeEventListener("keydown", closeOnEscape); };
     }, [modelPickerOpen, permissionPickerOpen]);
 
-    useEffect(() => {
-        if (!activityFocusId || rightPanel !== "activity") return;
-        const rows = activityList.current?.querySelectorAll<HTMLDetailsElement>("[data-activity-id]");
-        const row = rows ? [...rows].find((item) => item.dataset.activityId === activityFocusId) : undefined;
-        if (row) {
-            row.open = true;
-            row.scrollIntoView({ behavior: "smooth", block: "center" });
-        }
-        setActivityFocusId(null);
-    }, [activityFocusId, activities, activeSession?.id, rightPanel]);
+    const activitiesAfterMessage = useMemo(
+        () => groupConversationActivities(messages, activities),
+        [messages, activities],
+    );
+    const awaitingAssistant = messages.at(-1)?.role === "assistant" && !messages.at(-1)?.text;
+    const clearActivityFocus = useCallback(() => setActivityFocusId(null), []);
 
     const visibleSessions = useMemo(() => {
         const needle = search.trim().toLowerCase();
@@ -1689,6 +1768,8 @@ export function App() {
         setError("");
         try {
             const response = await window.desktop.startRun(workspaceId, sessionId, text, crypto.randomUUID());
+            setMessages((current) => current.map((message) => message.id === optimistic.id
+                ? { ...message, runIds: [response.runId] } : message));
             const runStarted = eventTracker.begin(sessionKey, response.runId);
             if (pendingStartStops.current.delete(sessionKey)) {
                 await window.desktop.cancelRun(response.runId);
@@ -1968,7 +2049,8 @@ export function App() {
                 </div>}
                 <div className="welcome-footnote">文件留在本机 · 写入和命令逐项审批</div>
             </div> : !activeWorkspace.available ? <div className="missing-workspace"><div className="missing-icon">!</div><h2>找不到这个项目文件夹</h2><p>{activeWorkspace.path}</p><button className="secondary-button" onClick={() => void handleChooseWorkspace()}>打开其他项目</button></div> : <>
-                <div className="conversation" key={activeSession?.id || "none"} ref={conversationRef} onScroll={handleConversationScroll}>
+                <div className="conversation-zone">
+                <div className="conversation" key={activeSession?.id || "none"} ref={conversationRef} onScroll={handleConversationScroll} style={{ "--composer-space": `${composerSpace}px` } as CSSProperties}>
                     {!activeSession ? <div className="empty-conversation">
                         <h2>在 {activeWorkspace.name} 中开始新任务</h2>
                         <p>描述一个问题、功能或代码问题。所有写入和命令都会先等待你的确认。</p>
@@ -1976,18 +2058,20 @@ export function App() {
                     </div> : <div className="message-list">
                         {messages.length === 0 && <div className="empty-conversation compact-empty"><h2>准备好开始了</h2><p>用自然语言描述你想完成的任务。</p></div>}
                         {messageCursor !== null && <button type="button" className="older-messages" disabled={olderLoading} onClick={() => void loadOlderMessages()}>{olderLoading ? "正在加载更早消息..." : "加载更早消息"}</button>}
-                        {messages.map((message) => <article className={`message ${message.role}`} key={message.id} data-message-id={message.id}>
+                        {messages.map((message) => <Fragment key={message.id}>{(message.text || (busy && message.id === messages.at(-1)?.id)) && <article className={`message ${message.role}${message.text ? "" : " pending"}`} data-message-id={message.id}>
                             <div className="message-content">
                                 <div className="message-meta"><span>{message.role === "user" ? "你" : "TriumCode"}</span></div>
-                                {message.text ? <MemoMessageBody text={message.text} /> : <div className="thinking-placeholder" role="status">正在准备回复</div>}
+                                {message.text ? <MemoMessageBody text={message.text} /> : <div className="thinking-placeholder" role="status">{busy ? statusLabel : activeSession?.status === "failed" ? "请求失败" : "暂无回复"}</div>}
                                 {message.text && <MessageActions text={message.text} showFeedback={message.role === "assistant"} />}
                             </div>
-                        </article>)}
-                        {busy && <div className="agent-working" role="status"><span className="working-glint">{statusLabel}</span></div>}
-                        <div ref={endOfMessages} />
+                        </article>}
+                            {activitiesAfterMessage.has(message.id) && <ActivityGroup key={`${message.id}-activity`} activities={activitiesAfterMessage.get(message.id)!} running={busy && activitiesAfterMessage.get(message.id)!.some((activity) => activity.runId === runId && activity.state === "running")} focusId={activityFocusId} onFocusHandled={clearActivityFocus} />}
+                        </Fragment>)}
+                        {busy && !awaitingAssistant && <div className="agent-working" role="status"><span className="working-glint">{statusLabel}</span></div>}
                     </div>}
                 </div>
 
+                <div className="composer-dock" ref={setComposerDock}>
                 {(approvals.length > 0 || questions.length > 0) && <div className="decision-stack">
                     {approvals.map((approval) => <section className="approval-card" key={approval.requestId}>
                         <div className="decision-heading"><span className="decision-icon warning">!</span><div><strong>需要批准一项操作</strong><small>拒绝后 Agent 会收到结果并决定如何继续。</small></div></div>
@@ -2044,6 +2128,8 @@ export function App() {
                     {failedPrompt && !draft.trim() && !busy && !externalRun && <div className="composer-footer retry-actions">{failedTurnActivity?.safeToRetry === true && <button type="button" className="retry-prompt-button" title="仅在失败前未发起工具操作时可用；重用原请求，不新增用户消息。" onClick={() => void retryFailedPrompt()}>安全重试</button>}<button type="button" className="retry-prompt-button" onClick={restoreFailedPrompt}>恢复请求</button></div>}
                     {retryNotice && <div className="retry-disclosure" role="status">{retryNotice}</div>}
                 </form>}
+                </div>
+                </div>
             </>}
             {error && <div className="toast-error" role="alert"><span>{error}</span><button aria-label="关闭错误提示" onClick={() => setError("")}><Icon name="close" size={14} /></button></div>}
             {pendingDialog && <div className="modal-scrim confirm-scrim" onMouseDown={(event) => {
@@ -2102,7 +2188,6 @@ export function App() {
         {activeWorkspace && <aside className="inspector" aria-label="工作区检查面板" aria-hidden={!inspectorOpen} inert={!inspectorOpen}>
             <div className="inspector-tabs">
                 <div className="inspector-tablist" role="tablist" aria-label="检查面板" onKeyDown={handleTabListKeyDown}>
-                    <button id="inspector-tab-activity" role="tab" aria-selected={rightPanel === "activity"} aria-controls="inspector-panel-content" tabIndex={rightPanel === "activity" ? 0 : -1} className={rightPanel === "activity" ? "selected" : ""} onClick={() => selectRightPanel("activity")}>任务活动{activities.length > 0 && <span>{activities.length}</span>}</button>
                     <button id="inspector-tab-changes" role="tab" aria-selected={rightPanel === "changes"} aria-controls="inspector-panel-content" tabIndex={rightPanel === "changes" ? 0 : -1} className={rightPanel === "changes" ? "selected" : ""} onClick={() => selectRightPanel("changes")}>改动{reviewView?.workspaceId === activeWorkspace.id && reviewView.sessionId === activeSession?.id && reviewView.snapshot.files.length > 0 ? <span>{reviewView.snapshot.files.length}</span> : gitView?.workspaceId === activeWorkspace.id && gitView.snapshot.isGit && gitView.snapshot.files.length > 0 && <span>{gitView.snapshot.files.length}</span>}</button>
                     <button id="inspector-tab-details" role="tab" aria-selected={rightPanel === "details"} aria-controls="inspector-panel-content" tabIndex={rightPanel === "details" ? 0 : -1} className={rightPanel === "details" ? "selected" : ""} onClick={() => selectRightPanel("details")}>会话信息</button>
                 </div>
@@ -2117,47 +2202,10 @@ export function App() {
                     review={reviewView?.workspaceId === activeWorkspace.id && reviewView.sessionId === activeSession?.id ? reviewView.snapshot : null}
                     loading={gitLoading || reviewLoading}
                     busy={busy}
-                    onRefresh={() => { void refreshGitSnapshot(activeWorkspace.id); if (activeSession) void refreshCodeReview(activeWorkspace.id, activeSession.id); }}
+                    onRefresh={async () => { await Promise.all([refreshGitSnapshot(activeWorkspace.id), activeSession ? refreshCodeReview(activeWorkspace.id, activeSession.id) : Promise.resolve()]); }}
                 />
                 : <div className="git-panel-state">工作区目录不可访问，无法读取 Git 状态。</div>
-                : rightPanel === "activity" ? <div className="activity-list" ref={activityList}>
-                {activities.length === 0 ? <div className="inspector-empty"><div className="activity-empty-icon"><span /><span /><span /></div><strong>活动会显示在这里</strong><p>工具调用、运行结果和需要确认的操作会按顺序列出。</p></div> : [...activities].reverse().map((activity) => <details className={`activity-row ${activity.state}`} key={activity.id} data-activity-id={activity.id} open={activity.state === "running"}>
-                    <summary>
-                        <span className="activity-state-mark">{activity.state === "complete" ? "✓" : activity.state === "denied" || activity.state === "failed" ? "×" : activity.state === "interrupted" ? "!" : activity.state === "running" ? <i /> : "·"}</span>
-                        <span className="activity-title">{activity.title}</span>
-                        <span className={`activity-state-label ${activity.state}`}>{activity.state === "complete" ? "已完成"
-                            : activity.state === "denied" ? "已拒绝"
-                                : activity.state === "failed" ? "失败"
-                                    : activity.state === "interrupted" ? "已取消"
-                                        : activity.state === "running" ? "运行中" : "提示"}</span>
-                        {activity.updatedAt && <time className="activity-time" dateTime={activity.updatedAt}>{activityTime(activity.updatedAt)}</time>}
-                        {activity.durationMs !== undefined && <span className="activity-duration">{activity.durationMs < 1000 ? `${activity.durationMs}ms` : `${(activity.durationMs / 1000).toFixed(1)}s`}</span>}
-                    </summary>
-                    <div className="activity-detail">
-                        <pre>{activity.detail}</pre>
-                        {activity.permissionSource && (
-                            <div className="activity-policy">
-                                <span>策略来源</span>
-                                <strong>{permissionSourceLabel(activity.permissionSource)}</strong>
-                                {activity.permissionDecision && <small>{permissionDecisionLabel(activity.permissionDecision)}</small>}
-                            </div>
-                        )}
-                        {permissionOutcomeLabel(activity.permissionOutcome) && (
-                            <div className="activity-policy outcome">
-                                <span>审批结果</span>
-                                <strong>{permissionOutcomeLabel(activity.permissionOutcome)}</strong>
-                            </div>
-                        )}
-                        {activity.permissionGrantRevoked && (
-                            <div className="activity-policy outcome"><span>授权状态</span><strong>已撤销，不再放行后续匹配操作</strong></div>
-                        )}
-                        {activity.output && <div className="activity-output">
-                            <div className="activity-output-heading"><span>结果</span><CopyButton text={activity.output!} title="复制当前结果" className="activity-copy" size={12} /></div>
-                            <pre>{activity.output}</pre>
-                        </div>}
-                    </div>
-                </details>)}
-            </div> : <div className="details-panel">
+                : <div className="details-panel">
                 {worktreeAssociation && <div className="detail-card worktree-info-card"><span className="detail-label">隔离工作区</span><strong>{worktreeAssociation.taskName}</strong><code>{worktreeAssociation.branchName}</code><small>基准 {worktreeAssociation.baseCommit.slice(0, 12)} · 源分支 {worktreeAssociation.sourceBranch || "分离头指针"}</small><code title={worktreeAssociation.sourcePath}>{worktreeAssociation.sourcePath}</code><button className="secondary-button compact" onClick={() => setWorktreeManagerOpen(true)}>审阅、合并或移除...</button><button className="secondary-button compact" disabled={!bootstrap?.workspaces.some((workspace) => workspace.id === worktreeAssociation.sourceWorkspaceId)} onClick={() => {
                     const source = bootstrap?.workspaces.find((workspace) => workspace.id === worktreeAssociation.sourceWorkspaceId);
                     if (source) void openWorkspace(source);

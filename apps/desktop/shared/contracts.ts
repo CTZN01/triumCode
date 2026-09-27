@@ -210,6 +210,7 @@ export interface ConversationMessage {
     id: string;
     role: "user" | "assistant";
     text: string;
+    runIds?: string[];
 }
 
 export interface ConversationPage {

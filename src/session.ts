@@ -121,6 +121,8 @@ export type SessionActivityState = "running" | "complete" | "denied" | "failed" 
 export interface SessionActivity {
     id: string;
     runId?: string;
+    messageIndex?: number;
+    afterMessageIndex?: number;
     title: string;
     detail: string;
     state: SessionActivityState;

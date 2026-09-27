@@ -41,7 +41,7 @@ import type {
     WorkspaceSummary,
 } from "../shared/contracts.js";
 import { updateQuestionActivity } from "../shared/question-activity.js";
-import { pageConversationMessages } from "./conversation-history.js";
+import { findRunMessageIndex, pageConversationMessages } from "./conversation-history.js";
 import { pruneIdleRuntimes } from "./runtime-cache.js";
 import { desktopTaskStatus } from "./task-status.js";
 import { connectionFailureMessage } from "./connection-result.js";
@@ -106,6 +106,7 @@ interface SessionRuntime {
     apiKey: string;
     redactionKeys: string[];
     currentRunId: string | null;
+    currentRunMessageIndex: number | null;
     runPromise: Promise<void> | null;
     releaseRunLease: (() => void) | null;
     cancelRequested: boolean;
@@ -305,6 +306,10 @@ function safeSessionActivities(value: unknown, apiKey: RedactionKeys = ""): Sess
         result.push({
             id: limitedText(item.id, 200, apiKey),
             ...(typeof item.runId === "string" ? { runId: limitedText(item.runId, 200, apiKey) } : {}),
+            ...(typeof item.messageIndex === "number" && Number.isSafeInteger(item.messageIndex) && item.messageIndex >= 0
+                ? { messageIndex: item.messageIndex } : {}),
+            ...(typeof item.afterMessageIndex === "number" && Number.isSafeInteger(item.afterMessageIndex) && item.afterMessageIndex >= 0
+                ? { afterMessageIndex: item.afterMessageIndex } : {}),
             title: limitedText(item.title, 120, apiKey),
             detail: limitedText(item.detail, MAX_ACTIVITY_DETAIL_CHARS, apiKey),
             state: item.state as SessionActivity["state"],
@@ -331,10 +336,24 @@ function safeSessionActivities(value: unknown, apiKey: RedactionKeys = ""): Sess
     return result;
 }
 
+function activityRunAnchors(activities: SessionActivity[]): Map<number, string[]> {
+    const anchors = new Map<number, string[]>();
+    for (const activity of activities) {
+        if (activity.runId && activity.messageIndex !== undefined) {
+            const runIds = anchors.get(activity.messageIndex) ?? [];
+            if (!runIds.includes(activity.runId)) runIds.push(activity.runId);
+            anchors.set(activity.messageIndex, runIds);
+        }
+    }
+    return anchors;
+}
+
 function activityFromEvent(
     activities: SessionActivity[],
     event: AgentEvent,
     runId?: string,
+    messageIndex?: number,
+    afterMessageIndex?: number,
 ): SessionActivity[] | null {
     const now = new Date().toISOString();
     const upsert = (activity: SessionActivity): SessionActivity[] => {
@@ -355,6 +374,8 @@ function activityFromEvent(
     ): SessionActivity => ({
         id,
         ...(runId ? { runId } : {}),
+        ...(messageIndex === undefined ? {} : { messageIndex }),
+        ...(afterMessageIndex === undefined ? {} : { afterMessageIndex: activities.find((item) => item.id === id)?.afterMessageIndex ?? afterMessageIndex }),
         title: limitedText(title, 120),
         detail: limitedText(detail, MAX_ACTIVITY_DETAIL_CHARS),
         state,
@@ -875,10 +896,12 @@ export class AgentHost {
         const isRunning = Boolean(runtime.currentRunId || store.isRunActive(sessionId));
         const history = runtime.agent.history();
         const page = pageConversationMessages(history, history.length,
-            (text) => redact(text, runtime.redactionKeys));
+            (text) => redact(text, runtime.redactionKeys), undefined, activityRunAnchors(runtime.activities));
         const messages = page.messages;
         if (runtime.currentRunId && runtime.partialAssistantText) {
-            messages.push({ id: `assistant-${runtime.currentRunId}`, role: "assistant", text: redact(runtime.partialAssistantText, runtime.redactionKeys) });
+            const lastUser = messages.map((message) => message.role).lastIndexOf("user");
+            const segment = messages.slice(lastUser + 1).filter((message) => message.role === "assistant").length;
+            messages.push({ id: `assistant-${runtime.currentRunId}-${segment}`, role: "assistant", text: redact(runtime.partialAssistantText, runtime.redactionKeys) });
         }
         return {
             session: toSummary(isRunning ? { ...current, status: "running" } : current),
@@ -908,12 +931,13 @@ export class AgentHost {
         const key = sessionKey(workspaceId, sessionId);
         const runtime = this.sessions.get(key);
         if (runtime) return pageConversationMessages(runtime.agent.history(), before,
-            (text) => redact(text, runtime.redactionKeys));
+            (text) => redact(text, runtime.redactionKeys), undefined, activityRunAnchors(runtime.activities));
         const item = this.storeFor(workspaceId).load(sessionId);
         if (!item) throw new DesktopServiceError("SESSION_NOT_FOUND", "This conversation could not be found.");
         const route = safeDesktopSettingsSnapshot(item.desktopSettings) ?? desktopSettingsSnapshot(this.currentSettings());
         const apiKey = this.apiKeyForSettings(route);
-        return pageConversationMessages(item.messages, before, (text) => redact(text, apiKey));
+        return pageConversationMessages(item.messages, before, (text) => redact(text, apiKey), undefined,
+            activityRunAnchors(safeSessionActivities(item.desktopActivities, apiKey)));
     }
 
     updateSessionRoute(workspaceId: string, sessionId: string, modelPreset: string | null, effort: EffortLevel): void {
@@ -1115,6 +1139,8 @@ export class AgentHost {
 
         const runId = randomUUID();
         runtime.currentRunId = runId;
+        const messageIndex = findRunMessageIndex(runtime.agent.history(), retryFailedRequest);
+        runtime.currentRunMessageIndex = messageIndex >= 0 ? messageIndex : null;
         runtime.cancelRequested = false;
         runtime.reviewCaptureEnabled = false;
         this.requestRuns.set(requestId, runId);
@@ -1134,6 +1160,7 @@ export class AgentHost {
             catch { /* A missing review snapshot does not prevent stopping the run. */ }
             runtime.reviewCaptureEnabled = false;
             runtime.currentRunId = null;
+            runtime.currentRunMessageIndex = null;
             this.refreshRuntimeApiKey(runtime);
             runtime.releaseRunLease?.();
             runtime.releaseRunLease = null;
@@ -1156,6 +1183,7 @@ export class AgentHost {
             catch (error) { this.publish(runtime, { type: "notice", level: "warning", text: `无法更新代码审阅快照：${errorMessage(error, runtime.redactionKeys)}` }); }
             runtime.reviewCaptureEnabled = false;
             runtime.currentRunId = null;
+            runtime.currentRunMessageIndex = null;
             this.refreshRuntimeApiKey(runtime);
             runtime.runPromise = null;
             runtime.releaseRunLease?.();
@@ -1218,7 +1246,7 @@ export class AgentHost {
         if (runtime) {
             const outcome = answer.trim() ? "answered" : "skipped";
             runtime.activities = updateQuestionActivity(runtime.activities, requestId, runtime.currentRunId,
-                pending.question, new Date().toISOString(), outcome);
+                pending.question, new Date().toISOString(), outcome, runtime.currentRunMessageIndex ?? undefined);
             this.persistSession(runtime);
             this.publish(runtime, {
                 type: "question.resolved",
@@ -1513,7 +1541,15 @@ export class AgentHost {
                     this.persistSession(runtime);
                 }
                 const safeEvent = safeAgentEvent(event, runtime.workspaceRoot, runtime.redactionKeys);
-                const nextActivities = activityFromEvent(runtime.activities, safeEvent, runtime.currentRunId ?? undefined);
+                if (safeEvent.type === "context.compaction.completed" && runtime.currentRunId) {
+                    const index = findRunMessageIndex(runtime.agent.history(), true);
+                    runtime.currentRunMessageIndex = index >= 0 ? index : null;
+                    runtime.activities = runtime.activities.map((activity) => activity.runId === runtime.currentRunId
+                        ? { ...activity, messageIndex: index >= 0 ? index : undefined, afterMessageIndex: undefined }
+                        : { ...activity, messageIndex: undefined, afterMessageIndex: undefined });
+                }
+                const nextActivities = activityFromEvent(runtime.activities, safeEvent, runtime.currentRunId ?? undefined,
+                    runtime.currentRunMessageIndex ?? undefined, runtime.agent.history().length);
                 let shouldPersist = false;
                 if (safeEvent.type === "plan.mode") {
                     runtime.desktopSettings = { ...runtime.desktopSettings, permissionMode: "desktopDefault" };
@@ -1548,6 +1584,7 @@ export class AgentHost {
             apiKey,
             redactionKeys: apiKey.length >= 8 ? [apiKey] : [],
             currentRunId: null,
+            currentRunMessageIndex: null,
             runPromise: null,
             releaseRunLease: null,
             cancelRequested: false,
@@ -1699,6 +1736,7 @@ export class AgentHost {
             runtime.activities = [...runtime.activities, {
                 id: pending.toolCallId,
                 ...(runtime.currentRunId ? { runId: runtime.currentRunId } : {}),
+                ...(runtime.currentRunMessageIndex === null ? {} : { messageIndex: runtime.currentRunMessageIndex }),
                 title: pending.toolName,
                 detail: JSON.stringify(pending.operation, null, 2),
                 state,
@@ -1721,7 +1759,7 @@ export class AgentHost {
                 if (!this.questions.has(requestId)) return;
                 this.questions.delete(requestId);
                 runtime.activities = updateQuestionActivity(runtime.activities, requestId, runtime.currentRunId,
-                    safeQuestion, new Date().toISOString(), "expired");
+                    safeQuestion, new Date().toISOString(), "expired", runtime.currentRunMessageIndex ?? undefined);
                 this.persistSession(runtime);
                 this.publish(runtime, { type: "question.resolved", requestId, outcome: "expired" });
                 resolve("The user did not answer before this question expired. Do not treat this as a response.");
@@ -1736,7 +1774,7 @@ export class AgentHost {
                 timer,
             });
             runtime.activities = updateQuestionActivity(runtime.activities, requestId, runtime.currentRunId,
-                safeQuestion, new Date().toISOString());
+                safeQuestion, new Date().toISOString(), undefined, runtime.currentRunMessageIndex ?? undefined);
             this.persistSession(runtime);
             this.publish(runtime, {
                 type: "question.requested",
@@ -1769,7 +1807,7 @@ export class AgentHost {
             clearTimeout(pending.timer);
             this.questions.delete(id);
             runtime.activities = updateQuestionActivity(runtime.activities, id, runtime.currentRunId,
-                pending.question, new Date().toISOString(), "cancelled");
+                pending.question, new Date().toISOString(), "cancelled", runtime.currentRunMessageIndex ?? undefined);
             this.persistSession(runtime);
             this.publish(runtime, { type: "question.resolved", requestId: id, outcome: "cancelled" });
             pending.resolve("The task was stopped before the user answered this question.");
