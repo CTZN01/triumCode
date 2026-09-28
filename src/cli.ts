@@ -2,8 +2,8 @@ import { Agent } from "./agent.js";
 import * as readline from "node:readline";
 import chalk from "chalk";
 import {
-    saveSession, loadSession, listSessions, deleteSession,
-    latestSessionId, setActiveSession, startNewSession, clearActiveSession,
+    listSessions, latestSessionId,
+    SessionConflictError, SessionWriter,
     projectRoot, type SessionIndex, type SessionData,
 } from "./session.js";
 import {
@@ -294,6 +294,16 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
         .filter(([, preset]) => !preset.apiKey || preset.apiKey === config.apiKey)
         .map(([label]) => label);
     const startupModelLabel = startupLabels.length === 1 ? startupLabels[0] : "";
+    const sessionWriter = new SessionWriter();
+    let sessionWriteBlocked = false;
+    const reportSessionWriteFailure = (error: unknown, operation: string): void => {
+        sessionWriteBlocked = true;
+        const detail = error instanceof Error ? error.message : String(error);
+        const recovery = "Use /resume to reload or /new to start a separate conversation.";
+        printError(error instanceof SessionConflictError
+            ? `${detail} ${recovery}`
+            : `Could not ${operation}: ${detail}. ${recovery}`);
+    };
 
     const agent = new Agent({
         model: config.model,
@@ -311,24 +321,42 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
         permissionMode: flags.permissionMode as "default" | "plan" | "acceptEdits" | "bypassPermissions" | "dontAsk",
     });
 
+    const runAgentChat = async (prompt: string): Promise<boolean> => {
+        let releaseRunLease: (() => void) | null = null;
+        try {
+            releaseRunLease = sessionWriter.acquireRun();
+            await agent.chat(prompt);
+            return true;
+        } catch (error) {
+            if (!(error instanceof SessionConflictError)) throw error;
+            reportSessionWriteFailure(error, "start a task");
+            return false;
+        } finally {
+            releaseRunLease?.();
+        }
+    };
+
     // Wire up auto-save: after each chat(), persist the session.
     agent.setOnChatComplete(() => {
-        saveSession(agent.history(), agent.getSessionStatus().model);
+        try {
+            sessionWriter.save(agent.history(), agent.getSessionStatus().model);
+        } catch (error) {
+            reportSessionWriteFailure(error, "save this conversation");
+        }
     });
 
     let pendingAskUser: ((answer: string) => void) | null = null;
 
     // ── Which session this run starts in ─────────────────────────
-    // Loading a saved conversation also makes it the active session: saveSession
-    // appends to whatever the pointer names, so without that step the next turn
-    // would extend the wrong file.
+    // The writer keeps this process attached to the selected session even if
+    // another CLI process changes the shared latest-session pointer.
     let resumed: SessionData | null = null;
 
     const resumeByIdentifier = (identifier?: string): SessionData | null => {
-        const saved = loadSession(identifier);
+        const saved = sessionWriter.resume(identifier);
         if (!saved) return null;
         agent.loadHistory(saved.messages as any);
-        setActiveSession(saved.id);
+        sessionWriteBlocked = false;
         return saved;
     };
 
@@ -357,18 +385,19 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
             // A failed explicit resume must not fall back to whatever session
             // the pointer happened to name — the user asked for one that is
             // not there, so start clean.
-            startNewSession();
+            sessionWriter.startNew();
         }
     } else {
         // Default, and --new: retire the pointer so the first save mints a new
         // session, leaving every saved conversation intact for --continue.
-        startNewSession();
+        sessionWriter.startNew();
     }
 
     // ── One-shot mode ────────────────────────────────────────────
     if (flags.oneShot) {
         agent.setAskUserCallback(async () => "Error: ask_user is unavailable in one-shot mode.");
-        await agent.chat(flags.oneShot);
+        await runAgentChat(flags.oneShot);
+        if (sessionWriteBlocked) process.exitCode = 1;
         return;
     }
 
@@ -531,6 +560,14 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
             sigintCount = 0;
             sessionFooterPending = false;
 
+            if (sessionWriteBlocked && ![
+                "exit", "quit", "/new", "/resume", "/sessions", "/help",
+            ].includes(input) && !input.startsWith("/resume ")) {
+                printError("This conversation is out of date. Use /resume to reload it, or /new to start a separate conversation.");
+                askQuestion();
+                return;
+            }
+
             // Empty line: re-prompt.
             if (!input) {
                 // If the agent is waiting for an answer to ask_user, an empty
@@ -566,11 +603,14 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
 
             // ── Slash commands ─────────────────────────────────────
             if (input === "/clear") {
-                agent.clearHistory();
-                // Empties the session on disk too — saveSession() ignores an
-                // empty history, so without this the wipe would not outlive
-                // the process.
-                clearActiveSession();
+                try {
+                    sessionWriter.clear();
+                    agent.clearHistory();
+                } catch (error) {
+                    reportSessionWriteFailure(error, "clear this conversation");
+                    askQuestion();
+                    return;
+                }
                 printInfo("history cleared");
                 askQuestion();
                 return;
@@ -578,7 +618,8 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
 
             if (input === "/new") {
                 agent.clearHistory();
-                startNewSession();
+                sessionWriter.startNew();
+                sessionWriteBlocked = false;
                 printInfo("new session - the previous one is kept under /sessions");
                 askQuestion();
                 return;
@@ -649,15 +690,23 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
             }
 
             if (input === "/compact") {
-                agent.compact();
-                saveSession(agent.history(), agent.getSessionStatus().model);
-                printInfo("history compacted");
+                let releaseRunLease: (() => void) | null = null;
+                try {
+                    releaseRunLease = sessionWriter.acquireRun();
+                    agent.compact();
+                    sessionWriter.save(agent.history(), agent.getSessionStatus().model);
+                    printInfo("history compacted");
+                } catch (error) {
+                    reportSessionWriteFailure(error, "save the compacted conversation");
+                } finally {
+                    releaseRunLease?.();
+                }
                 askQuestion();
                 return;
             }
 
             if (input === "/plan") {
-                agent.togglePlanMode();
+                await agent.togglePlanMode();
                 printInfo(`Plan mode: ${agent.planMode ? "ON" : "OFF"}`);
                 askQuestion();
                 return;
@@ -846,7 +895,7 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
 
             if (input === "/sessions") {
                 const sessions = listSessions();
-                const current = latestSessionId();
+                const current = sessionWriter.activeId();
                 printBlock("");
                 printSessionTable(sessions, current);
                 askQuestion();
@@ -857,10 +906,15 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
                 const id = input.slice(7).trim();
                 if (!id) {
                     printError("Usage: /delete <session-id>");
-                } else if (deleteSession(id)) {
-                    printInfo(`session ${id} deleted`);
                 } else {
-                    printError(`session ${id} not found`);
+                    try {
+                        if (sessionWriter.delete(id)) printInfo(`session ${id} deleted`);
+                        else printError(`session ${id} not found`);
+                    } catch (error) {
+                        if (sessionWriter.activeId() === id) sessionWriteBlocked = true;
+                        const detail = error instanceof Error ? error.message : String(error);
+                        printError(`Could not delete session ${id}: ${detail}`);
+                    }
                 }
                 askQuestion();
                 return;
@@ -888,8 +942,7 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
                     if (prompt) {
                         try {
                             printTurnStart();
-                            await agent.chat(prompt);
-                            sessionFooterPending = true;
+                            sessionFooterPending = await runAgentChat(prompt);
                         } catch (e: any) {
                             if (e.name !== "AbortError" && !e.message?.includes("aborted")) {
                                 printError(e.message);
@@ -904,8 +957,7 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<vo
             // ── Chat ──────────────────────────────────────────────
             try {
                 printTurnStart();
-                await agent.chat(input);
-                sessionFooterPending = true;
+                sessionFooterPending = await runAgentChat(input);
             } catch (e: any) {
                 if (e.name !== "AbortError" && !e.message?.includes("aborted")) {
                     printError(e.message);

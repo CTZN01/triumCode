@@ -92,8 +92,7 @@ function loadRulesDir(cwd: string): string {
 }
 
 // Full CLAUDE.md content: walk-up files + rules directory.
-export function loadClaudeMd(): string {
-    const cwd = process.cwd();
+export function loadClaudeMd(cwd = process.cwd()): string {
     const parts = collectClaudeMdFiles(cwd);
     const rules = loadRulesDir(cwd);
 
@@ -108,7 +107,7 @@ export function loadClaudeMd(): string {
 // Git context — branch, recent commits, working tree status
 // ═══════════════════════════════════════════════════════════════
 
-export function getGitContext(): string {
+export function getGitContext(cwd = process.cwd()): string {
     try {
         // stderr is piped, not inherited. execSync forwards a failing child's
         // stderr to ours by default, and the `catch` below means "no git here,
@@ -116,6 +115,7 @@ export function getGitContext(): string {
         // as `fatal: not a git repository...` in every non-repo directory.
         const opts: ExecSyncOptionsWithStringEncoding = {
             encoding: "utf-8",
+            cwd,
             timeout: 3000,
             stdio: ["ignore", "pipe", "pipe"],
         };
@@ -160,6 +160,8 @@ When given a task, do exactly what was asked — no more, no less.
 - Do not propose changes to code you haven't read. Read files first.
 - Do not create files unless necessary. Prefer editing existing files.
 - When fixing a bug, identify the root cause before changing code.
+
+When a request needs tools, first send a brief message in the user's language saying what you will check or do. Put this message before the first tool call, then continue with the tools in the same turn. Do not wait for a reply unless the task requires approval or clarification. A plan, when required, serves as this first message.
 
 # Planning
 
@@ -216,7 +218,7 @@ Use the dedicated tools — they have structured I/O, fine-grained permissions, 
 | sed / awk | edit_file | Exact string match, rejects stale writes, returns the edited region |
 | repeated edit_file on one file | multi_edit | One call, one write, atomic if any edit fails |
 | find / ls -R | list_files | Filters noise (node_modules, .git), depth-limited |
-| grep / rg | grep_search | Structured output, scan ceiling, regex validation |
+| grep / rg | grep_search | Uses ripgrep first, then grep or the built-in scanner; structured output and regex validation |
 | shell execution | run_command | No shell — safer, explicit args, timeout enforced |
 
 - If several tool calls are independent, make them in parallel.
@@ -225,10 +227,10 @@ Use the dedicated tools — they have structured I/O, fine-grained permissions, 
 
 # Tone and style
 
-- Lead with the answer. Explain only when the user asks or when the explanation prevents a mistake.
-- Keep responses short. The user is a developer — do not narrate what you are about to do; just do it.
-- Planning is not narration. When the task is non-trivial, present the plan and wait — that is the work, not preamble.
-- Do not narrate between tool calls. Saying "Let me read the file" before read_file is noise — just call the tool. The UI shows what you are doing.
+- Lead with the answer for questions; for work requiring tools, start with the brief progress message above.
+- Keep responses short. For multi-step work, briefly tell the user what you are investigating and share meaningful findings or a change of direction while you work.
+- When the task is non-trivial, present the plan and wait for approval as required above.
+- Do not announce routine tool calls. Explain the purpose and findings of a group of actions so the user can follow the work without reading command logs.
 - Reference code as file_path:line_number (e.g. \`src/agent.ts:42\`).
 - Do not apologize for things that are not your fault.
 - Use the user's language. If they write in Chinese, respond in Chinese.
@@ -240,7 +242,7 @@ Use the dedicated tools — they have structured I/O, fine-grained permissions, 
 - When multiple small changes are needed in the same file, send them as one multi_edit call rather than several sequential edit_file calls. Every extra edit is another full round trip over the same conversation prefix.
 - After an edit, the tool returns the edited region with line numbers. Quote your next old_string straight from that result instead of re-reading the file.
 - If an edit reports that old_string was not found, it quotes the closest lines from the file. Copy them verbatim rather than rewriting the anchor from memory.
-- When the task is simple (one file, one edit), respond with just the tool call and a one-line confirmation. No preamble.`;
+- When the task is simple (one file, one edit), keep the opening message to one short sentence and finish with a one-line confirmation.`;
 
 // Exported because a sub-agent spawned under plan mode needs the same notice:
 // it runs with the plan-mode permission mode, so without this it would spend
@@ -259,17 +261,17 @@ Execute only after the user explicitly approves the plan.`;
 // The memory index is the one part that can change mid-session (the agent
 // saves a memory, and the index should show it on the next turn). That costs
 // one cache miss per save, which is rare and worth the freshness.
-export function buildStaticSystemPrompt(planMode = false): string {
-    const toolBlock = buildToolPromptBlock();
-    const skillBlock = buildSkillPromptBlock();
+export function buildStaticSystemPrompt(planMode = false, workspaceRoot = process.cwd()): string {
+    const toolBlock = buildToolPromptBlock(undefined, workspaceRoot);
+    const skillBlock = buildSkillPromptBlock({ cwd: workspaceRoot });
     const persona = planMode ? PERSONA + PLAN_MODE : PERSONA;
     return [
         persona,
         toolBlock,
         skillBlock,
-        buildEnvironmentContext(),
-        loadClaudeMd(),
-        buildMemoryPromptSection(),
+        buildEnvironmentContext(workspaceRoot),
+        loadClaudeMd(workspaceRoot),
+        buildMemoryPromptSection({ cwd: workspaceRoot }),
     ].filter(Boolean).join("\n\n");
 }
 
@@ -317,7 +319,7 @@ function probeWindowsToolsUncached(): string {
 // Sub-agents carry this and nothing else of the main prompt: cwd and platform
 // are what a tool call needs, and every byte of persona that came with them
 // would be re-sent on every sub-agent request.
-export function buildEnvironmentContext(): string {
+export function buildEnvironmentContext(workspaceRoot = process.cwd()): string {
     const platform = `${os.platform()} ${os.arch()}`;
     const shell = process.platform === "win32"
         ? (process.env.ComSpec || "cmd.exe")
@@ -325,7 +327,7 @@ export function buildEnvironmentContext(): string {
 
     return [
         "# Environment",
-        `Working directory: ${process.cwd()}`,
+        `Working directory: ${workspaceRoot}`,
         `Platform: ${platform}`,
         `Shell: ${shell}`,
         probeWindowsTools(),
@@ -339,11 +341,11 @@ export function buildEnvironmentContext(): string {
 // the agent writes, and a changing byte in the system prompt invalidates the
 // cache for the whole conversation behind it. Here it costs its own few dozen
 // tokens, on a message that is new anyway, and invalidates nothing.
-export function buildTurnContextReminder(): string {
+export function buildTurnContextReminder(workspaceRoot = process.cwd()): string {
     const date = new Date().toISOString().split("T")[0];
 
     const parts: string[] = [];
-    const git = getGitContext().trim();
+    const git = getGitContext(workspaceRoot).trim();
     if (git) parts.push(git);
 
     const deferred = getDeferredToolNames();

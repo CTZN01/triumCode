@@ -1,4 +1,5 @@
 import type Anthropic from "@anthropic-ai/sdk";
+import { materializeAttachments, describeImageFailure } from "./attachments.js";
 import {
     authHeaders,
     endpoint,
@@ -47,11 +48,16 @@ export function toChatMessages(
         }
 
         const text: string[] = [];
+        const parts: unknown[] = [];
         const toolCalls: any[] = [];
         const toolResults: any[] = [];
 
         for (const block of message.content as any[]) {
-            if (block.type === "text") text.push(block.text);
+            if (block.type === "text") { text.push(block.text); parts.push({ type: "text", text: block.text }); }
+            else if (block.type === "image" && message.role === "user") {
+                parts.push({ type: "image_url", image_url: { url: block.source.type === "base64"
+                    ? `data:${block.source.media_type};base64,${block.source.data}` : block.source.url } });
+            }
             else if (block.type === "tool_use") {
                 toolCalls.push({
                     id: block.id,
@@ -84,7 +90,7 @@ export function toChatMessages(
             // A user turn carrying results becomes one role:"tool" message per
             // call; any text the model should see follows them.
             out.push(...toolResults);
-            if (text.length) out.push({ role: "user", content: text.join("") });
+            if (parts.length) out.push({ role: "user", content: parts.length === text.length ? text.join("") : parts });
         }
     }
     return out;
@@ -273,6 +279,7 @@ export class OpenAIChatProvider implements ModelProvider {
     }
 
     async stream(req: ModelRequest, signal?: AbortSignal): Promise<AsyncIterable<any>> {
+        req = { ...req, messages: await materializeAttachments(req.messages, signal) };
         const url = endpoint(this.cfg.apiBase, CHAT_PATH);
         const headers = authHeaders(this.cfg);
 
@@ -283,9 +290,10 @@ export class OpenAIChatProvider implements ModelProvider {
             const namesStreamOptions = String(e?.message ?? "").toLowerCase().includes("stream_options");
             if (this.includeUsage && e instanceof ProviderError && e.status === 400 && namesStreamOptions) {
                 this.includeUsage = false;
-                res = await postForStream(url, headers, this.body(req), signal);
+                try { res = await postForStream(url, headers, this.body(req), signal); }
+                catch (error) { describeImageFailure(error, req.messages); }
             } else {
-                throw e;
+                describeImageFailure(e, req.messages);
             }
         }
 

@@ -20,6 +20,231 @@ TriumCode supports three API protocols, so it can connect to Anthropic directly 
 - Node.js 20 or later
 - An API key for Anthropic, or for a compatible gateway
 
+## Desktop preview
+
+This repository also contains a Windows-first Electron desktop alpha. It reuses
+the same Agent and tools as the CLI. The alpha includes local workspaces,
+workspace-scoped conversations, streamed replies, collapsible tool activity in the chat, approval
+cards that identify the default policy or matching user/project rule and record
+approval outcomes in activity, stop/cancel, model settings, per-run code review, Git status,
+staged/unstaged file diffs with old/new line numbers and collapsible hunks,
+selected-file stage/unstage actions, commits that contain staged content only,
+and a workspace-bound Windows PowerShell terminal. Creating a commit can run
+the repository's local Git hooks.
+User-question activity records answered, skipped, expired, and cancelled
+outcomes without saving the answer text. Choice questions also offer Skip.
+When an API key changes during an open conversation, later visible events and
+saved session copies redact both the previous and current keys.
+Deleting a conversation removes its saved session and desktop review snapshots;
+project files and saved API keys remain. The app reports if review cleanup fails.
+New worktrees can start from a local branch, an existing remote-tracking branch,
+a tag, or a commit. The branch suggestions do not fetch from remotes.
+Closing the window with a running task or open terminal asks whether to stop
+them or stay in the app. Exit waits for task cancellation and PowerShell's exit
+event; if the shell does not exit, the app reports the failure and stays open.
+The global task center aggregates recent tasks across saved workspaces, supports
+search and jumps to a session's latest activity, and can stop runs owned by the
+current desktop process. Tasks owned by another CLI or desktop process can only
+be viewed and refreshed here; their persisted state distinguishes waiting for
+approval or a user answer from active work without allowing this window to
+resolve or stop a run it does not own.
+The desktop settings page controls the concurrent-run limit (1–8, default 3).
+When the limit is reached, the draft stays in the composer and the app explains
+that a running task must finish before retrying.
+Named model presets from the CLI config can be selected in desktop settings.
+The composer offers model-preset and reasoning-effort choices for the current
+conversation; they apply to its next request and persist after restart. Model and
+effort changes are unavailable while a request is running. Settings has a separate Appearance section with System, Light,
+and Dark choices. The context-window field accepts exact token counts such as
+1,000,000.
+The composer groups model selection with a five-step reasoning slider on the right.
+On the left, it offers per-conversation permission choices (confirm operations,
+accept file edits, or full access without approval except explicit deny rules).
+A permission change applies immediately, including while a task is running, and
+takes effect for the operations that follow; it persists after restart.
+While the Agent runs, the composer remains editable and accepts attachments.
+Enter or the send button interrupts the current task and continues in the same
+conversation with the new request; Shift+Enter inserts a newline, and IME
+confirmation does not send. Stop remains a separate action. A handoff waits for
+dispatched tools and session saving to finish, preserves completed changes and
+tool results, and never runs two turns in the workspace together. Stop during
+handoff cancels the pending follow-up and restores its draft. Invalid attachments
+are rejected before interrupting the current task. Conversations running in
+another process cannot be interrupted from this window. Each follow-up is one
+new user message and one normal model request; the static system prompt and
+existing history prefix stay unchanged.
+The composer accepts up to eight attachments per message through image paste (Ctrl+V),
+drag and drop, or the file picker. Ordinary text paste works as usual. Images show
+removable thumbnails; click a draft or sent thumbnail to view the original image.
+PNG, JPG/JPEG and WebP are supported. Original images are limited to 20 MiB;
+a separate model copy is scaled to at most 1568 pixels per edge and about 1.2 megapixels,
+and limited to 4 MiB. The original is preserved. All three protocols send actual visual
+inputs, so the selected model/gateway must support images.
+Code, text, logs, JSON and Markdown remain local file references; project files are
+neither copied nor inserted into the message. The Agent searches and reads relevant
+line ranges on demand.
+Read/search access to explicitly attached external text files is limited to those
+exact files; adding an attachment does not grant write access outside the workspace.
+PDF and Office attachments currently send references with an explicit notice;
+there is no built-in document parser or provider file upload.
+Sessions store attachment metadata, never image base64. Image snapshots and their
+model copies stay fixed across retries and reopening a conversation, keeping history
+prefixes stable. Image inputs still consume visual tokens; thumbnails never enter
+model context, and attachments do not change the static system prompt. Removing a
+draft cleans up its managed copies, abandoned drafts expire after 24 hours when the
+conversation is opened, and deleting a conversation removes its owned attachments
+without deleting referenced source files. Missing files, invalid images and rejected
+vision requests report errors.
+For tasks that need tools, the Agent first sends a brief progress message before calling them.
+The active Agent status and concise progress updates appear in the conversation while a task runs, with
+`thinking` shown during model reasoning. The same status indicator stays mounted from startup through streaming and tool execution, with a continuous left-to-right highlight that respects reduced-motion preferences. Recent tool calls appear between progress messages with their original tool names and file, pattern, or command arguments in muted text. Completed edits show green additions and red deletions; expand edit_file or multi_edit to view the fixed diff captured from that call's actual before/after contents, including its net line counts and colored code. Each multi_edit shows the whole batch's net changes. Expanded edits use compact file cards with syntax highlighting, one line-number gutter, red/green change rows, and a copy button; raw arguments, output, and permission details are folded under Call details. Records without a historical patch can show the tool's saved, highlighted post-edit snippet, clearly labeled as a snippet. Later edits, staging, and commits do not alter this history; old records without a captured patch say so explicitly. Patches stay with the latest 200 saved activity records, are limited to 64 KiB each, and do not enter model context. The right panel separately shows cumulative run and current Git changes, respecting Git's configured line-ending handling. Expand the list for older calls and each call for approval details. The
+conversation menu provides Rename and Delete actions. Settings has Appearance,
+current-conversation Usage, and Model sections; Appearance includes a saved
+interface text-size choice. Usage is based on tokens reported by the model
+and does not represent the provider account's remaining quota.
+Opening a conversation loads its latest 40 visible messages and starts at the
+newest message; scroll upward or
+use Load earlier messages to fetch older history. Returning to the bottom keeps
+only recent messages in the view; earlier messages still present in the session
+can be fetched again. The
+desktop process also releases older idle conversation runtimes as more sessions
+are opened; the visible conversation and running tasks remain loaded.
+Each preset and the custom route has its own protected API key slot. A
+conversation keeps its selected model route and reasoning settings. Changing
+global preferences applies to new conversations; the composer changes the current
+conversation only when selected explicitly. The saved route snapshot never contains an
+API key.
+The short connection test reports whether a failure points to credentials,
+rate limits, network access, the model route, or a timeout, without showing
+raw provider error text.
+The desktop rejects a base URL containing credentials, query parameters, or a
+fragment; enter the API key in its protected field. Editing a route or key
+clears the previous connection-test result until it is tested again.
+Desktop tool activity and newly saved conversation history replace occurrences
+of the active provider key when it is at least eight characters long.
+The desktop restores the main window's size and position and panel widths. Its
+neutral light and dark themes follow the system appearance by default, including
+changes while the app is open; you can also choose either theme in Settings. Drag
+either vertical divider to resize the workspace sidebar or
+inspector; keyboard users can focus a divider and adjust it with the arrow keys.
+The button in the title bar collapses or restores the inspector to give the
+conversation more room. Its state is saved across app restarts, and reopening it
+keeps the previously selected tab. Large diffs scroll inside the inspector while
+the conversation composer stays visible.
+The context usage popover uses distinct color markers for each token metric.
+The changes panel colors file status letters by Git status and shows diff hunk
+headers in a muted GitHub-style palette.
+Click the branch name in the title bar to open a compact popover for switching
+between local branches or creating a new branch. Git Graph opens a larger window
+with the latest 100 local commits; selecting one shows its full message and file
+summary. The branch popover stays neutral; graph lines follow actual commit parent
+links, with color marking branch lanes. The commit list fills the window until a
+commit is selected; its detail pane can be closed to restore that space. Click outside the popover or press
+Escape to close it. Switching to an existing branch requires a clean worktree;
+creating a branch carries local edits into it. Managed isolated worktrees keep
+their assigned branch. The terminal and
+right inspector open and close with a short motion that respects reduced-motion
+settings. Resizing follows the pointer directly and settles without an animation.
+Code block headers use the interface font, while code stays monospaced.
+Common actions expose the visible `Ctrl+N` / `Ctrl+,` shortcuts on Windows and
+their `Command` equivalents on macOS. Inspector and review tabs support arrow,
+Home, and End navigation; modal dialogs keep keyboard focus inside, restore it when
+closed, and close with Escape. Approval actions, file selection, and collapsible
+diff hunks remain reachable by keyboard and expose their selected or status
+labels to assistive technology.
+For a failed task, the last request can be restored to the composer for review
+and editing. Sending it appends a new user message; the app does not replay the
+failed run automatically because completed file and command side effects may
+remain in the workspace.
+Turn failures identify network, authentication, rate-limit, provider/protocol,
+or internal errors and suggest the next configuration or recovery step. A safe
+retry is available only when a transient failure happened before any tool was
+started; it reuses the existing request without adding another visible user
+message. After a tool starts, review the workspace and restore the request as a
+new message instead.
+The workspace sidebar can create an isolated Git worktree from a selected
+branch or commit. If the source workspace has uncommitted changes, the user must
+confirm that those changes will not be copied. The worktree review dialog shows
+the baseline diff and dirty state, merges only a clean worktree into the
+original source branch, and directs conflict resolution to the source terminal.
+Removing a worktree is blocked while it has uncommitted changes; its branch is
+kept by default, and Git must confirm a branch is merged before it can be
+deleted. Runtime acceptance is still outstanding.
+If saving the desktop worktree association fails after Git creates the worktree,
+the app attempts to remove the empty worktree and restore the source workspace;
+if cleanup cannot finish, the error identifies the path and branch to recover.
+Command approvals explain that programs can still access files outside the
+workspace or use the network; approval is not an OS-level sandbox.
+While the review panel is open, workspace file changes refresh its Git and
+per-run review state automatically.
+Review marks Git changes that existed before a task and can restore captured
+file versions after a second confirmation and a current-version check. For
+non-Git folders it reviews Agent file-tool writes; files changed directly by
+shell commands cannot be attributed there. In Git projects, visible command
+diffs are listed, but changes hidden by ignore rules or committed during a run
+cannot be fully attributed. Review snapshots stay in Electron's
+local user-data folder and retain up to 20 completed runs per workspace. Files
+over 2 MiB or snapshots over 8 MiB per run may be excluded from restore. This
+is not a complete desktop MVP: runtime and recovery acceptance, an OS-level
+process sandbox, a signed installer, and an update path are still outstanding.
+Delivery is prioritized as a Windows x64 portable preview, followed by the
+reliability, task workflow, trust, and supported-release milestones in the
+[desktop roadmap](docs/desktop-roadmap.md). Task center, concurrent runs,
+worktrees, and Git write actions in the preview branch remain experimental
+until Windows and multi-process acceptance is recorded. The full requirements
+remain in the [desktop product specification](docs/desktop-plan.md).
+
+Desktop dependency installation, development, and packaging require Node.js
+22.12 or later. The CLI continues to support Node.js 20:
+
+```bash
+npm run desktop:dev
+npm run desktop:build
+npm run desktop:preview
+npm run desktop:package # creates a Windows x64 portable zip under out/desktop-release
+```
+
+The portable app does not need Node.js at runtime. It supports Windows x64 only
+and currently has no installer, code signing, or automatic updates. Packaging
+downloads locked production dependencies. Extract the archive with Windows
+Explorer and run `TriumCode.exe`. Removing the extracted folder does not remove
+desktop settings and protected credentials from `%APPDATA%\triumcode`, or project
+sessions from the TriumCode session directory.
+
+For a fresh development checkout, install dependencies with Node.js 22.12 or
+later, then run `npm run desktop:setup` once to download the matching Electron
+runtime. `npm run desktop:dev` also checks and installs that runtime before
+opening the app.
+
+The CLI commands above remain available. Existing CLI credentials are not
+copied automatically; the desktop settings page can import them into the
+operating system's protected credential store. API keys are not returned to
+the renderer. A key saved in `desktop:dev` is reused after restart and by the
+portable app under the same Windows profile. If no credential is ready, the
+desktop points to setup and keeps the draft without starting a request. Desktop
+settings and workspace recents live in `%APPDATA%\triumcode`; conversation files stay in the existing local TriumCode
+session store, including a bounded history of desktop tool and sub-agent
+activity that remains visible when a conversation is reopened. Tool activity
+shows explicit completed, failed, denied, or cancelled states alongside its
+result, which can be copied from its inline activity details. The right panel
+contains code review and conversation details. Session grants
+you explicitly approve are saved with that conversation and remain active
+after restart; only an exact tool call with matching parameters is allowed.
+You can revoke a grant from conversation details. Revocation blocks future
+matching calls but does not stop a process that has already started. Code review
+preimages are encrypted with the operating system's protected storage so files
+can be restored after a task ends; older snapshots are pruned after the most
+recent 20 completed runs per workspace.
+The conversation details show an estimate of context use and remaining usable window for the
+last request. Input, output, and cache token totals appear only when the
+provider actually reports those fields. Automatic context compaction is recorded
+in the activity timeline. Context figures are local estimates, not exact
+provider metering or account quota. If a saved conversation has output tokens
+but no usable prompt totals, the desktop shows prompt and cache usage as
+unavailable; older missing totals cannot be reconstructed.
+Desktop conversation messages render Markdown tables and HTTPS links. The main
+process asks before opening an external link in the default browser.
+
 ## Installation
 
 ```bash
@@ -411,12 +636,12 @@ returns to the prompt. **Ctrl+C** twice while idle exits.
 
 | Tool | Description |
 |------|-------------|
-| `read_file` | Read a text file with line numbers. 2000 lines by default; use `offset`/`limit` to page (maximum 5000). Rejects binary files and files larger than 20 MB |
+| `read_file` | Read a text file with line numbers. 2000 lines by default; use `offset`/`limit` to page (maximum 5000). Rejects binary files; files over 20 MiB are streamed in bounded chunks, with oversized lines/output truncated |
 | `write_file` | Write a file atomically (temporary file, then rename) |
 | `edit_file` | Replace an exact, unique string in a file (requires a prior read). Returns the edited region with line numbers, or `replace_all: true` to change every occurrence |
 | `multi_edit` | Apply several edits to one file in a single call; validated together and written once, so a failing edit discards the whole batch |
 | `list_files` | List a directory recursively, skipping `node_modules`/`.git`/`dist`-style directories; capped at 200 entries |
-| `grep_search` | Regex search across files (uses the system `grep` when available, otherwise an in-process chunked scanner) |
+| `grep_search` | Regex search across files (prefers system `rg`, falls back to `grep`, then to an in-process chunked scanner) |
 | `run_command` | Run a program directly (no shell — pipes and redirects are unsupported); 30-second timeout |
 | `git_diff` | Show the working-tree or staged diff, optionally limited to a path |
 | `ask_user` | Ask the user a question mid-task, with optional arrow-key choices |
@@ -547,6 +772,14 @@ home directory is never accepted as a project root.
 - Keying on the project root rather than the working directory means the same
   session list is visible from any subdirectory of the project.
 - Sessions are never shared between projects.
+- Session files use revisions and a cross-process write lock. If another CLI or
+  desktop process changes a conversation first, a stale save is rejected and
+  the CLI requires `/resume` before continuing.
+- A cross-process workspace lease allows one Agent run or Git index write at a
+  time for a workspace. Different workspaces can run independently; separate
+  sessions in one worktree are serialized until task isolation is available.
+  Per-session leases still protect conversation history, and a run lease left
+  by a crashed process is recovered as an interrupted run by the desktop.
 - At most 50 sessions are retained per project; the oldest are pruned
   automatically.
 - Sessions in the legacy project-local `.triumcode/sessions/` directory are
@@ -662,7 +895,7 @@ block is never modified.
 npm run build        # Compile TypeScript to dist/
 npm run dev          # Build and run
 npx tsc --noEmit     # Type check without emitting
-npm test             # Build and run the test suite (node:test over dist/)
+npm test             # Build and run the CLI and desktop test suites
 ```
 
 ## Contributing

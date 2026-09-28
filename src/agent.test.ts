@@ -1,11 +1,89 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Agent } from "./agent.js";
+import { Agent, type AgentEvent } from "./agent.js";
 import type { PermissionMode } from "./permissions.js";
+import { createHash } from "node:crypto";
+import type { Attachment } from "./attachments.js";
+import { SessionStore, sessionAttachmentDirectory } from "./session.js";
+
+test("interrupting a stream waits for dispatched writes, preserves tool pairs and continues with stable history", { timeout: 10_000 }, async () => {
+    const root = mkdtempSync(join(tmpdir(), "triumcode-steer-agent-"));
+    const path = join(root, "completed.txt");
+    let started!: () => void;
+    let finishWrite!: () => void;
+    const writeStarted = new Promise<void>(done => { started = done; });
+    const writeGate = new Promise<void>(done => { finishWrite = done; });
+    const api = await fakeApi([
+        w => {
+            w(start(0, { type: "text", text: "" })); w(textDelta(0, "partial progress")); w(stop(0));
+            w(start(1, { type: "tool_use", id: "write-before-interrupt", name: "write_file", input: {} }));
+            w(jsonDelta(1, JSON.stringify({ file_path: path, content: "written once" }))); w(stop(1));
+            w(start(2, { type: "text", text: "" })); w(textDelta(2, "later text")); w(stop(2)); w(finish("tool_use"));
+        },
+        w => { w(start(0, { type: "text", text: "" })); w(textDelta(0, "new direction")); w(stop(0)); w(finish("end_turn")); },
+    ]);
+    const events: AgentEvent[] = [];
+    const agent = new Agent({ model: "m", apiKey: "k", apiBase: api.url, workspaceRoot: root, thinking: false,
+        permissionMode: "bypassPermissions", sideQuery: async () => "[]", onEvent: event => events.push(event),
+        onBeforeFileWrite: async () => { started(); await writeGate; } });
+    let finished = false;
+    try {
+        const first = agent.chat("initial task").then(() => { finished = true; });
+        await writeStarted;
+        agent.abort();
+        await new Promise(done => setImmediate(done));
+        assert.equal(finished, false, "the run must retain its lease while an already dispatched write is finishing");
+        finishWrite();
+        await first;
+        assert.equal(readFileSync(path, "utf8"), "written once");
+        assert(events.some(event => event.type === "tool.completed" && event.executionStarted));
+        assert(events.some(event => event.type === "turn.cancelled"));
+        const history = agent.history();
+        const blocks = history.flatMap(message => Array.isArray(message.content) ? message.content : []);
+        assert.equal(blocks.filter(block => block.type === "tool_use").length, 1);
+        assert.equal(blocks.filter(block => block.type === "tool_result").length, 1);
+        assert.match(JSON.stringify(history), /partial progress/);
+        await agent.chat("change the task");
+        assert.equal(api.requests, 2, "the interrupted request must not start another model iteration");
+        assert.deepEqual(api.bodies[1].system, api.bodies[0].system);
+        assert.deepEqual(api.bodies[1].messages.slice(0, history.length).map((message: { content: Array<{ cache_control?: unknown }> }) => ({ ...message, content: message.content.map(({ cache_control: _cache, ...block }) => block) })), history);
+    } finally { finishWrite(); api.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("image requests survive saved-session reload and safe retry without persisting base64", async () => {
+    const root = mkdtempSync(join(tmpdir(), "triumcode-agent-attachment-"));
+    const bytes = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aBe0AAAAASUVORK5CYII=", "base64");
+    const store = new SessionStore(root);
+    const session = store.create("image-model");
+    const managed = sessionAttachmentDirectory(session.id, root);
+    mkdirSync(managed, { recursive: true });
+    const path = join(managed, "model.png");
+    writeFileSync(path, bytes);
+    const image: Attachment = { id: "ad4200a2-8a16-4468-9005-c720fc4478cc", type: "image", path, modelPath: path, name: "capture.png", mimeType: "image/png", size: bytes.length,
+        width: 1, height: 1, modelWidth: 1, modelHeight: 1, modelMimeType: "image/png", modelSize: bytes.length, modelHash: createHash("sha256").update(bytes).digest("hex") };
+    const api = await fakeApi([(w) => { w(start(0, { type: "text", text: "" })); w(textDelta(0, "image seen")); w(stop(0)); w(finish("end_turn")); }], new Set([0]));
+    const options = { model: "image-model", apiKey: "k", apiBase: api.url, workspaceRoot: root, thinking: false, onEvent: () => {}, sideQuery: async () => "[]" };
+    try {
+        const agent = new Agent(options);
+        await assert.rejects(agent.chat("inspect the image", [image]), /scripted failure/);
+        store.save(session.id, agent.history(), "image-model", session.revision ?? 0);
+        const saved = store.load(session.id)!;
+        assert(!JSON.stringify(saved.messages).includes(bytes.toString("base64")));
+        const resumed = new Agent(options);
+        resumed.loadHistory(saved.messages as ReturnType<Agent["history"]>);
+        await resumed.retryFailedTurn("inspect the image");
+        assert.equal(api.bodies.length, 2);
+        assert.deepEqual(api.bodies[0].messages[0].content[0], api.bodies[1].messages[0].content[0]);
+        assert.equal(api.bodies[1].messages.flatMap((message: { content: Array<{ type: string }> }) => message.content).filter((block: { type: string }) => block.type === "image").length, 1);
+        assert.equal(api.bodies[0].messages[0].content[0].source.data, bytes.toString("base64"));
+        store.delete(session.id);
+        assert(!existsSync(managed), "session deletion cleans up its owned images");
+    } finally { api.close(); store.delete(session.id); rmSync(root, { recursive: true, force: true }); }
+});
 
 // ═══════════════════════════════════════════════════════════════
 // Agent loop behaviour, driven by a scripted SSE endpoint
@@ -44,7 +122,7 @@ interface FakeApi {
     close(): void;
 }
 
-async function fakeApi(turns: Turn[], failOn: Set<number> = new Set()): Promise<FakeApi> {
+async function fakeApi(turns: Turn[], failOn: Set<number> = new Set(), startUsage = MESSAGE_START.message.usage): Promise<FakeApi> {
     let n = 0;
     const bodies: any[] = [];
     const headers: any[] = [];
@@ -68,7 +146,7 @@ async function fakeApi(turns: Turn[], failOn: Set<number> = new Set()): Promise<
 
         res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
         const write = (event: any) => res.write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
-        write(MESSAGE_START);
+        write({ ...MESSAGE_START, message: { ...MESSAGE_START.message, usage: startUsage } });
         // Repeat the last scripted turn forever, so a loop that fails to
         // terminate shows up as a turn-limit hit rather than a hung test.
         turns[Math.min(index, turns.length - 1)](write);
@@ -95,7 +173,11 @@ async function runChat(
         maxTokens?: number;
         permissionMode?: PermissionMode;
         askUser?: (question: string, options?: string[]) => Promise<string>;
+        onBeforeFileWrite?: (absolutePath: string) => void | Promise<void>;
+        onEvent?: (event: AgentEvent) => void;
+        workspaceRoot?: string;
         failOn?: Set<number>;
+        startUsage?: typeof MESSAGE_START.message.usage;
     } = {},
 ): Promise<{ agent: Agent; api: FakeApi; output: string; error: any }> {
     // Memory dirs resolve from the cwd (memory.ts), so a memory saved in the
@@ -107,7 +189,7 @@ async function runChat(
     const originalCwd = process.cwd();
     process.chdir(mkdtempSync(join(tmpdir(), "triumcode-agent-cwd-")));
 
-    const api = await fakeApi(turns, options.failOn);
+    const api = await fakeApi(turns, options.failOn, options.startUsage);
     const agent = new Agent({
         model: "test-model", apiKey: "k", apiBase: api.url,
         // Plan mode is the default sandbox: it denies everything that writes,
@@ -118,6 +200,9 @@ async function runChat(
         permissionMode: options.permissionMode,
         maxTurns: options.maxTurns ?? 5,
         maxTokens: options.maxTokens,
+        onBeforeFileWrite: options.onBeforeFileWrite,
+        onEvent: options.onEvent,
+        workspaceRoot: options.workspaceRoot,
     });
     if (options.askUser) agent.setAskUserCallback(options.askUser);
 
@@ -149,6 +234,87 @@ async function runChat(
 
 const assistantTurns = (agent: Agent) => agent.history().filter((m) => m.role === "assistant");
 const stripAnsi = (text: string): string => text.replace(/\x1B\[[0-?]*[ -\/]*[@-~]/g, "");
+
+test("desktop edit patches preserve model requests and cache markers byte for byte", async () => {
+    const root = mkdtempSync(join(tmpdir(), "triumcode-agent-edit-"));
+    const path = join(root, "file.txt");
+    writeFileSync(path, "A\n");
+    const events: AgentEvent[] = [];
+    const call = (write: (event: any) => void, index: number, id: string, name: string, input: unknown): void => {
+        write(start(index, { type: "tool_use", id, name, input: {} }));
+        write(jsonDelta(index, JSON.stringify(input)));
+        write(stop(index));
+    };
+    try {
+        const turns: Turn[] = [
+            (write) => {
+                call(write, 0, "read", "read_file", { file_path: path });
+                write(finish("tool_use"));
+            },
+            (write) => {
+                call(write, 0, "first", "edit_file", { file_path: path, old_string: "A", new_string: "B" });
+                call(write, 1, "second", "edit_file", { file_path: path, old_string: "B", new_string: "C" });
+                write(finish("tool_use"));
+            },
+            (write) => {
+                write(start(0, { type: "text", text: "" }));
+                write(textDelta(0, "done"));
+                write(stop(0));
+                write(finish("end_turn"));
+            },
+        ];
+        const { agent, api, error } = await runChat(turns, {
+            permissionMode: "bypassPermissions", workspaceRoot: root, onEvent: (event) => events.push(event),
+        });
+        assert.equal(error, null);
+        const edits = events.filter((event) => event.type === "tool.completed" && event.fileEdit);
+        assert.equal(edits.length, 2);
+        assert.ok(edits[0].type === "tool.completed" && edits[1].type === "tool.completed");
+        assert.match(edits[0].fileEdit!.diff, /-A\n\+B/);
+        assert.match(edits[1].fileEdit!.diff, /-B\n\+C/);
+        assert.doesNotMatch(JSON.stringify(agent.history()), /fileEdit|--- a\//);
+        writeFileSync(path, "A\n");
+        const baseline = await runChat(turns, { permissionMode: "bypassPermissions", workspaceRoot: root });
+        assert.equal(baseline.error, null);
+        assert.equal(JSON.stringify(api.bodies), JSON.stringify(baseline.api.bodies));
+    } finally {
+        rmSync(root, { recursive: true, force: true });
+    }
+});
+
+test("the main agent captures a file baseline before its write tool runs", async () => {
+    let capturedPath = "";
+    let existedAtCapture = true;
+    const { error, agent } = await runChat([
+        (write) => {
+            write(start(0, { type: "tool_use", id: "write-1", name: "write_file", input: {} }));
+            write(jsonDelta(0, JSON.stringify({ file_path: "review-smoke.txt", content: "saved\n" })));
+            write(stop(0));
+            write(finish("tool_use"));
+        },
+        (write) => {
+            write(start(0, { type: "text", text: "" }));
+            write(textDelta(0, "done"));
+            write(stop(0));
+            write(finish("end_turn"));
+        },
+    ], {
+        permissionMode: "bypassPermissions",
+        onBeforeFileWrite: (path) => {
+            capturedPath = path;
+            existedAtCapture = existsSync(path);
+        },
+    });
+    try {
+        assert.equal(error, null);
+        assert.ok(capturedPath);
+        assert.equal(existedAtCapture, false);
+        assert.equal(readFileSync(capturedPath, "utf8"), "saved\n");
+        assert.equal(agent.history().filter((message) => message.role === "assistant").length, 2);
+    } finally {
+        if (capturedPath) rmSync(capturedPath, { force: true });
+    }
+});
 
 // ── Empty / truncated turns ─────────────────────────────────
 
@@ -399,6 +565,28 @@ test("prompt usage is counted once when the gateway echoes it", async () => {
     assert.equal(usage.cacheHitRate, 4 / 5);
 });
 
+test("zero-only start usage is replaced by final prompt and cache counts", async () => {
+    const { agent, api } = await runChat([
+        (w) => {
+            w(start(0, { type: "text", text: "" }));
+            w(textDelta(0, "done"));
+            w(stop(0));
+            w({
+                type: "message_delta",
+                delta: { stop_reason: "end_turn" },
+                usage: { input_tokens: 161, output_tokens: 32, cache_read_input_tokens: 4352, cache_creation_input_tokens: 0 },
+            });
+        },
+    ], { startUsage: { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0 } });
+
+    const usage = agent.getUsage();
+    assert.equal(usage.input, 161);
+    assert.equal(usage.output, 32);
+    assert.equal(usage.cacheRead, 4352);
+    assert.equal(usage.cacheHitRate, 4352 / (161 + 4352));
+    assert.equal(api.requests, 1);
+});
+
 // ── Memory recall ────────────────────────────────────────────
 
 test("a settled memory prefetch is injected before the first model call", async () => {
@@ -516,6 +704,18 @@ test("the session status names the preset, not the model string", () => {
     // An explicit empty label is a caller saying "there is no preset name".
     agent.setModel({ model: "deepseek-flash", label: "" });
     assert.equal(agent.getSessionStatus().model, "deepseek-flash");
+});
+
+test("desktop permission changes update the active agent mode", () => {
+    const agent = new Agent({ model: "test-model", apiKey: "k", apiBase: "http://127.0.0.1:9",
+        permissionMode: "desktopDefault" });
+    assert.equal(agent.getSessionStatus().mode, "default");
+    agent.setDesktopPermissionMode("desktopAcceptEdits");
+    assert.equal(agent.getSessionStatus().mode, "accept-edits");
+    agent.setDesktopPermissionMode("bypassPermissions");
+    assert.equal(agent.getSessionStatus().mode, "yolo");
+    agent.setDesktopPermissionMode("desktopDefault");
+    assert.equal(agent.getSessionStatus().mode, "default");
 });
 
 test("a bare model switch keeps an explicitly chosen auth scheme", async () => {

@@ -1,7 +1,7 @@
-import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync, rmSync, readdirSync, statSync, openSync, readSync, closeSync, type Dirent } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync, rmSync, readdirSync, statSync, openSync, readSync, closeSync, realpathSync, type Dirent } from "node:fs";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { StringDecoder } from "node:string_decoder";
-import { dirname, join, basename, resolve } from "node:path";
+import { dirname, join, basename, resolve, relative, sep, isAbsolute } from "node:path";
 import type Anthropic from "@anthropic-ai/sdk";
 import { getSkill, resolveSkillPrompt } from "./skills.js";
 import { saveMemory, listMemories, MEMORY_TYPES, type MemoryType } from "./memory.js";
@@ -27,12 +27,52 @@ export interface TodoItem {
 // concerns appear (permissions, telemetry, abort signal …).
 export interface ToolContext {
     readFileState?: ReadFileState;
+    workspaceRoot?: string;
+    attachmentReadPaths?: ReadonlySet<string>;
+    signal?: AbortSignal;
     askUser?: (question: string, options?: string[]) => Promise<string>;
     permissionPolicy?: import("./permissions.js").PermissionPolicy;
-    confirmPermission?: (message: string) => Promise<boolean>;
+    onPermissionDecision?: (
+        decision: import("./permissions.js").PermissionDecision,
+        toolCallId: string,
+        toolName: string,
+        input: Record<string, any>,
+    ) => void;
+    confirmPermission?: (request: import("./permissions.js").PermissionRequest) => Promise<import("./permissions.js").PermissionGrant>;
     enterPlanMode?: () => Promise<string>;
     exitPlanMode?: () => Promise<string>;
     todos?: TodoItem[];
+    /** Called before a desktop Agent file tool writes inside its workspace. */
+    onBeforeFileWrite?: (absolutePath: string) => void | Promise<void>;
+    captureFileEdits?: boolean;
+    onFileEdit?: (absolutePath: string, before: string, after: string) => void;
+}
+
+function isWithin(root: string, target: string): boolean {
+    const rel = relative(root, target);
+    return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+}
+
+/** Resolve an agent-supplied path against the selected desktop workspace. */
+function resolveToolPath(path: string, context: ToolContext, readAttachment = false): string {
+    if (!context.workspaceRoot) return resolve(path);
+
+    const root = realpathSync.native(context.workspaceRoot);
+    const target = resolve(root, path);
+    let probe = target;
+    const suffix: string[] = [];
+    while (!existsSync(probe)) {
+        const parent = dirname(probe);
+        if (parent === probe) throw new Error(`Path is outside the selected workspace: ${path}`);
+        suffix.unshift(basename(probe));
+        probe = parent;
+    }
+
+    const resolved = resolve(realpathSync.native(probe), ...suffix);
+    if (!isWithin(root, resolved) && !(readAttachment && context.attachmentReadPaths?.has(resolved))) {
+        throw new Error(`Path is outside the selected workspace: ${path}`);
+    }
+    return resolved;
 }
 
 export interface Tool {
@@ -62,7 +102,7 @@ export interface Tool {
     // ── System prompt guidance ────────────────────────────────
     // Returns a fragment injected into the system prompt so the model
     // knows how to use this tool correctly. Empty string = nothing added.
-    prompt(): string;
+    prompt(workspaceRoot?: string): string;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -216,11 +256,11 @@ export function toolResultLimit(name: string): number {
 // see — so the cap belongs here, where the model can page past it.
 export const READ_DEFAULT_LINES = 2_000;
 const READ_MAX_LINES = 5_000;
-// Past this the file is not something to read into a conversation at all.
+// Larger files are streamed through a bounded window instead of loaded whole.
 const READ_MAX_BYTES = 20 * 1024 * 1024;
 
 type ReadResult =
-    | { ok: true; text: string; start: number; end: number; totalLines: number }
+    | { ok: true; text: string; start: number; end: number; totalLines: number; truncated?: boolean }
     | { ok: false; message: string };
 
 // A binary file decoded as utf-8 is a wall of replacement characters: real
@@ -237,9 +277,58 @@ function wholeNumber(value: unknown, fallback: number): number {
     return Number.isFinite(n) ? n : fallback;
 }
 
+function readLargeTextFile(input: { file_path: string; offset?: number; limit?: number }): ReadResult {
+    const start = Math.max(1, wholeNumber(input.offset, 1));
+    const count = Math.min(Math.max(1, wholeNumber(input.limit, READ_DEFAULT_LINES)), READ_MAX_LINES);
+    const buffer = Buffer.alloc(64 * 1024);
+    const decoder = new StringDecoder("utf8");
+    const selected: string[] = [];
+    let lineNumber = 1;
+    let current = "";
+    let keptChars = 0;
+    let truncated = false;
+    let more = false;
+    let file: number | undefined;
+    try {
+        file = openSync(input.file_path, "r");
+        while (!more) {
+            const bytes = readSync(file, buffer, 0, buffer.length, null);
+            if (lineNumber === 1 && bytes && looksBinary(buffer.subarray(0, bytes))) return { ok: false, message: `Error: ${input.file_path} is a binary file. read_file returns text only.` };
+            const chunk = bytes ? decoder.write(buffer.subarray(0, bytes)) : decoder.end();
+            let position = 0;
+            do {
+                const newline = chunk.indexOf("\n", position);
+                const end = newline < 0 ? chunk.length : newline;
+                if (lineNumber >= start) {
+                    const room = Math.max(0, Math.min(50_000 - current.length, 90_000 - keptChars));
+                    const piece = chunk.slice(position, end);
+                    current += piece.slice(0, room);
+                    keptChars += Math.min(room, piece.length);
+                    if (piece.length > room) truncated = true;
+                }
+                if (newline < 0) break;
+                if (lineNumber >= start) { selected.push(current); current = ""; }
+                lineNumber++;
+                position = newline + 1;
+                if (selected.length >= count) { more = true; break; }
+            } while (position < chunk.length);
+            if (!bytes) { if (lineNumber >= start) selected.push(current); break; }
+        }
+        if (!selected.length) return { ok: false, message: `Error: offset ${start} is past the end of ${input.file_path}, which has ${lineNumber} lines.` };
+        const end = start + selected.length - 1;
+        const width = String(end).length;
+        let text = selected.map((line, index) => `${String(start + index).padStart(width)} | ${line}`).join("\n");
+        if (more) text += `\n\n[lines ${start}-${end}; remaining file not scanned. Continue with offset=${end + 1}.]`;
+        if (truncated) text += "\n[Long lines or the requested range exceeded the text budget. Use grep_search or run_command to narrow the content.]";
+        return { ok: true, text, start, end, totalLines: more ? 0 : lineNumber, truncated };
+    } catch (error) { return { ok: false, message: `Error reading file: ${error instanceof Error ? error.message : String(error)}` }; }
+    finally { if (file !== undefined) closeSync(file); }
+}
+
 function readFileImpl(input: { file_path: string; offset?: number; limit?: number }): ReadResult {
     let buffer: Buffer;
     try {
+        if (statSync(input.file_path).size > READ_MAX_BYTES) return readLargeTextFile(input);
         buffer = readFileSync(input.file_path);
     } catch (e: any) {
         return { ok: false, message: `Error reading file: ${e.message}` };
@@ -247,9 +336,6 @@ function readFileImpl(input: { file_path: string; offset?: number; limit?: numbe
 
     if (looksBinary(buffer)) {
         return { ok: false, message: `Error: ${input.file_path} is a binary file. read_file returns text only — use grep_search to find what you need in it.` };
-    }
-    if (buffer.byteLength > READ_MAX_BYTES) {
-        return { ok: false, message: `Error: ${input.file_path} is ${Math.round(buffer.byteLength / 1_048_576)} MB, too large to read. Use grep_search to find what you need, or read it with offset/limit through run_command.` };
     }
 
     const lines = buffer.toString("utf-8").split("\n");
@@ -296,17 +382,18 @@ const readFileTool = register({
     maxResultSizeChars: 100_000,
 
     async call(input, ctx) {
-        const result = readFileImpl(input as { file_path: string; offset?: number; limit?: number });
+        const filePath = resolveToolPath(String(input.file_path ?? ""), ctx, true);
+        const result = readFileImpl({ ...(input as { file_path: string; offset?: number; limit?: number }), file_path: filePath });
         if (!result.ok) return result.message;
 
-        const absPath = resolve(input.file_path);
+        const absPath = filePath;
         const range: [number, number] = [result.start, result.end];
 
-        if (ctx.readFileState && alreadyShown(absPath, ctx.readFileState, range, result.totalLines)) {
+        if (!result.truncated && ctx.readFileState && alreadyShown(absPath, ctx.readFileState, range, result.totalLines)) {
             return `${input.file_path} is unchanged since you read lines ${result.start}-${result.end} of it, and that content is already above in this conversation. Pass a different offset or limit if you need another part of the file.`;
         }
         if (ctx.readFileState) {
-            recordRead(absPath, ctx.readFileState, range, result.totalLines);
+            recordRead(absPath, ctx.readFileState, result.truncated ? undefined : range, result.totalLines);
         }
         return result.text;
     },
@@ -352,12 +439,13 @@ const writeFileTool = register({
     maxResultSizeChars: 2_000,
 
     async call(input, ctx) {
-        const absPath = resolve(input.file_path);
+        const absPath = resolveToolPath(String(input.file_path ?? ""), ctx);
         if (ctx.readFileState) {
             const blocked = staleWrite(absPath, "writing", ctx.readFileState);
             if (blocked !== null) return blocked;
         }
-        const result = writeFileImpl(input as { file_path: string; content: string });
+        await ctx.onBeforeFileWrite?.(absPath);
+        const result = writeFileImpl({ ...(input as { file_path: string; content: string }), file_path: absPath });
         if (ctx.readFileState && !result.startsWith("Error")) {
             recordRead(absPath, ctx.readFileState);
         }
@@ -646,7 +734,7 @@ function applyEdit(content: string, oldString: string, newString: string, replac
     };
 }
 
-function editFileImpl(input: { file_path: string; old_string: string; new_string: string; replace_all?: boolean }): string {
+function editFileImpl(input: { file_path: string; old_string: string; new_string: string; replace_all?: boolean }, onEdit?: ToolContext["onFileEdit"]): string {
     let content: string;
     try {
         content = readFileSync(input.file_path, "utf-8");
@@ -659,6 +747,7 @@ function editFileImpl(input: { file_path: string; old_string: string; new_string
 
     const written = writeFileImpl({ file_path: input.file_path, content: applied.content });
     if (written.startsWith("Error")) return written;
+    onEdit?.(input.file_path, content, applied.content);
 
     const removed = input.old_string.split("\n").length * applied.replaced;
     const added = input.new_string.split("\n").length * applied.replaced;
@@ -695,12 +784,13 @@ const editFileTool = register({
     maxResultSizeChars: 4_000,
 
     async call(input, ctx) {
-        const absPath = resolve(input.file_path);
+        const absPath = resolveToolPath(String(input.file_path ?? ""), ctx);
         if (ctx.readFileState) {
             const blocked = staleWrite(absPath, "editing", ctx.readFileState);
             if (blocked !== null) return blocked;
         }
-        const result = editFileImpl(input as { file_path: string; old_string: string; new_string: string; replace_all?: boolean });
+        await ctx.onBeforeFileWrite?.(absPath);
+        const result = editFileImpl({ ...(input as { file_path: string; old_string: string; new_string: string; replace_all?: boolean }), file_path: absPath }, ctx.onFileEdit);
         if (ctx.readFileState && !result.startsWith("Error")) {
             recordRead(absPath, ctx.readFileState);
         }
@@ -723,7 +813,7 @@ const editFileTool = register({
 // every edit before writing anything keeps the batch atomic.
 type MultiEditInput = { old_string: string; new_string: string; replace_all?: boolean };
 
-function multiEditImpl(input: { file_path: string; edits: MultiEditInput[] }): string {
+function multiEditImpl(input: { file_path: string; edits: MultiEditInput[] }, onEdit?: ToolContext["onFileEdit"]): string {
     if (!Array.isArray(input.edits) || input.edits.length === 0) {
         return "Error: edits must be a non-empty array of { old_string, new_string } objects.";
     }
@@ -768,6 +858,7 @@ function multiEditImpl(input: { file_path: string; edits: MultiEditInput[] }): s
 
     const written = writeFileImpl({ file_path: input.file_path, content: current });
     if (written.startsWith("Error")) return written;
+    onEdit?.(input.file_path, content, current);
 
     const lines = current.split("\n");
     const shown = Math.min(regions.length, 3);
@@ -815,12 +906,13 @@ const multiEditTool = register({
     maxResultSizeChars: 6_000,
 
     async call(input, ctx) {
-        const absPath = resolve(input.file_path);
+        const absPath = resolveToolPath(String(input.file_path ?? ""), ctx);
         if (ctx.readFileState) {
             const blocked = staleWrite(absPath, "editing", ctx.readFileState);
             if (blocked !== null) return blocked;
         }
-        const result = multiEditImpl(input as { file_path: string; edits: MultiEditInput[] });
+        await ctx.onBeforeFileWrite?.(absPath);
+        const result = multiEditImpl({ ...(input as { file_path: string; edits: MultiEditInput[] }), file_path: absPath }, ctx.onFileEdit);
         if (ctx.readFileState && !result.startsWith("Error")) {
             recordRead(absPath, ctx.readFileState);
         }
@@ -928,8 +1020,9 @@ const listFilesTool = register({
     isDestructive: () => false,
     maxResultSizeChars: 30_000,
 
-    async call(input) {
-        return listFilesImpl(input as { directory_path: string; max_depth?: number });
+    async call(input, ctx) {
+        const directory = resolveToolPath(String(input.directory_path ?? ""), ctx);
+        return listFilesImpl({ ...(input as { directory_path: string; max_depth?: number }), directory_path: directory });
     },
 
     prompt: () => "",
@@ -1029,8 +1122,47 @@ function renderMatches(matches: Match[], notes: string[], capped = false): strin
     return footer.length === 0 ? body : `${body}\n\n${footer.map((line) => `(${line})`).join("\n")}`;
 }
 
+function parseSearchOutput(out: string, backend: string): Match[] | string {
+    const matches: Match[] = [];
+    let unparsed = 0;
+    for (const raw of out.split("\n")) {
+        if (raw === "") continue;
+        const m = /^([^:]+):(\d+):([\s\S]*)$/.exec(raw);
+        if (m) {
+            const file = process.platform === "win32" ? m[1].replaceAll("\\", "/") : m[1];
+            matches.push({ file: file.replace(/^\.\//, ""), line: Number(m[2]), text: m[3] });
+        }
+        else unparsed++;
+    }
+    return unparsed === 0 ? matches : renderMatches(matches, [`could not parse ${unparsed} line(s) of ${backend} output`]);
+}
+
+function grepWithRipgrep(pattern: string, root: string, operand: string): Match[] | string | null {
+    const args = ["--line-number", "--with-filename", "--color=never", "--no-heading", "--hidden", "--no-ignore", "--no-config", "--engine=auto"];
+    for (const dir of NOISE_DIRS) args.push(`--glob=!**/${dir}/**`);
+    args.push("--", pattern, operand);
+
+    let out: string;
+    try {
+        out = execFileSync("rg", args, {
+            cwd: root,
+            encoding: "utf-8",
+            maxBuffer: 8 * 1024 * 1024,
+            timeout: 10_000,
+            stdio: ["ignore", "pipe", "ignore"],
+        });
+    } catch (e: any) {
+        if (e.code === "ENOENT" || e.status === 2) return null;
+        if (e.status === 1) return "No matches found.";
+        if (e.code === "ETIMEDOUT") return "Error: search timed out after 10s — narrow the path or the pattern.";
+        if (e.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") return "Too many matches (over 8MB) — narrow the path or the pattern.";
+        return `Error searching: ${e.message}`;
+    }
+    return parseSearchOutput(out, "ripgrep");
+}
+
 function grepWithSystemGrep(pattern: string, root: string, operand: string): Match[] | string | null {
-    const args = ["--line-number", "--with-filename", "--color=never", "--recursive", "-I"];
+    const args = ["--line-number", "--with-filename", "--color=never", "--recursive", "-I", "-E"];
     for (const dir of NOISE_DIRS) args.push(`--exclude-dir=${dir}`);
     args.push("--", pattern, operand);
 
@@ -1044,22 +1176,14 @@ function grepWithSystemGrep(pattern: string, root: string, operand: string): Mat
             stdio: ["ignore", "pipe", "ignore"],
         });
     } catch (e: any) {
-        if (e.code === "ENOENT") return null;
+        if (e.code === "ENOENT" || e.status === 2) return null;
         if (e.status === 1) return "No matches found.";
         if (e.code === "ETIMEDOUT") return `Error: search timed out after 10s — narrow the path or the pattern.`;
         if (e.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") return `Too many matches (over 8MB) — narrow the path or the pattern.`;
         return `Error searching: ${e.message}`;
     }
 
-    const matches: Match[] = [];
-    let unparsed = 0;
-    for (const raw of out.split("\n")) {
-        if (raw === "") continue;
-        const m = /^([^:]+):(\d+):([\s\S]*)$/.exec(raw);
-        if (m) matches.push({ file: m[1].replace(/^\.\//, ""), line: Number(m[2]), text: m[3] });
-        else unparsed++;
-    }
-    return unparsed === 0 ? matches : renderMatches(matches, [`could not parse ${unparsed} line(s) of grep output`]);
+    return parseSearchOutput(out, "grep");
 }
 
 function grepInProcess(re: RegExp, root: string, operand: string, isFile: boolean): { matches: Match[]; notes: string[]; capped: boolean } {
@@ -1099,9 +1223,13 @@ function grepSearchImpl(input: { pattern: string; path: string }): string {
     const root = isFile ? dirname(input.path) : input.path;
     const operand = isFile ? basename(input.path) : ".";
 
-    const viaSystem = grepWithSystemGrep(input.pattern, root, operand);
-    if (typeof viaSystem === "string") return viaSystem;
-    if (viaSystem !== null) return renderMatches(viaSystem, []);
+    const viaRipgrep = grepWithRipgrep(input.pattern, root, operand);
+    if (typeof viaRipgrep === "string") return viaRipgrep;
+    if (viaRipgrep !== null) return renderMatches(viaRipgrep, []);
+
+    const viaGrep = grepWithSystemGrep(input.pattern, root, operand);
+    if (typeof viaGrep === "string") return viaGrep;
+    if (viaGrep !== null) return renderMatches(viaGrep, []);
 
     const { matches, notes, capped } = grepInProcess(re, root, operand, isFile);
     return renderMatches(matches, notes, capped);
@@ -1109,7 +1237,7 @@ function grepSearchImpl(input: { pattern: string; path: string }): string {
 
 const grepSearchTool = register({
     name: "grep_search",
-    description: "Search for a regex pattern in files. Recurses through a directory, or searches a single file. Returns matches as \"path:line: text\", one per line, with paths relative to the searched directory. Skips node_modules/.git/dist-style directories and binary files, stops after 100 matches, and clips very long lines.",
+    description: "Search for a regex pattern in files. Uses ripgrep first, then system grep, then an in-process scanner if needed. Recurses through a directory, or searches a single file. Returns matches as \"path:line: text\", one per line, with paths relative to the searched directory. Skips node_modules/.git/dist-style directories and binary files, stops after 100 matches, and clips very long lines.",
     inputSchema: {
         type: "object",
         properties: {
@@ -1123,11 +1251,12 @@ const grepSearchTool = register({
     isDestructive: () => false,
     maxResultSizeChars: 30_000,
 
-    async call(input) {
-        return grepSearchImpl(input as { pattern: string; path: string });
+    async call(input, ctx) {
+        const path = resolveToolPath(String(input.path ?? ""), ctx, true);
+        return grepSearchImpl({ ...(input as { pattern: string; path: string }), path });
     },
 
-    prompt: () => "grep_search uses JavaScript regex syntax. Anchor with ^/$ when needed. Results are capped at 100 matches — narrow the path or pattern if truncated.",
+    prompt: () => "Prefer grep_search for code search: it uses ripgrep when available and falls back to grep or an in-process scanner. Patterns use JavaScript regex syntax. Anchor with ^/$ when needed. Results are capped at 100 matches — narrow the path or pattern if truncated.",
 });
 
 // ─── run_command ─────────────────────────────────────────────
@@ -1260,7 +1389,12 @@ function spawnAndCapture(
     args: string[],
     cwd: string,
     onFinish: (result: string) => void,
+    signal?: AbortSignal,
 ): void {
+    if (signal?.aborted) {
+        onFinish("Cancelled before the program started.");
+        return;
+    }
     let child: ChildProcess;
     try {
         child = spawn(command, args, {
@@ -1284,6 +1418,7 @@ function spawnAndCapture(
     let clippedOut = false;
     let clippedErr = false;
     let timedOut = false;
+    let cancelled = false;
     let settled = false;
 
     const timer = setTimeout(() => { timedOut = true; killTree(child); }, RUN_TIMEOUT_MS);
@@ -1292,7 +1427,13 @@ function spawnAndCapture(
         if (settled) return;
         settled = true;
         clearTimeout(timer);
+        signal?.removeEventListener("abort", onAbort);
         onFinish(result);
+    };
+
+    const onAbort = (): void => {
+        cancelled = true;
+        killTree(child);
     };
 
     const capture = (chunk: Buffer, decoder: StringDecoder, stream: "out" | "err"): void => {
@@ -1308,6 +1449,8 @@ function spawnAndCapture(
 
     child.stdout?.on("data", (c: Buffer) => capture(c, outDecoder, "out"));
     child.stderr?.on("data", (c: Buffer) => capture(c, errDecoder, "err"));
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) onAbort();
 
     child.on("error", (e: any) => {
         if (e.code === "ENOENT" || (process.platform === "win32" && e.code === "EINVAL")) {
@@ -1321,7 +1464,9 @@ function spawnAndCapture(
         out = (out + outDecoder.end()).slice(0, RUN_MAX_CHARS);
         err = (err + errDecoder.end()).slice(0, RUN_MAX_CHARS);
 
-        const status = timedOut
+        const status = cancelled
+            ? "cancelled"
+            : timedOut
             ? `timed out after ${RUN_TIMEOUT_MS / 1000}s — killed`
             : signal !== null ? `killed by ${signal}` : `exit ${code}`;
 
@@ -1339,25 +1484,27 @@ function spawnAndCapture(
     });
 }
 
-function runCommandImpl(input: { command: string; args?: string[]; cwd?: string }): Promise<string> {
+function runCommandImpl(input: { command: string; args?: string[]; cwd?: string }, context: ToolContext): Promise<string> {
     const args = Array.isArray(input.args) ? input.args.map((a) => String(a)) : [];
-    const cwd = input.cwd || process.cwd();
+    const cwd = input.cwd
+        ? resolveToolPath(input.cwd, context)
+        : context.workspaceRoot ?? process.cwd();
 
     return new Promise<string>((resolve) => {
         // Wrap resolve to intercept ENOENT/EINVAL on Windows and auto-resolve
         // .cmd shims (npm, npx, yarn, tsc, …) to their underlying node command.
         const finish = (result: string): void => {
-            if (process.platform === "win32" && result.startsWith("Error: no such executable:")) {
+            if (!context.signal?.aborted && process.platform === "win32" && result.startsWith("Error: no such executable:")) {
                 const shim = resolveWindowsShim(input.command);
                 if (shim) {
-                    spawnAndCapture(shim.cmd, [shim.script, ...args], cwd, resolve);
+                    spawnAndCapture(shim.cmd, [shim.script, ...args], cwd, resolve, context.signal);
                     return;
                 }
             }
             resolve(result);
         };
 
-        spawnAndCapture(input.command, args, cwd, finish);
+        spawnAndCapture(input.command, args, cwd, finish, context.signal);
     });
 }
 
@@ -1378,8 +1525,8 @@ const runCommandTool = register({
     isDestructive: (input) => classifyCommand(input).destructive,
     maxResultSizeChars: 30_000,
 
-    async call(input) {
-        return runCommandImpl(input as { command: string; args?: string[]; cwd?: string });
+    async call(input, ctx) {
+        return runCommandImpl(input as { command: string; args?: string[]; cwd?: string }, ctx);
     },
 
     prompt: () =>
@@ -1392,14 +1539,20 @@ const runCommandTool = register({
 
 const GIT_DIFF_MAX_CHARS = 100_000;
 
-function gitDiffImpl(input: { cwd?: string; staged?: boolean; path?: string }): string {
+function gitDiffImpl(input: { cwd?: string; staged?: boolean; path?: string }, context: ToolContext): string {
+    const cwd = input.cwd
+        ? resolveToolPath(input.cwd, context)
+        : context.workspaceRoot ?? process.cwd();
     const args = ["diff"];
     if (input.staged === true) args.push("--cached");
-    if (input.path) args.push("--", input.path);
+    if (input.path) {
+        const target = resolveToolPath(input.path, context);
+        args.push("--", context.workspaceRoot ? relative(cwd, target) : input.path);
+    }
 
     try {
         const output = execFileSync("git", args, {
-            cwd: input.cwd || process.cwd(),
+            cwd,
             encoding: "utf-8",
             maxBuffer: GIT_DIFF_MAX_CHARS * 8,
             timeout: 10_000,
@@ -1413,8 +1566,8 @@ function gitDiffImpl(input: { cwd?: string; staged?: boolean; path?: string }): 
         return diff;
     } catch (e: any) {
         if (e.code === "ENOENT") {
-            return input.cwd
-                ? `Error running git diff: working directory does not exist: ${input.cwd}`
+            return input.cwd || context.workspaceRoot
+                ? `Error running git diff: working directory does not exist: ${cwd}`
                 : "Error: git executable not found.";
         }
         if (e.code === "ETIMEDOUT") return "Error: git diff timed out after 10s.";
@@ -1440,8 +1593,8 @@ const gitDiffTool = register({
     isDestructive: () => false,
     maxResultSizeChars: GIT_DIFF_MAX_CHARS,
 
-    async call(input) {
-        return gitDiffImpl(input as { cwd?: string; staged?: boolean; path?: string });
+    async call(input, ctx) {
+        return gitDiffImpl(input as { cwd?: string; staged?: boolean; path?: string }, ctx);
     },
 
     prompt: () => "Use git_diff to inspect changes before editing or reporting implementation status.",
@@ -1503,10 +1656,10 @@ register({
     isDestructive: () => false,
     maxResultSizeChars: 50_000,
 
-    async call(input) {
+    async call(input, context) {
         const name = String(input.name ?? "").trim();
         if (!name) return "Error: skill name must not be empty.";
-        const skill = getSkill(name);
+        const skill = getSkill(name, { cwd: context.workspaceRoot });
         if (!skill) return `Error: skill \"${name}\" was not found.`;
         const prompt = resolveSkillPrompt(name, String(input.arguments ?? ""));
         if (!prompt) return `Error: skill \"${name}\" could not be loaded.`;
@@ -1668,11 +1821,12 @@ register({
     isDestructive: () => false,
     maxResultSizeChars: 5_000,
 
-    async call(input) {
+    async call(input, context) {
         const operation = String(input.operation ?? "");
+        const memoryOptions = context.workspaceRoot ? { cwd: context.workspaceRoot } : undefined;
 
         if (operation === "list") {
-            const memories = listMemories();
+            const memories = listMemories(memoryOptions);
             if (memories.length === 0) return "No memories saved yet.";
             return memories
                 .map((m) => `- [${m.source}] ${m.name} (${m.type}) - ${m.description}`)
@@ -1693,7 +1847,7 @@ register({
                 description: description || name,
                 type,
                 content: content || description || name,
-            });
+            }, memoryOptions);
             return `Memory saved: ${path}`;
         }
 
@@ -1751,7 +1905,7 @@ register({
         return "Error: the agent tool is dispatched by the agent loop, not by the tool executor.";
     },
 
-    prompt: () => {
+    prompt: (workspaceRoot) => {
         const block = [
             "Use the agent tool to delegate a task that would otherwise flood this conversation: a broad search, a survey of several files, or an implementation you want designed before you commit to it. The sub-agent works in its own context and returns only its final summary — the tool calls it makes never enter this conversation.",
             "Its context is isolated in both directions: it cannot see this conversation, so the prompt must be self-contained (what to find, where to look, what to return).",
@@ -1760,7 +1914,7 @@ register({
             "Do not split one task into several delegations that write the same files: parallel sub-agents share no state and will overwrite each other.",
             "Do not delegate a task you can finish in one or two tool calls; the round trip costs more than it saves.",
         ].join("\n");
-        const custom = describeCustomAgents();
+        const custom = describeCustomAgents({ cwd: workspaceRoot });
         return custom ? `${block}\n${custom}` : block;
     },
 });
@@ -1865,9 +2019,9 @@ const toolSearchTool = register({
 //
 // `from` mirrors getToolDefinitionsFor: a sub-agent's prompt block describes
 // its own tools, not the whole registry it has no access to.
-export function buildToolPromptBlock(from?: Tool[]): string {
+export function buildToolPromptBlock(from?: Tool[], workspaceRoot?: string): string {
     const fragments = activeTools(from)
-        .map((t) => t.prompt())
+        .map((t) => t.prompt(workspaceRoot))
         .filter((p) => p.length > 0);
 
     return fragments.join("\n");

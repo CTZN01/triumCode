@@ -207,8 +207,8 @@ export function clearCustomAgentCache(): void {
 }
 
 /** Advertised in the agent tool's prompt block, so the model knows they exist. */
-export function describeCustomAgents(): string {
-    const agents = discoverCustomAgents();
+export function describeCustomAgents(options: CustomAgentOptions = {}): string {
+    const agents = discoverCustomAgents(options);
     if (agents.length === 0) return "";
     const listed = agents
         .map((agent) => `- ${agent.name}${agent.description ? `: ${agent.description}` : ""}`)
@@ -243,16 +243,16 @@ function getGeneralTools(): Tool[] {
  * is served the general configuration: an unrecognised type is a naming
  * mistake, and a delegation that runs is more useful than one that refuses.
  */
-export function getSubAgentConfig(type: string): SubAgentConfig {
+export function getSubAgentConfig(type: string, options: CustomAgentOptions = {}): SubAgentConfig {
     const name = type.trim().toLowerCase();
-    const custom = discoverCustomAgents().find((agent) => agent.name === name);
+    const custom = discoverCustomAgents(options).find((agent) => agent.name === name);
     if (custom) {
         // Omitting allowed-tools opts into the general set. A declared list is
         // an allowlist: unknown or excluded names are dropped, and an empty
         // result stays empty instead of silently granting broader access.
         const tools = custom.toolsDeclared ? custom.tools : getGeneralTools();
         return {
-            systemPrompt: buildSubAgentSystemPrompt(custom.prompt, tools),
+            systemPrompt: buildSubAgentSystemPrompt(custom.prompt, tools, options.cwd),
             tools,
             maxTokens: SUBAGENT_MAX_TOKENS,
         };
@@ -261,7 +261,7 @@ export function getSubAgentConfig(type: string): SubAgentConfig {
     const builtin = isSubAgentType(name) ? name : DEFAULT_SUBAGENT_TYPE;
     const tools = builtin === "general" ? getGeneralTools() : getReadOnlyTools();
     return {
-        systemPrompt: buildSubAgentSystemPrompt(BUILTIN_PROMPTS[builtin], tools),
+        systemPrompt: buildSubAgentSystemPrompt(BUILTIN_PROMPTS[builtin], tools, options.cwd),
         tools,
         maxTokens: SUBAGENT_MAX_TOKENS,
     };
@@ -276,10 +276,10 @@ export function isSubAgentType(name: string): name is SubAgentType {
  * fallback. Used by the caller as well as here, so the label it prints and the
  * configuration it gets always agree.
  */
-export function resolveSubAgentName(value: unknown): string {
+export function resolveSubAgentName(value: unknown, options: CustomAgentOptions = {}): string {
     const name = String(value ?? "").trim().toLowerCase();
     if (isSubAgentType(name)) return name;
-    if (discoverCustomAgents().some((agent) => agent.name === name)) return name;
+    if (discoverCustomAgents(options).some((agent) => agent.name === name)) return name;
     return DEFAULT_SUBAGENT_TYPE;
 }
 
@@ -290,10 +290,10 @@ export function resolveSubAgentName(value: unknown): string {
  * not having, and re-sending them per request is the cost this feature exists
  * to avoid.
  */
-function buildSubAgentSystemPrompt(contract: string, tools: Tool[]): string {
+function buildSubAgentSystemPrompt(contract: string, tools: Tool[], workspaceRoot = process.cwd()): string {
     return [
         contract,
-        tools.length > 0 ? buildToolPromptBlock(tools) : "No tools are available to this sub-agent.",
-        buildEnvironmentContext(),
+        tools.length > 0 ? buildToolPromptBlock(tools, workspaceRoot) : "No tools are available to this sub-agent.",
+        buildEnvironmentContext(workspaceRoot),
     ].filter((part) => part.length > 0).join("\n\n");
 }

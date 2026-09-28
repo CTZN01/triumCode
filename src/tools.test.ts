@@ -1,9 +1,35 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getTool, toolResultLimit, type ReadFileState, type TodoItem, type ToolContext } from "./tools.js";
+
+test("explicit external attachments allow exact-file reads and searches while writes and directory access stay confined", async () => {
+    const root = mkdtempSync(join(tmpdir(), "triumcode-attached-read-"));
+    const path = tempFile("external-log.txt", "first\nattachment needle\nthird\n");
+    const ctx: ToolContext = { workspaceRoot: root, attachmentReadPaths: new Set([path]) };
+    assert.match(await getTool("read_file")!.call({ file_path: path, offset: 2, limit: 1 }, ctx), /attachment needle/);
+    assert.match(await getTool("grep_search")!.call({ path, pattern: "needle" }, ctx), /external-log.txt:2:\s*attachment needle/);
+    await assert.rejects(getTool("write_file")!.call({ file_path: path, content: "overwritten" }, ctx), /outside the selected workspace/);
+    await assert.rejects(getTool("grep_search")!.call({ path: tmpdir(), pattern: "needle" }, ctx), /outside the selected workspace/);
+    const other = tempFile("unattached.txt", "private");
+    await assert.rejects(getTool("read_file")!.call({ file_path: other }, ctx), /outside the selected workspace/);
+    assert.match(readFileSync(path, "utf8"), /attachment needle/);
+});
+
+test("edit callbacks capture actual relaxed replacements and only successful writes", async () => {
+    const path = tempFile("captured.txt", "before\r\nnext\r\n");
+    const edits: Array<[string, string, string]> = [];
+    const ctx: ToolContext = { onFileEdit: (file, before, after) => edits.push([file, before, after]) };
+    const result = await getTool("edit_file")!.call({ file_path: path, old_string: "before\nnext", new_string: "after\nnext" }, ctx);
+    assert.doesNotMatch(result, /^Error/);
+    assert.equal(edits.length, 1);
+    assert.equal(edits[0][1], "before\r\nnext\r\n");
+    assert.equal(edits[0][2], readFileSync(path, "utf8"));
+    await getTool("multi_edit")!.call({ file_path: path, edits: [{ old_string: "after", new_string: "new" }, { old_string: "missing", new_string: "x" }] }, ctx);
+    assert.equal(edits.length, 1);
+});
 
 // ─── read_file ─────────────────────────────────────────────
 //
@@ -74,6 +100,22 @@ test("read_file refuses a binary file rather than flooding the context", async (
     const path = tempFile("blob.bin", Buffer.from([0x00, 0x01, 0x02, 0x00, 0xff, 0xfe]));
     const result = await tool.call({ file_path: path }, {});
     assert.match(result, /is a binary file/);
+});
+
+test("read_file streams ranges of files over 20 MiB and bounds long lines", async () => {
+    const tool = getTool("read_file")!;
+    const path = tempFile("large-log.txt", "x".repeat(21 * 1024 * 1024) + "\nα\nsecond\nthird\n");
+    const state: ReadFileState = new Map();
+    const range = await tool.call({ file_path: path, offset: 2, limit: 2 }, { readFileState: state });
+    assert.match(range, /2 \| α\n3 \| second/);
+    assert.match(range, /Continue with offset=4/);
+    assert(range.length < 200);
+    assert.match(await tool.call({ file_path: path, offset: 2, limit: 2 }, { readFileState: state }), /unchanged/);
+    const long = await tool.call({ file_path: path, offset: 1, limit: 1 }, { readFileState: state });
+    assert(long.length < 100_000);
+    assert.match(long, /exceeded the text budget/);
+    assert.equal(state.get(path)?.ranges.length, 0, "truncated content must not claim the whole line was shown");
+    assert.match(await tool.call({ file_path: path, offset: 99 }, {}), /^Error: offset 99/);
 });
 
 test("re-reading an unchanged range returns a notice, not the content again", async () => {
@@ -162,6 +204,41 @@ test("git_diff reports an invalid working directory cleanly", async () => {
 
     const result = await tool.call({ cwd: "this-directory-does-not-exist" }, {});
     assert.match(result, /working directory does not exist/);
+});
+
+test("grep_search uses the same structured result for hidden files and skips noisy directories", async () => {
+    const tool = getTool("grep_search")!;
+    const dir = mkdtempSync(join(tmpdir(), "triumcode-search-"));
+    writeFileSync(join(dir, ".hidden.ts"), "needle\n");
+    mkdirSync(join(dir, "node_modules"));
+    writeFileSync(join(dir, "node_modules", "ignored.ts"), "needle\n");
+
+    assert.deepEqual(tool.inputSchema.required, ["pattern", "path"]);
+    assert.equal(tool.isReadOnly({ pattern: "needle", path: dir }), true);
+    assert.equal(tool.isDestructive({ pattern: "needle", path: dir }), false);
+    assert.equal(tool.isConcurrencySafe({ pattern: "needle", path: dir }), true);
+    const result = await tool.call({ pattern: "needle", path: dir }, {});
+    assert.equal(result, ".hidden.ts:1:needle");
+});
+
+test("grep_search falls back to its in-process scanner when command-line search is unavailable", async () => {
+    const tool = getTool("grep_search")!;
+    const path = tempFile("fallback.txt", "alpha\nbeta\n");
+    const originalPath = process.env.PATH;
+    try {
+        process.env.PATH = "";
+        assert.equal(await tool.call({ pattern: "beta", path }, {}), "fallback.txt:2:beta");
+    } finally {
+        if (originalPath === undefined) delete process.env.PATH;
+        else process.env.PATH = originalPath;
+    }
+});
+
+test("grep_search reports invalid patterns and missing paths as errors", async () => {
+    const tool = getTool("grep_search")!;
+    const path = tempFile("valid.txt", "text\n");
+    assert.match(await tool.call({ pattern: "[", path }, {}), /^Error: invalid regex:/);
+    assert.match(await tool.call({ pattern: "text", path: `${path}.missing` }, {}), /^Error searching:/);
 });
 
 // ─── todo tool ─────────────────────────────────────────────

@@ -3,15 +3,22 @@
   "version": "1.0.0",
   "description": "A coding agent powered by Anthropic SDK with file tools",
   "type": "module",
-  "main": "./dist/agent.js",
+  "main": "./out/main/index.js",
   "bin": {
     "triumcode": "./dist/cli.js"
   },
   "scripts": {
     "build": "tsc",
-    "test": "tsc && node --test dist/",
+    "test": "tsc && node --test dist/ && npm run test:desktop && npm run test:desktop:attachments",
+    "test:desktop:attachments": "npm run desktop:build && tsc -p tsconfig.desktop-tests.json && node --test --test-concurrency=1 dist-desktop-tests/apps/desktop/renderer/App.test.js dist-desktop-tests/apps/desktop/renderer/AttachmentList.test.js dist-desktop-tests/apps/desktop/renderer/useAttachmentDraft.test.js",
+    "test:desktop": "tsc -p tsconfig.desktop-tests.json && node --test dist-desktop-tests/apps/desktop/main/connection-result.test.js dist-desktop-tests/apps/desktop/main/conversation-history.test.js dist-desktop-tests/apps/desktop/main/git-service.test.js dist-desktop-tests/apps/desktop/main/review-cleanup.test.js dist-desktop-tests/apps/desktop/main/runtime-cache.test.js dist-desktop-tests/apps/desktop/main/secret-redaction.test.js dist-desktop-tests/apps/desktop/main/settings-input.test.js dist-desktop-tests/apps/desktop/main/task-status.test.js dist-desktop-tests/apps/desktop/main/run-shutdown.test.js dist-desktop-tests/apps/desktop/main/run-submissions.test.js dist-desktop-tests/apps/desktop/main/terminal-service.test.js dist-desktop-tests/apps/desktop/main/worktree-service.test.js dist-desktop-tests/apps/desktop/shared/conversation-activity.test.js dist-desktop-tests/apps/desktop/shared/git-graph-layout.test.js dist-desktop-tests/apps/desktop/shared/question-activity.test.js dist-desktop-tests/apps/desktop/shared/code-highlight.test.js dist-desktop-tests/apps/desktop/main/attachment-manager.test.js dist-desktop-tests/apps/desktop/main/image-processor.test.js",
     "start": "node dist/cli.js",
-    "dev": "tsc && node dist/cli.js"
+    "dev": "tsc && node dist/cli.js",
+    "desktop:setup": "install-electron",
+    "desktop:dev": "npm run desktop:setup && electron-vite dev",
+    "desktop:build": "npm run desktop:setup && electron-vite build",
+    "desktop:preview": "npm run desktop:setup && electron-vite preview",
+    "desktop:package": "npm run desktop:build && node scripts/package-desktop.mjs"
   },
   "keywords": [
     "agent",
@@ -22,10 +29,23 @@
   "license": "MIT",
   "dependencies": {
     "@anthropic-ai/sdk": "^0.52.0",
-    "chalk": "^5.6.2"
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
+    "chalk": "^5.6.2",
+    "highlight.js": "^11.12.0",
+    "misans": "^5.0.0",
+    "node-pty": "^1.1.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0"
   },
   "devDependencies": {
     "@types/node": "^22.15.3",
-    "typescript": "^5.8.3"
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^5.1.1",
+    "electron": "^44.4.5",
+    "electron-vite": "^5.0.0",
+    "typescript": "^5.8.3",
+    "vite": "^7.3.6"
   }
 }

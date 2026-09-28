@@ -1,4 +1,5 @@
 import type Anthropic from "@anthropic-ai/sdk";
+import { materializeAttachments, describeImageFailure } from "./attachments.js";
 import {
     authHeaders,
     endpoint,
@@ -54,17 +55,17 @@ export function toResponsesInput(messages: Anthropic.MessageParam[]): any[] {
             out.push({
                 type: "message",
                 role: message.role,
-                content: parts.map((p) => ({
-                    type: message.role === "assistant" ? "output_text" : "input_text",
-                    text: p.text,
-                })),
+                content: parts,
             });
             parts = [];
         };
 
         for (const block of message.content as any[]) {
             if (block.type === "text") {
-                parts.push({ text: block.text });
+                parts.push({ type: message.role === "assistant" ? "output_text" : "input_text", text: block.text });
+            } else if (block.type === "image" && message.role === "user") {
+                parts.push({ type: "input_image", image_url: block.source.type === "base64"
+                    ? `data:${block.source.media_type};base64,${block.source.data}` : block.source.url, detail: "auto" });
             } else if (block.type === "tool_use") {
                 // A call is its own item, so flush the surrounding message
                 // first — item order has to match the order it was emitted.
@@ -278,6 +279,7 @@ export class OpenAIResponsesProvider implements ModelProvider {
     }
 
     async stream(req: ModelRequest, signal?: AbortSignal): Promise<AsyncIterable<any>> {
+        req = { ...req, messages: await materializeAttachments(req.messages, signal) };
         const body: Record<string, any> = {
             model: req.model,
             instructions: joinTextBlocks(req.system),
@@ -289,13 +291,10 @@ export class OpenAIResponsesProvider implements ModelProvider {
         if (req.tools.length) body.tools = toResponsesTools(req.tools);
         if (req.effort) body.reasoning = { effort: openaiEffort(req.effort) };
 
-        const res = await postForStream(
-            endpoint(this.cfg.apiBase, RESPONSES_PATH),
-            authHeaders(this.cfg),
-            body,
-            signal,
-        );
-        return responseEvents(res);
+        try {
+            const res = await postForStream(endpoint(this.cfg.apiBase, RESPONSES_PATH), authHeaders(this.cfg), body, signal);
+            return responseEvents(res);
+        } catch (error) { return describeImageFailure(error, req.messages); }
     }
 
     async completeText(req: SideTextRequest, signal?: AbortSignal): Promise<string> {

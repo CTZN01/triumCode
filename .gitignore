@@ -1,7 +1,16 @@
 node_modules/
 dist/
+dist-desktop-tests/
+out/
 .env
 .triumcode/
 .zcode/
 .zcodeignore
 .workbuddy-ai/
+
+# Local AI assistant instructions and generated skill copies
+AGENTS.md
+CLAUDE.md
+.agents/
+.codex/
+scripts/sync-skills.mjs

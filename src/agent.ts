@@ -1,9 +1,12 @@
 import Anthropic from "@anthropic-ai/sdk";
+import { randomUUID } from "node:crypto";
+import type { FileEditDiff } from "./file-diff.js";
+import { messageAttachments, type Attachment, type AttachmentMessage } from "./attachments.js";
 import { readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import * as os from "node:os";
 import { getActiveToolDefinitions, getToolDefinitionsFor, toolResultLimit, type ReadFileState, type Tool, type ToolContext } from "./tools.js";
-import { ToolExecutor } from "./tool-executor.js";
+import { ToolExecutor, toolExecutionResult, type ToolExecutionOutcome, type ToolExecutionResult } from "./tool-executor.js";
 import { envModel } from "./config.js";
 import { buildStaticSystemPrompt, buildTurnContextReminder, PLAN_MODE } from "./prompt.js";
 import {
@@ -29,7 +32,11 @@ import {
     compactHistory, compressHistory, estimateTokens, prepareToolResult, shouldAutoCompact,
     withCacheBreakpoints, DEFAULT_CONTEXT_WINDOW,
 } from "./context-compression.js";
-import { PermissionPolicy, type PermissionMode } from "./permissions.js";
+import {
+    PermissionPolicy, loadPermissionRules,
+    type PermissionAction, type PermissionMode, type PermissionGrant, type PermissionRequest, type PermissionSource,
+    type SessionPermissionGrant, type SessionPermissionGrantSummary, type SessionPermissionGrantStore,
+} from "./permissions.js";
 import {
     startMemoryPrefetch, formatMemoriesForInjection,
     type MemoryPrefetch, type RelevantMemory, type SideQueryFn,
@@ -57,11 +64,11 @@ interface SubAgentSlotWaiter {
 // byte-exact prefix, so any byte that changes here re-processes the entire
 // conversation behind it — which is why git status and the date live in the
 // per-turn reminder instead (see buildTurnContextReminder).
-function buildSystemBlocks(planMode: boolean): Anthropic.TextBlockParam[] {
+function buildSystemBlocks(planMode: boolean, workspaceRoot: string): Anthropic.TextBlockParam[] {
     return [
         {
             type: "text",
-            text: buildStaticSystemPrompt(planMode),
+            text: buildStaticSystemPrompt(planMode, workspaceRoot),
             cache_control: { type: "ephemeral" },
         },
     ];
@@ -88,18 +95,86 @@ function briefApiError(error: any): string {
     return first.length > 100 ? first.slice(0, 97) + "..." : first;
 }
 
+export type AgentFailureCategory = "network" | "authentication" | "rate-limit" | "provider" | "internal";
+
+export function classifyAgentFailure(error: unknown): { category: AgentFailureCategory; retryable: boolean } {
+    const networkCodes = new Set([
+        "ECONNABORTED", "ECONNREFUSED", "ECONNRESET", "EHOSTUNREACH", "ENETUNREACH", "ENOTFOUND",
+        "EAI_AGAIN", "ETIMEDOUT", "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_SOCKET",
+    ]);
+    let current: unknown = error;
+    let status: number | null = null;
+    let networkFailure = false;
+    const seen = new Set<object>();
+    for (let depth = 0; depth < 4 && current && typeof current === "object" && !seen.has(current); depth++) {
+        seen.add(current);
+        const item = current as { code?: unknown; cause?: unknown; message?: unknown; name?: unknown; status?: unknown; statusCode?: unknown };
+        const candidateStatus = item.status ?? item.statusCode;
+        if (status === null && typeof candidateStatus === "number" && Number.isInteger(candidateStatus)) status = candidateStatus;
+        if (typeof item.code === "string" && networkCodes.has(item.code)) networkFailure = true;
+        if (typeof item.name === "string" && /^(?:APIConnection|Fetch|Network)/i.test(item.name)) networkFailure = true;
+        if (typeof item.message === "string" && /fetch failed|network error|socket hang up|timed out|connection (?:refused|reset|failed)/i.test(item.message)) {
+            networkFailure = true;
+        }
+        current = item.cause;
+    }
+
+    if (status === 401 || status === 403) return { category: "authentication", retryable: false };
+    if (status === 429) return { category: "rate-limit", retryable: true };
+    if (status !== null) return { category: "provider", retryable: status === 408 || status >= 500 };
+    if (networkFailure) return { category: "network", retryable: true };
+    return { category: "internal", retryable: false };
+}
+
 export interface AgentUsage {
     /** Prompt tokens billed at full price — the ones the cache did not serve. */
     input: number;
+    inputAvailable: boolean;
     output: number;
+    outputAvailable: boolean;
     /** Prompt tokens served from cache (billed at ~0.1x). */
     cacheRead: number;
+    cacheReadAvailable: boolean;
     /** Prompt tokens written to cache (billed at ~1.25x). */
     cacheWrite: number;
+    cacheWriteAvailable: boolean;
     /** cacheRead / (input + cacheRead + cacheWrite), 0 when nothing was sent. */
     cacheHitRate: number;
     cost: number;
 }
+
+export interface AgentContextUsage {
+    estimatedTokens: number;
+    contextWindow: number;
+    usableTokens: number;
+    remainingTokens: number;
+    utilization: number;
+}
+
+export type AgentEvent =
+    | { type: "turn.started"; userText: string }
+    | { type: "assistant.delta"; text: string }
+    | { type: "assistant.message.end" }
+    | { type: "status.changed"; status: "working" | "thinking" | "running-tools" | "idle"; label?: string }
+    | { type: "thinking.duration"; milliseconds: number }
+    | { type: "tool.started"; id: string; name: string; input: Record<string, any> }
+    | { type: "tool.completed"; id: string; name: string; input: Record<string, any>; output: string; outcome: ToolExecutionOutcome; executionStarted: boolean; durationMs: number; fileEdit?: FileEditDiff }
+    | { type: "permission.checked"; id: string; name: string; input: Record<string, any>; action: PermissionAction; source: PermissionSource }
+    | { type: "notice"; level: "info" | "warning"; text: string }
+    | { type: "plan.mode"; enabled: boolean; path: string; permissionMode?: PermissionMode }
+    | { type: "plan.review"; content: string }
+    | { type: "user.question.required"; question: string; options?: string[] }
+    | { type: "subagent.started"; id: string; name: string; description: string }
+    | { type: "subagent.completed"; id: string; name: string; description: string; tokens: number | null }
+    | { type: "subagent.failed"; id: string; name: string; description: string; error: string }
+    | { type: "usage.updated"; usage: AgentUsage }
+    | { type: "context.updated"; context: AgentContextUsage }
+    | { type: "context.compaction.started"; id: string }
+    | { type: "context.compaction.completed"; id: string }
+    | { type: "turn.completed"; usage: AgentUsage }
+    | { type: "turn.cancel_requested" }
+    | { type: "turn.cancelled" }
+    | { type: "turn.failed"; message: string; category: AgentFailureCategory; retryable: boolean; safeToRetry: boolean };
 
 export interface AgentOptions {
     // These three are normally resolved by config.ts (CLI flag → config.json →
@@ -121,6 +196,20 @@ export interface AgentOptions {
     contextWindow?: number; // --context-window, in tokens
     planMode?: boolean;   // --plan flag from CLI
     permissionMode?: PermissionMode;
+    /** Desktop-only grants scoped to this saved conversation. */
+    sessionPermissionGrants?: SessionPermissionGrant[];
+    /** Shared with delegated agents so session grants and revocations stay live. */
+    sessionPermissionGrantStore?: SessionPermissionGrantStore;
+    /** Explicit project root for desktop hosts; the CLI keeps its cwd default. */
+    workspaceRoot?: string;
+    /** Receives structured runtime events instead of terminal rendering. */
+    onEvent?: (event: AgentEvent) => void;
+    /** Persists complete history and safe assistant checkpoints during a turn. */
+    onSessionCheckpoint?: (messages: Anthropic.MessageParam[]) => void;
+    /** Receives structured operation details for desktop permission prompts. */
+    onPermissionRequest?: (request: PermissionRequest) => Promise<PermissionGrant>;
+    /** Captures a desktop run's preimage before an Agent file operation. */
+    onBeforeFileWrite?: (absolutePath: string) => void | Promise<void>;
     sideQuery?: SideQueryFn; // override for the memory-recall side model (tests)
     // ── Sub-agent configuration ─────────────────────────────
     // All three default to the main agent's behaviour, so an Agent built
@@ -171,7 +260,13 @@ export class Agent {
     private maxTokens: number;
     private maxTurns: number;
     private contextWindow: number;
+    private workspaceRoot: string;
+    private eventSink?: (event: AgentEvent) => void;
+    private onSessionCheckpoint?: (messages: Anthropic.MessageParam[]) => void;
+    private onPermissionRequest?: (request: PermissionRequest) => Promise<PermissionGrant>;
+    private onBeforeFileWrite?: (absolutePath: string) => void | Promise<void>;
     private contextUtilization = 0;
+    private contextEstimateTokens: number | null = null;
     private permissionMode: PermissionMode;
     // Set once the endpoint has rejected the thinking/effort params, so later
     // turns skip sending them instead of paying a 400 on every request.
@@ -181,6 +276,7 @@ export class Agent {
     // ── Abort support ───────────────────────────────────────────
     private abortController: AbortController | null = null;
     public isProcessing = false;
+    private turnToolUseSeen = false;
 
     // ── Token usage tracking ────────────────────────────────────
     // `input` counts only uncached prompt tokens; cached ones are tracked
@@ -189,6 +285,10 @@ export class Agent {
     private totalOutputTokens = 0;
     private totalCacheReadTokens = 0;
     private totalCacheWriteTokens = 0;
+    private inputUsageAvailable = false;
+    private outputUsageAvailable = false;
+    private cacheReadUsageAvailable = false;
+    private cacheWriteUsageAvailable = false;
     private lastRequestAt = 0;
 
     // ── Auto-save callback ──────────────────────────────────────
@@ -242,10 +342,21 @@ export class Agent {
         this.contextWindow = options?.contextWindow && options.contextWindow > 0
             ? Math.floor(options.contextWindow)
             : DEFAULT_CONTEXT_WINDOW;
+        this.workspaceRoot = resolve(options?.workspaceRoot ?? process.cwd());
+        this.eventSink = options?.onEvent;
+        this.onSessionCheckpoint = options?.onSessionCheckpoint;
+        this.onPermissionRequest = options?.onPermissionRequest;
+        this.onBeforeFileWrite = options?.onBeforeFileWrite;
         this.planMode = options?.planMode ?? options?.permissionMode === "plan";
         const permissionMode = options?.permissionMode ?? (this.planMode ? "plan" : "default");
         this.permissionMode = permissionMode;
-        this.permissionPolicy = new PermissionPolicy(permissionMode);
+        this.permissionPolicy = new PermissionPolicy(
+            permissionMode,
+            loadPermissionRules(this.workspaceRoot),
+            this.workspaceRoot,
+            options?.sessionPermissionGrants,
+            options?.sessionPermissionGrantStore,
+        );
         this.sideQueryFn = options?.sideQuery ?? null;
         this.isSubAgent = options?.isSubAgent ?? false;
         this.customSystemPrompt = options?.customSystemPrompt;
@@ -270,7 +381,8 @@ export class Agent {
      */
     private emitText(text: string): void {
         if (this.outputBuffer !== null) return;
-        printAssistantText(text);
+        if (this.eventSink) this.emit({ type: "assistant.delta", text });
+        else printAssistantText(text);
     }
 
     /** This agent's tool list: its own set when it has one, else the registry's. */
@@ -286,14 +398,38 @@ export class Agent {
      * markdown state to reset.
      */
     private endOutput(): void {
-        if (!this.outputBuffer) endStream();
+        if (this.outputBuffer) return;
+        if (this.eventSink) this.emit({ type: "assistant.message.end" });
+        else endStream();
+    }
+
+    private emit(event: AgentEvent): void {
+        try { this.eventSink?.(event); } catch { /* UI delivery must not abort model work. */ }
+    }
+
+    private checkpoint(messages: Anthropic.MessageParam[] = this.messages): void {
+        try { this.onSessionCheckpoint?.(messages); } catch { /* Persistence failure must not abort model work. */ }
+    }
+
+    private updateRuntimeStatus(
+        status: "working" | "thinking" | "running-tools" | "idle",
+        label?: string,
+    ): void {
+        if (this.eventSink) {
+            this.emit({ type: "status.changed", status, label });
+            return;
+        }
+        if (status === "idle") endStatus();
+        else if (status === "thinking") updateStatus("Thinking");
+        else if (status === "working") beginStatus(label || pickStatusVerb());
+        else beginStatus(label || "Running tools");
     }
 
     /** The system prompt block, cacheable, and stable for the session. */
     private systemBlocks(): Anthropic.TextBlockParam[] {
         return this.customSystemPrompt !== undefined
             ? [{ type: "text", text: this.customSystemPrompt, cache_control: { type: "ephemeral" } }]
-            : buildSystemBlocks(this.planMode);
+            : buildSystemBlocks(this.planMode, this.workspaceRoot);
     }
 
     /** Register a callback invoked after each chat() completes. */
@@ -306,12 +442,28 @@ export class Agent {
         this.onAskUser = fn;
     }
 
+    getSessionPermissionGrants(): SessionPermissionGrantSummary[] {
+        return this.permissionPolicy.getSessionGrants();
+    }
+
+    getPersistedSessionPermissionGrants(): SessionPermissionGrant[] {
+        return this.permissionPolicy.getPersistedSessionGrants();
+    }
+
+    confirmSessionPermission(key: string, toolName: string, input: Record<string, any>): string {
+        return this.permissionPolicy.confirm(key, toolName, input);
+    }
+
+    revokeSessionPermissionGrant(grantId: string): boolean {
+        return this.permissionPolicy.revokeSessionGrant(grantId);
+    }
+
     /** Toggle plan mode on/off. */
-    togglePlanMode(): void {
+    async togglePlanMode(): Promise<void> {
         this.planMode = !this.planMode;
         this.permissionMode = this.planMode ? "plan" : "default";
         this.permissionPolicy.setMode(this.permissionMode);
-        if (this.planMode) this.preparePlanFile();
+        if (this.planMode) await this.preparePlanFile();
     }
 
     // ── Mid-session reasoning controls (REPL /effort, /thinking) ──
@@ -327,6 +479,12 @@ export class Agent {
     /** Toggle extended thinking. */
     setThinking(enabled: boolean): void {
         this.thinkingEnabled = enabled;
+    }
+
+    setDesktopPermissionMode(mode: "desktopDefault" | "desktopAcceptEdits" | "bypassPermissions"): void {
+        this.planMode = false;
+        this.permissionMode = mode;
+        this.permissionPolicy.setMode(mode);
     }
 
     getEffort(): EffortLevel | null {
@@ -396,8 +554,10 @@ export class Agent {
         // internal fallback strings mean nothing to the user.
         const modeLabels: Record<PermissionMode, string> = {
             default: "",
+            desktopDefault: "default",
             plan: "plan",
             acceptEdits: "accept-edits",
+            desktopAcceptEdits: "accept-edits",
             bypassPermissions: "yolo",
             dontAsk: "dont-ask",
         };
@@ -414,6 +574,9 @@ export class Agent {
 
     /** Abort the currently-running chat() call. */
     abort(): void {
+        if (this.abortController && !this.abortController.signal.aborted) {
+            this.emit({ type: "turn.cancel_requested" });
+        }
         this.abortController?.abort();
     }
 
@@ -520,19 +683,25 @@ export class Agent {
 
     private async runAgentTool(input: Record<string, any>, signal?: AbortSignal): Promise<string> {
         if (signal?.aborted) return "Sub-agent was cancelled before it started.";
-        const type = resolveSubAgentName(input.type);
+        const type = resolveSubAgentName(input.type, { cwd: this.workspaceRoot });
         const description = String(input.description ?? "").trim() || type;
+        const id = randomUUID();
         const prompt = String(input.prompt ?? "").trim();
         if (!prompt) {
             // Narrated like a failed delegation, not returned silently: a
             // refusal the user cannot see looks identical to a hung turn.
-            printSubAgentStart(type, description);
             const message = "Error: the agent tool needs a prompt. Nothing was delegated.";
-            printSubAgentError(type, description, message);
+            if (this.eventSink) {
+                this.emit({ type: "subagent.started", id, name: type, description });
+                this.emit({ type: "subagent.failed", id, name: type, description, error: message });
+            } else {
+                printSubAgentStart(type, description);
+                printSubAgentError(type, description, message);
+            }
             return message;
         }
 
-        const config = getSubAgentConfig(type);
+        const config = getSubAgentConfig(type, { cwd: this.workspaceRoot });
         // Plan mode is inherited by the sub-agent, so its prompt has to say so
         // — the built-in contracts assume they can use their tools.
         const systemPrompt = this.permissionMode === "plan"
@@ -560,6 +729,10 @@ export class Agent {
             // they mean there — and a confirmation with no user to ask
             // resolves as a denial, so the parent runs the command itself.
             permissionMode: this.permissionMode,
+            workspaceRoot: this.workspaceRoot,
+            onPermissionRequest: this.onPermissionRequest,
+            sessionPermissionGrantStore: this.permissionPolicy.getSessionGrantStore(),
+            onBeforeFileWrite: this.onBeforeFileWrite,
             customSystemPrompt: systemPrompt,
             customTools: config.tools,
             isSubAgent: true,
@@ -571,15 +744,20 @@ export class Agent {
         const forwardAbort = () => subAgent.abort();
         signal?.addEventListener("abort", forwardAbort, { once: true });
 
-        printSubAgentStart(type, description);
+        if (this.eventSink) this.emit({ type: "subagent.started", id, name: type, description });
+        else printSubAgentStart(type, description);
         try {
             const { text } = await subAgent.runOnce(prompt);
-            const tokens = this.absorbUsage(subAgent);
-            printSubAgentEnd(type, description, tokens);
+            const usage = this.absorbUsage(subAgent);
+            if (this.eventSink) {
+                this.emit({ type: "subagent.completed", id, name: type, description, tokens: usage.available ? usage.tokens : null });
+                if (usage.available) this.emit({ type: "usage.updated", usage: this.getUsage() });
+            } else printSubAgentEnd(type, description, usage.tokens);
             if (!text) {
-                return `${type} sub-agent finished without producing any text. ${tokens} tokens were spent. Re-issue the call with a more specific prompt, or do the task directly.`;
+                const spent = usage.available ? ` ${usage.tokens} tokens were spent.` : "";
+                return `${type} sub-agent finished without producing any text.${spent} Re-issue the call with a more specific prompt, or do the task directly.`;
             }
-            return `${text}\n\n(${type} sub-agent, ${tokens} tokens)`;
+            return usage.available ? `${text}\n\n(${type} sub-agent, ${usage.tokens} tokens)` : `${text}\n\n(${type} sub-agent)`;
         } catch (e: any) {
             // Whatever the sub-agent spent before it failed is still on the
             // bill, so it is absorbed and reported either way.
@@ -587,7 +765,8 @@ export class Agent {
             // briefApiError, not the raw message: the SDK puts the whole HTTP
             // body in it, and this string goes into the parent's context.
             const message = `Sub-agent error: ${briefApiError(e)}`;
-            printSubAgentError(type, description, message);
+            if (this.eventSink) this.emit({ type: "subagent.failed", id, name: type, description, error: message });
+            else printSubAgentError(type, description, message);
             return message;
         } finally {
             signal?.removeEventListener("abort", forwardAbort);
@@ -599,18 +778,28 @@ export class Agent {
      * what was taken. The sub-agent's counters are zeroed as they are taken,
      * so the fold bills each token exactly once even on a reused instance.
      */
-    private absorbUsage(subAgent: Agent): number {
+    private absorbUsage(subAgent: Agent): { tokens: number; available: boolean } {
         const used = subAgent.totalInputTokens + subAgent.totalOutputTokens
             + subAgent.totalCacheReadTokens + subAgent.totalCacheWriteTokens;
+        const available = subAgent.inputUsageAvailable || subAgent.outputUsageAvailable
+            || subAgent.cacheReadUsageAvailable || subAgent.cacheWriteUsageAvailable;
         this.totalInputTokens += subAgent.totalInputTokens;
         this.totalOutputTokens += subAgent.totalOutputTokens;
         this.totalCacheReadTokens += subAgent.totalCacheReadTokens;
         this.totalCacheWriteTokens += subAgent.totalCacheWriteTokens;
+        this.inputUsageAvailable ||= subAgent.inputUsageAvailable;
+        this.outputUsageAvailable ||= subAgent.outputUsageAvailable;
+        this.cacheReadUsageAvailable ||= subAgent.cacheReadUsageAvailable;
+        this.cacheWriteUsageAvailable ||= subAgent.cacheWriteUsageAvailable;
         subAgent.totalInputTokens = 0;
         subAgent.totalOutputTokens = 0;
         subAgent.totalCacheReadTokens = 0;
         subAgent.totalCacheWriteTokens = 0;
-        return used;
+        subAgent.inputUsageAvailable = false;
+        subAgent.outputUsageAvailable = false;
+        subAgent.cacheReadUsageAvailable = false;
+        subAgent.cacheWriteUsageAvailable = false;
+        return { tokens: used, available };
     }
 
     /**
@@ -631,25 +820,36 @@ export class Agent {
         id: string,
         name: string,
         input: Record<string, any>,
-    ): Promise<string> {
+    ): Promise<ToolExecutionResult> {
         if (this.customToolNames && !this.customToolNames.has(name)) {
-            return Promise.resolve(`Error: tool ${name} is not available to this agent.`);
+            return Promise.resolve(toolExecutionResult(`Error: tool ${name} is not available to this agent.`, "failed"));
         }
-        if (name === "agent") return this.executeAgentTool(input);
+        if (name === "agent") {
+            return this.executeAgentTool(input).then((output) => toolExecutionResult(output, undefined, true));
+        }
         return executor.enqueue(id, name, input);
     }
 
     /**
      * Record the prompt-side half of a request's usage.
      *
-     * Anthropic reports it once, in message_start. The OpenAI translators
-     * report it in their closing message_delta, so the caller decides which
-     * event is authoritative for the protocol — see the stream loop.
+     * Anthropic normally reports it in message_start; some compatible
+     * gateways send a zero placeholder and fill it in at message_delta.
+     * The OpenAI translators report it only in message_delta.
      */
     private addPromptUsage(usage: any): void {
-        this.totalInputTokens += usage.input_tokens ?? 0;
-        this.totalCacheReadTokens += usage.cache_read_input_tokens ?? 0;
-        this.totalCacheWriteTokens += usage.cache_creation_input_tokens ?? 0;
+        if (typeof usage.input_tokens === "number" && Number.isSafeInteger(usage.input_tokens) && usage.input_tokens >= 0) {
+            this.totalInputTokens += usage.input_tokens;
+            this.inputUsageAvailable = true;
+        }
+        if (typeof usage.cache_read_input_tokens === "number" && Number.isSafeInteger(usage.cache_read_input_tokens) && usage.cache_read_input_tokens >= 0) {
+            this.totalCacheReadTokens += usage.cache_read_input_tokens;
+            this.cacheReadUsageAvailable = true;
+        }
+        if (typeof usage.cache_creation_input_tokens === "number" && Number.isSafeInteger(usage.cache_creation_input_tokens) && usage.cache_creation_input_tokens >= 0) {
+            this.totalCacheWriteTokens += usage.cache_creation_input_tokens;
+            this.cacheWriteUsageAvailable = true;
+        }
     }
 
     /** Token usage for the current session. */
@@ -666,16 +866,50 @@ export class Agent {
         const promptTokens = this.totalInputTokens + this.totalCacheReadTokens + this.totalCacheWriteTokens;
         return {
             input: this.totalInputTokens,
+            inputAvailable: this.inputUsageAvailable,
             output: this.totalOutputTokens,
+            outputAvailable: this.outputUsageAvailable,
             cacheRead: this.totalCacheReadTokens,
+            cacheReadAvailable: this.cacheReadUsageAvailable,
             cacheWrite: this.totalCacheWriteTokens,
+            cacheWriteAvailable: this.cacheWriteUsageAvailable,
             cacheHitRate: promptTokens > 0 ? this.totalCacheReadTokens / promptTokens : 0,
             cost,
         };
     }
 
+    getContextUsage(): AgentContextUsage | null {
+        if (this.contextEstimateTokens === null) return null;
+        const usableTokens = Math.max(1, this.contextWindow - 20_000);
+        return {
+            estimatedTokens: this.contextEstimateTokens,
+            contextWindow: this.contextWindow,
+            usableTokens,
+            remainingTokens: Math.max(0, usableTokens - this.contextEstimateTokens),
+            utilization: this.contextEstimateTokens / usableTokens,
+        };
+    }
+
+    restoreSessionUsage(
+        usage: Pick<AgentUsage, "input" | "inputAvailable" | "output" | "outputAvailable" | "cacheRead" | "cacheReadAvailable" | "cacheWrite" | "cacheWriteAvailable">,
+        contextTokens: number | null,
+    ): void {
+        this.totalInputTokens = usage.input;
+        this.inputUsageAvailable = usage.inputAvailable;
+        this.totalOutputTokens = usage.output;
+        this.outputUsageAvailable = usage.outputAvailable;
+        this.totalCacheReadTokens = usage.cacheRead;
+        this.cacheReadUsageAvailable = usage.cacheReadAvailable;
+        this.totalCacheWriteTokens = usage.cacheWrite;
+        this.cacheWriteUsageAvailable = usage.cacheWriteAvailable;
+        this.contextEstimateTokens = contextTokens;
+        this.contextUtilization = this.getContextUsage()?.utilization ?? 0;
+    }
+
     showCost(): void {
-        if (!this.isSubAgent) printCostReport(this.getUsage());
+        if (this.isSubAgent) return;
+        if (this.eventSink) this.emit({ type: "turn.completed", usage: this.getUsage() });
+        else printCostReport(this.getUsage());
     }
 
     // ── Session persistence helpers ──────────────────────────────
@@ -694,6 +928,7 @@ export class Agent {
         // previous session was saved, not the one just restored — it is
         // recomputed on the next request.
         this.contextUtilization = 0;
+        this.contextEstimateTokens = null;
         // Whether the restored history still contains any given file's contents
         // is unknowable from here, so no read may claim to have been shown.
         this.readFileState.clear();
@@ -703,6 +938,7 @@ export class Agent {
     clearHistory(): void {
         this.messages = [];
         this.contextUtilization = 0;
+        this.contextEstimateTokens = null;
         // Nothing the model was shown survives the wipe, so neither does the
         // read-before-write guard's memory of it.
         this.readFileState.clear();
@@ -746,7 +982,7 @@ export class Agent {
         this.memoryPrefetch = startMemoryPrefetch(
             userText, sideQuery,
             this.alreadySurfacedMemories, this.sessionMemoryBytes,
-            {}, this.abortController?.signal,
+            { cwd: this.workspaceRoot }, this.abortController?.signal,
         );
     }
 
@@ -799,35 +1035,40 @@ export class Agent {
         }
     }
 
-    private preparePlanFile(): string {
+    private async preparePlanFile(): Promise<string> {
         if (this.planFilePath) return this.planFilePath;
-        const directory = join(os.homedir(), ".claude", "plans");
+        const directory = this.eventSink
+            ? join(this.workspaceRoot, ".triumcode", "plans")
+            : join(os.homedir(), ".claude", "plans");
         mkdirSync(directory, { recursive: true });
         const stamp = new Date().toISOString().replace(/[.:]/g, "-");
         this.planFilePath = join(directory, `plan-${stamp}.md`);
+        await this.onBeforeFileWrite?.(this.planFilePath);
         writeFileSync(this.planFilePath, "# Implementation Plan\n\n", "utf8");
         this.permissionPolicy.setPlanFilePath(this.planFilePath);
         return this.planFilePath;
     }
 
-    private enterPlanModeFromTool(): Promise<string> {
-        if (this.planMode) return Promise.resolve(`Already in plan mode. Plan file: ${this.preparePlanFile()}`);
+    private async enterPlanModeFromTool(): Promise<string> {
+        if (this.planMode) return `Already in plan mode. Plan file: ${await this.preparePlanFile()}`;
         this.planMode = true;
         this.permissionMode = "plan";
         this.permissionPolicy.setMode("plan");
-        const path = this.preparePlanFile();
-        printPlanModeEntered(path);
-        return Promise.resolve(`Entered plan mode. Read files and write the plan to ${path}. Call exit_plan_mode when ready.`);
+        const path = await this.preparePlanFile();
+        if (this.eventSink) this.emit({ type: "plan.mode", enabled: true, path, permissionMode: "plan" });
+        else printPlanModeEntered(path);
+        return `Entered plan mode. Read files and write the plan to ${path}. Call exit_plan_mode when ready.`;
     }
 
     private async exitPlanModeFromTool(): Promise<string> {
         if (!this.planMode) return "Error: the agent is not in plan mode.";
-        const path = this.preparePlanFile();
+        const path = await this.preparePlanFile();
         const content = readFileSync(path, "utf8").trim();
         if (!content || content === "# Implementation Plan") {
             return "Error: write the implementation plan to the plan file before calling exit_plan_mode.";
         }
-        printPlanForApproval(content);
+        if (this.eventSink) this.emit({ type: "plan.review", content });
+        else printPlanForApproval(content);
         if (!this.onAskUser) return "Error: plan approval is unavailable in this context.";
         const answer = (await this.onAskUser("Review the plan and choose how to proceed.", [
             "clear context and execute",
@@ -836,7 +1077,7 @@ export class Agent {
             "keep planning",
         ])).trim().toLowerCase();
 
-        if (answer === "4" || answer.includes("keep")) {
+        if (!answer || answer === "4" || answer.includes("keep")) {
             return "Plan kept for revision. Continue planning and call exit_plan_mode again when ready.";
         }
 
@@ -844,32 +1085,61 @@ export class Agent {
         const manual = answer === "3" || answer.includes("manual");
         if (clear) this.clearHistory();
         this.planMode = false;
-        this.permissionMode = manual ? "default" : "acceptEdits";
+        this.permissionMode = this.eventSink
+            ? "desktopDefault"
+            : manual ? "default" : "acceptEdits";
         this.permissionPolicy.setMode(this.permissionMode);
         this.permissionPolicy.setPlanFilePath(null);
-        printPlanModeExited(manual ? "default" : "acceptEdits");
+        if (this.eventSink) this.emit({ type: "plan.mode", enabled: false, path, permissionMode: "desktopDefault" });
+        else printPlanModeExited(manual ? "default" : "acceptEdits");
         return clear
             ? "Plan approved. Context cleared; proceed with implementation."
             : "Plan approved. Proceed with implementation.";
     }
 
-    async chat(userText: string): Promise<void> {
-        // The volatile half of the context — git state, the date, which
-        // deferred tools are still unloaded — rides on the user's message
-        // rather than the system prompt. This message is new every turn, so
-        // nothing behind it is invalidated; the same bytes in the system prompt
-        // would cost a re-read of the whole conversation every time the agent
-        // wrote a file.
-        //
-        // Blocks rather than a bare string: withCacheBreakpoints attaches the
-        // tail cache breakpoint to a content block, so a string message would
-        // leave the turn with nothing to cache.
-        const reminder = buildTurnContextReminder();
+    async chat(userText: string, attachments: Attachment[] = []): Promise<void> {
+        return this.runTurn(userText, true, attachments);
+    }
+
+    async retryFailedTurn(userText: string): Promise<void> {
+        const last = this.messages.at(-1);
+        if (this.isProcessing || !last || (last.role !== "user" && last.role !== "assistant")) {
+            throw new Error("The failed request is no longer available for a safe retry.");
+        }
         this.messages.push({
             role: "user",
-            content: [{ type: "text", text: `${reminder}\n\n${userText}` }],
+            content: [{
+                type: "text",
+                text: `${buildTurnContextReminder(this.workspaceRoot)}\n\n<system-reminder>Continue the most recent visible user request from the existing conversation. The failed attempt did not start any tools. Continue from any partial assistant text without repeating the user request.</system-reminder>`,
+            }],
         });
-        if (shouldAutoCompact(this.messages, this.contextWindow)) this.compact();
+        this.checkpoint();
+        return this.runTurn(userText, false);
+    }
+
+    private async runTurn(userText: string, appendUserMessage: boolean, attachments: Attachment[] = []): Promise<void> {
+        this.turnToolUseSeen = false;
+        // Normal requests carry volatile context — git state, the date and
+        // deferred-tool availability — in the new user message. A safe retry
+        // preserves that visible request and adds its refreshed context to a
+        // hidden system reminder instead.
+        if (appendUserMessage) {
+            const reminder = buildTurnContextReminder(this.workspaceRoot);
+            const message: AttachmentMessage = {
+                role: "user",
+                content: [{ type: "text", text: `${reminder}\n\n${userText}` }],
+                ...(attachments.length ? { attachments } : {}),
+            };
+            this.messages.push(message);
+            this.checkpoint();
+        }
+        this.emit({ type: "turn.started", userText });
+        if (shouldAutoCompact(this.messages, this.contextWindow)) {
+            const compactionId = randomUUID();
+            this.emit({ type: "context.compaction.started", id: compactionId });
+            this.compact();
+            this.emit({ type: "context.compaction.completed", id: compactionId });
+        }
 
         // Set up abort controller for this turn.
         this.abortController = new AbortController();
@@ -880,11 +1150,22 @@ export class Agent {
 
         try {
             await this.runAgentLoop();
+            if (this.abortController.signal.aborted) this.emit({ type: "turn.cancelled" });
+            else this.emit({ type: "turn.completed", usage: this.getUsage() });
+        } catch (e: any) {
+            const failure = classifyAgentFailure(e);
+            this.emit({
+                type: "turn.failed",
+                message: briefApiError(e),
+                ...failure,
+                safeToRetry: failure.retryable && !this.turnToolUseSeen,
+            });
+            throw e;
         } finally {
             // Safety net: runAgentLoop can bail from several places (abort,
             // no-tool termination, a thrown API error). None of them may leave
             // a spinner frame on screen or its interval ticking.
-            if (!this.isSubAgent) endStatus();
+            if (!this.isSubAgent) this.updateRuntimeStatus("idle");
             this.isProcessing = false;
             this.abortController = null;
             // Auto-save after each chat() completes. A sub-agent skips it: its
@@ -930,7 +1211,9 @@ export class Agent {
 
             this.optionalParamsRejected = true;
             if (!this.isSubAgent) {
-                printInfo(`endpoint does not support thinking/effort (${briefApiError(e)}) — continuing without them`);
+                const text = `endpoint does not support thinking/effort (${briefApiError(e)}) - continuing without them`;
+                if (this.eventSink) this.emit({ type: "notice", level: "info", text });
+                else printInfo(text);
             }
             return await withRetry(
                 (signal) => this.provider.stream(request(true), signal),
@@ -949,7 +1232,11 @@ export class Agent {
         // Agent loop: keep going as long as the model produces tool calls.
         while (true) {
             if (this.maxTurns > 0 && turns >= this.maxTurns) {
-                if (!this.isSubAgent) printTurnEnd(`stopped after ${this.maxTurns} turns — the task may be unfinished`);
+                if (!this.isSubAgent) {
+                    const text = `stopped after ${this.maxTurns} turns - the task may be unfinished`;
+                    if (this.eventSink) this.emit({ type: "notice", level: "warning", text });
+                    else printTurnEnd(text);
+                }
                 return;
             }
             turns++;
@@ -962,8 +1249,8 @@ export class Agent {
             // elapsed clock restarts. The defensive endStatus() guarantees
             // that even if a phase left the status active.
             if (!this.isSubAgent) {
-                endStatus();
-                beginStatus(pickStatusVerb());
+                this.updateRuntimeStatus("idle");
+                this.updateRuntimeStatus("working", pickStatusVerb());
             }
 
             const tools = this.activeToolDefinitions();
@@ -974,11 +1261,14 @@ export class Agent {
             });
             this.forgetEvictedReads(compressed.stats.evictedReadPaths);
             const cached = withCacheBreakpoints(compressed.messages, this.systemBlocks());
-            this.contextUtilization = estimateTokens({
+            this.contextEstimateTokens = estimateTokens({
                 system: cached.system,
                 messages: cached.messages,
                 tools,
-            }) / Math.max(1, this.contextWindow - 20_000);
+            });
+            const contextUsage = this.getContextUsage()!;
+            this.contextUtilization = contextUsage.utilization;
+            if (this.eventSink && !this.isSubAgent) this.emit({ type: "context.updated", context: contextUsage });
             this.lastRequestAt = Date.now();
 
             let stream: any;
@@ -998,8 +1288,15 @@ export class Agent {
             // Which event carries the prompt-side usage differs by protocol:
             // Anthropic sends it in message_start and echoes it in
             // message_delta, the OpenAI translators only in message_delta.
-            // Taking the first one that arrives counts it exactly once.
+            // A zero-only start can be a placeholder; some gateways fill in
+            // the prompt counts only in message_delta.
             let promptUsageCounted = false;
+            let promptUsageWasZero = false;
+            const hasPositivePromptUsage = (usage: any): boolean => [
+                usage.input_tokens,
+                usage.cache_read_input_tokens,
+                usage.cache_creation_input_tokens,
+            ].some((count) => typeof count === "number" && Number.isSafeInteger(count) && count > 0);
             // "end_turn" / "tool_use" / "max_tokens" / "refusal" / ...
             // max_tokens is the one that matters: it means the turn was cut off.
             let stopReason: string | null = null;
@@ -1018,39 +1315,75 @@ export class Agent {
             // content_block_stop handler's `if (!state) break` swallows them.
             const thinkingIdx = new Set<number>();
             let thinkingStartedAt = 0;
+            let completedAssistantText = "";
+            let lastCheckpointedTextLength = 0;
+            const checkpointPartialAssistant = (commit: boolean): void => {
+                if (!this.onSessionCheckpoint) return;
+                const text = `${completedAssistantText}${currentText}`;
+                if (!text || (!commit && text.length === lastCheckpointedTextLength)) return;
+                if (commit) {
+                    this.messages.push({ role: "assistant", content: [{ type: "text", text }] });
+                    this.checkpoint();
+                } else {
+                    this.checkpoint([
+                        ...this.messages,
+                        { role: "assistant", content: [{ type: "text", text }] },
+                    ]);
+                }
+                lastCheckpointedTextLength = text.length;
+            };
 
             const context: ToolContext = {
                 readFileState: this.readFileState,
+                workspaceRoot: this.workspaceRoot,
+                attachmentReadPaths: new Set(this.messages.flatMap(message => messageAttachments(message))
+                    .filter(attachment => attachment.type !== "image").map(attachment => attachment.path)),
+                signal: this.abortController?.signal,
                 askUser: this.onAskUser,
                 permissionPolicy: this.permissionPolicy,
-                confirmPermission: async (message) => {
+                onPermissionDecision: (decision, toolCallId, toolName, input) => {
+                    this.emit({
+                        type: "permission.checked",
+                        id: toolCallId,
+                        name: toolName,
+                        input,
+                        action: decision.action,
+                        source: decision.source,
+                    });
+                },
+                confirmPermission: async (request) => {
+                    if (this.onPermissionRequest) {
+                        return this.onPermissionRequest(request);
+                    }
                     if (!this.onAskUser) return false;
                     // The refusal comes first because the CLI picker starts on
                     // the first option: Enter must not mean "allow" for an
                     // action flagged as destructive. It also keeps Enter on
                     // the default a refusal, which is what it was before the
                     // picker existed (Enter used to skip, i.e. not allow).
-                    const answer = await this.onAskUser(`Allow this potentially destructive action?\n  ${message}`, ["n", "y"]);
-                    return answer.trim().toLowerCase().startsWith("y");
+                    const answer = await this.onAskUser(`Allow this potentially destructive action?\n  ${request.message}`, ["n", "y"]);
+                    return answer.trim().toLowerCase().startsWith("y") ? "session" : false;
                 },
                 enterPlanMode: () => this.enterPlanModeFromTool(),
                 exitPlanMode: () => this.exitPlanModeFromTool(),
+                onBeforeFileWrite: this.onBeforeFileWrite,
+                captureFileEdits: Boolean(this.eventSink),
                 todos: [],
             };
             const executor = new ToolExecutor(context, this.customToolNames);
-            const toolResults = new Map<string, Promise<string>>();
+            const toolResults = new Map<string, Promise<ToolExecutionResult>>();
             const toolStartTimes = new Map<string, number>();
+            let streamFailure: unknown;
+            let streamInterrupted = false;
 
             try {
                 for await (const event of stream) {
                     // Check abort between events.
                     if (this.abortController?.signal.aborted) {
-                        // Mirror the catch below. Breaking out instead would
-                        // fall through to drain() and push an assistant turn
-                        // plus a tool_result turn for tools the user just
-                        // cancelled — then issue one more doomed API call.
-                        this.endOutput();
-                        return;
+                        // Finish dispatched tools and retain their results before
+                        // releasing this turn; the next request must see what ran.
+                        streamInterrupted = true;
+                        break;
                     }
 
                     switch (event.type) {
@@ -1064,7 +1397,7 @@ export class Agent {
                             if (cb.type === "thinking") {
                                 thinkingIdx.add(idx);
                                 thinkingStartedAt = Date.now();
-                                if (!this.isSubAgent) updateStatus("Thinking");
+                                if (!this.isSubAgent) this.updateRuntimeStatus("thinking");
                                 break;
                             }
                             if (cb.type === "tool_use") {
@@ -1085,6 +1418,9 @@ export class Agent {
                             if (delta.type === "text_delta") {
                                 this.emitText(delta.text);
                                 currentText += delta.text;
+                                if (completedAssistantText.length + currentText.length - lastCheckpointedTextLength >= 16_384) {
+                                    checkpointPartialAssistant(false);
+                                }
                             } else if (delta.type === "input_json_delta") {
                                 blocks.get(idx)?.jsonChunks.push(delta.partial_json);
                             }
@@ -1095,7 +1431,10 @@ export class Agent {
 
                             if (thinkingIdx.has(idx)) {
                                 const ms = Date.now() - thinkingStartedAt;
-                                if (!this.isSubAgent && ms >= 1000) printThinkingDuration(ms);
+                                if (!this.isSubAgent && ms >= 1000) {
+                                    if (this.eventSink) this.emit({ type: "thinking.duration", milliseconds: ms });
+                                    else printThinkingDuration(ms);
+                                }
                                 break;
                             }
 
@@ -1105,9 +1444,12 @@ export class Agent {
                             if (state.type === "text") {
                                 if (currentText.length > 0) {
                                     assistantContent.push({ type: "text", text: currentText });
+                                    completedAssistantText += currentText;
                                     currentText = "";
+                                    checkpointPartialAssistant(false);
                                 }
                             } else if (state.type === "tool_use" && state.id && state.name) {
+                                this.turnToolUseSeen = true;
                                 const raw = state.jsonChunks.join("");
                                 let input: Record<string, any> = {};
                                 let inputError: string | null = null;
@@ -1138,15 +1480,19 @@ export class Agent {
                                 // The agent tool narrates itself — start line,
                                 // end line, token count — so the generic call
                                 // line would say the same thing twice.
-                                if (!this.isSubAgent && state.name !== "agent") printToolCall(state.name, input);
+                                if (!this.isSubAgent) {
+                                    this.emit({ type: "tool.started", id: state.id, name: state.name, input });
+                                    if (!this.eventSink && state.name !== "agent") printToolCall(state.name, input);
+                                }
                                 toolStartTimes.set(state.id, Date.now());
 
                                 if (inputError) {
                                     // Answer with an error instead of executing, so
                                     // the model can re-issue the call correctly.
-                                    toolResults.set(state.id, Promise.resolve(
+                                    toolResults.set(state.id, Promise.resolve(toolExecutionResult(
                                         `Error: ${inputError}. Re-issue the call with the full arguments.`,
-                                    ));
+                                        "failed",
+                                    )));
                                 } else {
                                     toolResults.set(state.id, this.executeToolCall(executor, state.id, state.name, input));
                                 }
@@ -1158,6 +1504,8 @@ export class Agent {
                             if (usage) {
                                 this.addPromptUsage(usage);
                                 promptUsageCounted = true;
+                                promptUsageWasZero = !hasPositivePromptUsage(usage);
+                                if (!this.isSubAgent) this.emit({ type: "usage.updated", usage: this.getUsage() });
                             }
                             break;
                         }
@@ -1165,11 +1513,16 @@ export class Agent {
                             // Track token usage from the stream.
                             const usage = (event as any).usage;
                             if (usage) {
-                                if (!promptUsageCounted) {
+                                if (!promptUsageCounted || (promptUsageWasZero && hasPositivePromptUsage(usage))) {
                                     this.addPromptUsage(usage);
                                     promptUsageCounted = true;
+                                    promptUsageWasZero = false;
                                 }
-                                this.totalOutputTokens += usage.output_tokens ?? 0;
+                                if (typeof usage.output_tokens === "number" && Number.isSafeInteger(usage.output_tokens) && usage.output_tokens >= 0) {
+                                    this.totalOutputTokens += usage.output_tokens;
+                                    this.outputUsageAvailable = true;
+                                }
+                                if (!this.isSubAgent) this.emit({ type: "usage.updated", usage: this.getUsage() });
                             }
                             // Discarding this was why a truncated turn looked
                             // identical to a finished one.
@@ -1181,14 +1534,16 @@ export class Agent {
                 }
             } catch (e: any) {
                 if (e.name === "AbortError" || this.abortController?.signal.aborted) {
-                    this.endOutput();
-                    return;
-                }
-                throw e;
+                    streamInterrupted = true;
+                } else streamFailure = e;
             }
 
+            streamInterrupted ||= Boolean(this.abortController?.signal.aborted);
+            if ((streamInterrupted || streamFailure) && currentText) assistantContent.push({ type: "text", text: currentText });
+
             this.endOutput();
-            if (!this.isSubAgent) endStatus();
+            checkpointPartialAssistant(false);
+            if (!this.isSubAgent) this.updateRuntimeStatus("idle");
 
             // Wait for all in-flight tools to finish.
             //
@@ -1201,18 +1556,17 @@ export class Agent {
             //
             // A straggler is the one silent gap left in a turn, so cover it.
             if (!this.isSubAgent && !executor.isIdle) {
-                beginStatus(() => {
-                    const running = executor.running;
-                    if (running.length === 1) return `Running ${running[0]}`;
-                    if (running.length > 1) return `Running ${running.length} tools`;
-                    return "Working";
-                });
+                const running = executor.running;
+                const label = running.length === 1 ? `Running ${running[0]}`
+                    : running.length > 1 ? `Running ${running.length} tools`
+                    : "Working";
+                this.updateRuntimeStatus("running-tools", label);
             }
             await executor.drain();
             // Must end here, not after the results print: leaving it active
             // would carry this phase's elapsed time into the next iteration,
             // which then reports a fresh API call as already 6s old.
-            if (!this.isSubAgent) endStatus();
+            if (!this.isSubAgent) this.updateRuntimeStatus("idle");
 
             // Drop thinking blocks before storing in history: they are the
             // model's scratchpad and can be thousands of tokens long.
@@ -1227,37 +1581,53 @@ export class Agent {
             // request. Endpoints that spend max_tokens on thinking hit this
             // constantly: the model thinks, gets cut off, and says nothing.
             if (filtered.length === 0) {
+                if (streamFailure) throw streamFailure;
+                if (streamInterrupted) return;
                 // Truncated: retrying just buys another call to be cut off the
                 // same way. The budget is the problem, and only the user can
                 // raise it.
                 if (stopReason === "max_tokens") {
                     if (!this.isSubAgent) {
-                        printTurnEnd(
-                            "the model produced no output — it is spending the whole token budget on thinking. Raise --max-tokens",
-                        );
+                        const text = "the model produced no output - it is spending the whole token budget on thinking. Raise --max-tokens";
+                        if (this.eventSink) this.emit({ type: "notice", level: "warning", text });
+                        else printTurnEnd(text);
                     }
                     return;
                 }
                 // Not truncated: a genuinely empty response, usually transient.
                 if (!emptyTurnRetried) {
-                    if (!this.isSubAgent) printTurnEnd("the model returned an empty turn — retrying once");
+                    if (!this.isSubAgent) {
+                        const text = "the model returned an empty turn - retrying once";
+                        if (this.eventSink) this.emit({ type: "notice", level: "warning", text });
+                        else printTurnEnd(text);
+                    }
                     emptyTurnRetried = true;
                     continue;
                 }
-                if (!this.isSubAgent) printTurnEnd("the model returned an empty turn again — nothing to continue with");
+                if (!this.isSubAgent) {
+                    const text = "the model returned an empty turn again - nothing to continue with";
+                    if (this.eventSink) this.emit({ type: "notice", level: "warning", text });
+                    else printTurnEnd(text);
+                }
                 return;
             }
 
             this.messages.push({ role: "assistant", content: filtered });
+            this.checkpoint();
 
             // A truncated turn is reported even when it continues below: the
             // model may have been cut off mid-sentence or mid-tool-call.
             if (stopReason === "max_tokens") {
-                if (!this.isSubAgent) printTurnEnd("response hit the max token limit — this turn may be incomplete");
+                if (!this.isSubAgent) {
+                    const text = "response hit the max token limit - this turn may be incomplete";
+                    if (this.eventSink) this.emit({ type: "notice", level: "warning", text });
+                    else printTurnEnd(text);
+                }
             }
 
             // If no tools were called, the model is done.
             if (toolResults.size === 0) {
+                if (streamFailure) throw streamFailure;
                 if (this.outputBuffer !== null) {
                     const finalText = filtered
                         .filter((block): block is Anthropic.TextBlockParam => block.type === "text")
@@ -1272,12 +1642,23 @@ export class Agent {
             const resultBlocks: Anthropic.ToolResultBlockParam[] = [];
             for (const block of filtered) {
                 if (block.type !== "tool_use") continue;
-                const output = prepareToolResult(
-                    await toolResults.get(block.id)!,
-                    toolResultLimit(block.name),
-                );
+                const result = await toolResults.get(block.id)!;
+                const output = prepareToolResult(result.output, toolResultLimit(block.name));
                 const elapsed = Date.now() - (toolStartTimes.get(block.id) ?? Date.now());
-                if (!this.isSubAgent && block.name !== "agent") {
+                if (!this.isSubAgent) {
+                    this.emit({
+                        type: "tool.completed",
+                        id: block.id,
+                        name: block.name,
+                        input: block.input as Record<string, any>,
+                        output,
+                        outcome: result.outcome,
+                        executionStarted: result.executionStarted,
+                        durationMs: elapsed,
+                        ...(result.fileEdit ? { fileEdit: result.fileEdit } : {}),
+                    });
+                }
+                if (!this.isSubAgent && !this.eventSink && block.name !== "agent") {
                     printToolResult(block.name, output, elapsed, block.input as Record<string, any>);
                 }
                 resultBlocks.push({
@@ -1287,6 +1668,9 @@ export class Agent {
                 });
             }
             this.messages.push({ role: "user", content: resultBlocks });
+            this.checkpoint();
+            if (streamFailure) throw streamFailure;
+            if (streamInterrupted) return;
         }
     }
 }
