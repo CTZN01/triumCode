@@ -1,4 +1,6 @@
 import { getTool, type ToolContext, type ReadFileState } from "./tools.js";
+import { relative } from "node:path";
+import { createFileEditDiff, type FileEditDiff } from "./file-diff.js";
 
 // Maximum number of tools executing concurrently.
 const MAX_CONCURRENCY = 10;
@@ -26,6 +28,7 @@ export interface ToolExecutionResult {
     output: string;
     outcome: ToolExecutionOutcome;
     executionStarted: boolean;
+    fileEdit?: FileEditDiff;
 }
 
 function legacyToolOutcome(output: string): ToolExecutionOutcome {
@@ -221,15 +224,23 @@ export class ToolExecutor {
         this.executing.set(item.id, entry);
 
         const tool = getTool(item.name);
+        let fileEdit: FileEditDiff | undefined;
+        const context = this.context.captureFileEdits ? {
+            ...this.context,
+            onFileEdit: (path: string, before: string, after: string) => {
+                fileEdit = createFileEditDiff(this.context.workspaceRoot ? relative(this.context.workspaceRoot, path).replaceAll("\\", "/") : path, before, after);
+            },
+        } : this.context;
         const exec = tool
-            ? tool.call(item.input, this.context)
+            ? tool.call(item.input, context)
             : Promise.resolve(`Error: unknown tool: ${item.name}`);
 
         exec
             .then((result) => {
-                item.resolve(this.context.signal?.aborted
+                const completed = this.context.signal?.aborted
                     ? toolExecutionResult(result, "cancelled", true)
-                    : toolExecutionResult(result, undefined, true));
+                    : toolExecutionResult(result, undefined, true);
+                item.resolve({ ...completed, ...(fileEdit ? { fileEdit } : {}) });
             })
             .catch((err: any) => {
                 item.resolve(toolExecutionResult(`Error executing ${item.name}: ${err.message ?? err}`, "failed", true));

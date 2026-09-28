@@ -226,6 +226,8 @@ export function registerIpcHandlers({ host, terminals, workspaceWatch, getWindow
         if (typeof staged !== "boolean") throw new DesktopServiceError("INVALID_ARGUMENT", "Diff type is invalid.");
         return host.getGitDiff(workspaceId(workspace), stringArg(path, "path", 32_000), staged);
     });
+    handle("desktop:git-diffs", (workspace, path) =>
+        host.getGitDiffs(workspaceId(workspace), stringArg(path, "path", 32_000)));
     handle("desktop:git-stage-path", (workspace, path) =>
         host.stageGitPath(workspaceId(workspace), stringArg(path, "path", 32_000)));
     handle("desktop:git-unstage-path", (workspace, path) =>

@@ -1,6 +1,17 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { activityLine, groupConversationActivities, type PlacedActivity } from "./conversation-activity.js";
+import { activityFilePath, activityLine, editLineStats, groupConversationActivities, type PlacedActivity } from "./conversation-activity.js";
+import { createFileEditDiff } from "../../../src/file-diff.js";
+
+test("edit line counts use captured net changes rather than multi_edit intermediate steps", () => {
+    const row: PlacedActivity = {
+        id: "edit", title: "multi_edit", detail: "{}", state: "complete",
+        output: "Edited 2 regions in file.txt (+2/-2 lines)",
+        fileEdit: createFileEditDiff("file.txt", "A\n", "A\n"),
+    };
+    assert.deepEqual(editLineStats(row), { added: 0, removed: 0 });
+    assert.equal(editLineStats({ ...row, fileEdit: createFileEditDiff("file.txt", "a".repeat(2 * 1024 * 1024 + 1), "b") }), null);
+});
 
 const activity = (id: string, extra: Partial<PlacedActivity> = {}): PlacedActivity => ({
     id, title: "read_file", detail: "{}", state: "complete", ...extra,
@@ -51,6 +62,34 @@ test("activity lines expose the tool target and command arguments", () => {
     assert.equal(activityLine(activity("read", { title: "read_file", detail: '{"file_path":"src/agent.ts"}' })), "read_file src/agent.ts");
     assert.equal(activityLine(activity("search", { title: "grep_search", detail: '{"pattern":"TODO","path":"src"}', state: "running" })), "grep_search TODO · src");
     assert.equal(activityLine(activity("run", { title: "run_command", detail: '{"command":"git","args":["diff","--","a file.ts"]}' })), 'run_command git diff -- "a file.ts"');
+});
+
+test("edit activity lines carry the line delta once the result arrives", () => {
+    const detail = '{"file_path":"src/agent.ts"}';
+    assert.equal(activityLine(activity("edit", { title: "edit_file", detail })), "edit_file src/agent.ts");
+    assert.equal(activityLine(activity("edit", {
+        title: "edit_file", detail, output: "Edited src/agent.ts at line 254 (+2/-1 lines)\n\n  254 | line",
+    })), "edit_file src/agent.ts +2/-1");
+    assert.equal(activityLine(activity("multi", {
+        title: "multi_edit", detail: '{"file_path":"src/a.py","editCount":4}',
+        output: "Edited 4 regions in src/a.py (+5/-4 lines) (showing 3 of 4 regions)",
+    })), "multi_edit src/a.py +5/-4");
+    assert.equal(activityLine(activity("failed", {
+        title: "edit_file", detail, state: "failed", output: "Error: old_string not found in the file.",
+    })), "edit_file src/agent.ts");
+    assert.deepEqual(editLineStats(activity("edit", {
+        title: "edit_file", detail, output: "Edited src/agent.ts at line 254 (+2/-1 lines)",
+    })), { added: 2, removed: 1 });
+    assert.equal(editLineStats(activity("failed", { title: "edit_file", detail, output: "Error: edit failed" })), null);
+});
+
+test("edit activity resolves a file only within its workspace", () => {
+    assert.equal(activityFilePath(activity("edit", {
+        title: "edit_file", detail: '{"file_path":"D:\\\\Project\\\\src\\\\agent.ts"}',
+    }), "D:\\Project"), "src/agent.ts");
+    assert.equal(activityFilePath(activity("other", {
+        title: "edit_file", detail: '{"file_path":"D:\\\\Project-other\\\\src\\\\agent.ts"}',
+    }), "D:\\Project"), null);
 });
 
 test("unanchored legacy activity never floats at the end of the current conversation", () => {

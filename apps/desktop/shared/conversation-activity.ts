@@ -4,11 +4,34 @@ import type { ConversationMessage } from "./contracts.js";
 export type PlacedActivity = SessionActivity & { afterMessageId?: string };
 
 export function activityLine(activity: SessionActivity): string {
-    let input: Record<string, unknown> = {};
-    try {
-        const parsed = JSON.parse(activity.detail) as unknown;
-        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) input = parsed as Record<string, unknown>;
-    } catch { /* Notices and old activity may contain plain text. */ }
+    const stats = editLineStats(activity);
+    return `${activityTarget(activity)}${stats ? ` +${stats.added}/-${stats.removed}` : ""}`;
+}
+
+// New records use the captured net change; legacy records retain their tool-reported counts.
+export function editLineStats(activity: SessionActivity): { added: number; removed: number } | null {
+    if (activity.title !== "edit_file" && activity.title !== "multi_edit") return null;
+    if (activity.fileEdit) {
+        if (!activity.fileEdit.diff && (activity.fileEdit.truncated || activity.fileEdit.notice)) return null;
+        return { added: activity.fileEdit.added, removed: activity.fileEdit.removed };
+    }
+    const stats = /^Edited .*\(\+(\d+)\/-(\d+) lines\)/.exec(activity.output?.split("\n", 1)[0] ?? "");
+    return stats ? { added: Number(stats[1]), removed: Number(stats[2]) } : null;
+}
+
+export function activityFilePath(activity: SessionActivity, workspaceRoot: string): string | null {
+    if (activity.title !== "edit_file" && activity.title !== "multi_edit") return null;
+    const filePath = activityInput(activity).file_path;
+    if (typeof filePath !== "string") return null;
+    const file = filePath.replaceAll("\\", "/");
+    const root = workspaceRoot.replaceAll("\\", "/").replace(/\/$/, "");
+    const compare = /^[A-Za-z]:\//.test(root) ? (value: string) => value.toLowerCase() : (value: string) => value;
+    if (!compare(file).startsWith(`${compare(root)}/`)) return null;
+    return file.slice(root.length + 1);
+}
+
+export function activityTarget(activity: SessionActivity): string {
+    const input = activityInput(activity);
     const value = (key: string): string => typeof input[key] === "string" ? input[key] : "";
     if (value("command")) {
         const args = Array.isArray(input.args) ? input.args.filter((arg): arg is string => typeof arg === "string") : [];
@@ -21,6 +44,15 @@ export function activityLine(activity: SessionActivity): string {
     if (value("path")) return `${activity.title} ${value("path")}`;
     if (value("description")) return `${activity.title} ${value("description")}`;
     return activity.title;
+}
+
+function activityInput(activity: SessionActivity): Record<string, unknown> {
+    let input: Record<string, unknown> = {};
+    try {
+        const parsed = JSON.parse(activity.detail) as unknown;
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) input = parsed as Record<string, unknown>;
+    } catch { /* Notices and old activity may contain plain text. */ }
+    return input;
 }
 
 export function groupConversationActivities<T extends PlacedActivity>(

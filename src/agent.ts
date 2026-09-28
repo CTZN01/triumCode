@@ -1,5 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { randomUUID } from "node:crypto";
+import type { FileEditDiff } from "./file-diff.js";
 import { readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import * as os from "node:os";
@@ -156,7 +157,7 @@ export type AgentEvent =
     | { type: "status.changed"; status: "working" | "thinking" | "running-tools" | "idle"; label?: string }
     | { type: "thinking.duration"; milliseconds: number }
     | { type: "tool.started"; id: string; name: string; input: Record<string, any> }
-    | { type: "tool.completed"; id: string; name: string; input: Record<string, any>; output: string; outcome: ToolExecutionOutcome; executionStarted: boolean; durationMs: number }
+    | { type: "tool.completed"; id: string; name: string; input: Record<string, any>; output: string; outcome: ToolExecutionOutcome; executionStarted: boolean; durationMs: number; fileEdit?: FileEditDiff }
     | { type: "permission.checked"; id: string; name: string; input: Record<string, any>; action: PermissionAction; source: PermissionSource }
     | { type: "notice"; level: "info" | "warning"; text: string }
     | { type: "plan.mode"; enabled: boolean; path: string; permissionMode?: PermissionMode }
@@ -1361,6 +1362,7 @@ export class Agent {
                 enterPlanMode: () => this.enterPlanModeFromTool(),
                 exitPlanMode: () => this.exitPlanModeFromTool(),
                 onBeforeFileWrite: this.onBeforeFileWrite,
+                captureFileEdits: Boolean(this.eventSink),
                 todos: [],
             };
             const executor = new ToolExecutor(context, this.customToolNames);
@@ -1647,6 +1649,7 @@ export class Agent {
                         outcome: result.outcome,
                         executionStarted: result.executionStarted,
                         durationMs: elapsed,
+                        ...(result.fileEdit ? { fileEdit: result.fileEdit } : {}),
                     });
                 }
                 if (!this.isSubAgent && !this.eventSink && block.name !== "agent") {

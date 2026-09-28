@@ -5,6 +5,24 @@ import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { homedir, tmpdir } from "node:os";
 import { projectRoot, SessionBusyError, SessionConflictError, SessionStore } from "./session.js";
+import { createFileEditDiff } from "./file-diff.js";
+
+test("reopening a session preserves each edit patch independently of current file contents", () => {
+    const root = mkdtempSync(join(tmpdir(), "triumcode-edit-session-"));
+    const store = new SessionStore(root);
+    const created = store.create();
+    try {
+        const edits = [createFileEditDiff("file.txt", "A\n", "B\n"), createFileEditDiff("file.txt", "B\n", "C\n")];
+        store.save(created.id, [], created.model, created.revision ?? 0, "idle", edits.map((fileEdit, index) => ({
+            id: `edit-${index}`, title: "edit_file", state: "complete", detail: "{}", fileEdit,
+        })));
+        const reopened = new SessionStore(root).load(created.id)!;
+        assert.deepEqual(reopened.desktopActivities?.map((activity) => activity.fileEdit), edits);
+    } finally {
+        store.delete(created.id);
+        rmSync(root, { recursive: true, force: true });
+    }
+});
 
 // ── projectRoot ─────────────────────────────────────────────
 //

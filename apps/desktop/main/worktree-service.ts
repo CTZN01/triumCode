@@ -29,7 +29,6 @@ function gitEnvironment(): NodeJS.ProcessEnv {
         ...process.env,
         GIT_TERMINAL_PROMPT: "0",
         GIT_PAGER: "cat",
-        GIT_CONFIG_NOSYSTEM: "1",
         GIT_LITERAL_PATHSPECS: "1",
     };
     for (const name of [

@@ -1,3 +1,4 @@
+import { createFileEditDiff } from "../../../src/file-diff.js";
 import { createHash, randomUUID } from "node:crypto";
 import {
     existsSync,
@@ -28,8 +29,6 @@ import { DesktopServiceError } from "./workspace-store.js";
 const MAX_REVIEW_FILE_BYTES = 2 * 1024 * 1024;
 const MAX_REVIEW_RUN_BYTES = 8 * 1024 * 1024;
 const MAX_REVIEW_FILES = 1_000;
-const MAX_DIFF_CELLS = 4_000_000;
-const DIFF_OUTPUT_LIMIT = 512 * 1024;
 const RETAINED_RUNS_PER_WORKSPACE = 20;
 
 interface StoredFileState {
@@ -173,53 +172,7 @@ function textDiff(path: string, before: Buffer, after: Buffer): { diff: string; 
         return { diff: "", truncated: false, notice: "二进制或非 UTF-8 文件；可查看变更状态，无法显示文本差异。" };
     }
 
-    const oldLines = oldText.split(/\r?\n/);
-    const newLines = newText.split(/\r?\n/);
-    const width = newLines.length + 1;
-    const cells = (oldLines.length + 1) * width;
-    if (cells > MAX_DIFF_CELLS) {
-        return { diff: "", truncated: true, notice: "文件行数过多，无法在安全的内存上限内生成差异。" };
-    }
-
-    const table = new Uint16Array(cells);
-    for (let oldIndex = oldLines.length - 1; oldIndex >= 0; oldIndex--) {
-        const row = oldIndex * width;
-        const nextRow = (oldIndex + 1) * width;
-        for (let newIndex = newLines.length - 1; newIndex >= 0; newIndex--) {
-            table[row + newIndex] = oldLines[oldIndex] === newLines[newIndex]
-                ? table[nextRow + newIndex + 1] + 1
-                : Math.max(table[nextRow + newIndex], table[row + newIndex + 1]);
-        }
-    }
-
-    const operations: string[] = [];
-    let oldIndex = 0;
-    let newIndex = 0;
-    while (oldIndex < oldLines.length && newIndex < newLines.length) {
-        if (oldLines[oldIndex] === newLines[newIndex]) {
-            operations.push(` ${oldLines[oldIndex++]}`);
-            newIndex++;
-        } else if (table[(oldIndex + 1) * width + newIndex] >= table[oldIndex * width + newIndex + 1]) {
-            operations.push(`-${oldLines[oldIndex++]}`);
-        } else {
-            operations.push(`+${newLines[newIndex++]}`);
-        }
-    }
-    while (oldIndex < oldLines.length) operations.push(`-${oldLines[oldIndex++]}`);
-    while (newIndex < newLines.length) operations.push(`+${newLines[newIndex++]}`);
-
-    const diff = [
-        `--- a/${path}`,
-        `+++ b/${path}`,
-        `@@ -1,${oldLines.length} +1,${newLines.length} @@`,
-        ...operations,
-    ].join("\n");
-    const bytes = Buffer.from(diff, "utf8");
-    if (bytes.byteLength <= DIFF_OUTPUT_LIMIT) return { diff, truncated: false };
-    return {
-        diff: bytes.subarray(0, DIFF_OUTPUT_LIMIT).toString("utf8"),
-        truncated: true,
-    };
+    return createFileEditDiff(path, oldText, newText);
 }
 
 function statusMap(files: GitFileChange[]): Map<string, GitFileChange> {
@@ -500,8 +453,8 @@ export class ReviewService {
                 continue;
             }
 
-            const oldBytes = decode(before);
-            const newBytes = current.bytes ?? (current.base64 ? Buffer.from(current.base64, "base64") : null);
+            const oldBytes = before.existed ? decode(before) : Buffer.alloc(0);
+            const newBytes = current.existed ? current.bytes ?? (current.base64 ? Buffer.from(current.base64, "base64") : null) : Buffer.alloc(0);
             const diff = oldBytes && newBytes ? textDiff(path, oldBytes, newBytes) : { diff: "", truncated: false };
             const restoreBlocker = before.reason ?? current.reason;
             const notice = restoreBlocker ?? diff.notice;

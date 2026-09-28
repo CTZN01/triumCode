@@ -6,6 +6,7 @@ import { join, resolve, dirname, basename } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import * as os from "node:os";
 import type { PermissionAction, PermissionOutcome, PermissionSource, SessionPermissionGrant } from "./permissions.js";
+import type { FileEditDiff } from "./file-diff.js";
 
 // ═══════════════════════════════════════════════════════════════
 // Session persistence — one JSON file per conversation
@@ -127,6 +128,7 @@ export interface SessionActivity {
     detail: string;
     state: SessionActivityState;
     output?: string;
+    fileEdit?: FileEditDiff;
     durationMs?: number;
     startedAt?: string;
     updatedAt?: string;

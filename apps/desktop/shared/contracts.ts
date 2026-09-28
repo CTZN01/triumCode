@@ -371,6 +371,7 @@ export interface DesktopApi {
     switchGitBranch(workspaceId: string, branch: string): Promise<void>;
     createGitBranch(workspaceId: string, branch: string): Promise<void>;
     getGitDiff(workspaceId: string, path: string, staged: boolean): Promise<GitFileDiff>;
+    getGitDiffs(workspaceId: string, path: string): Promise<GitFileDiff[]>;
     stageGitPath(workspaceId: string, path: string): Promise<void>;
     unstageGitPath(workspaceId: string, path: string): Promise<void>;
     commitGitChanges(workspaceId: string, message: string): Promise<string>;

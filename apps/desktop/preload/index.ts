@@ -30,6 +30,7 @@ const api: DesktopApi = {
     switchGitBranch: (workspaceId, branch) => ipcRenderer.invoke("desktop:git-switch-branch", workspaceId, branch),
     createGitBranch: (workspaceId, branch) => ipcRenderer.invoke("desktop:git-create-branch", workspaceId, branch),
     getGitDiff: (workspaceId, path, staged) => ipcRenderer.invoke("desktop:git-diff", workspaceId, path, staged),
+    getGitDiffs: (workspaceId, path) => ipcRenderer.invoke("desktop:git-diffs", workspaceId, path),
     stageGitPath: (workspaceId, path) => ipcRenderer.invoke("desktop:git-stage-path", workspaceId, path),
     unstageGitPath: (workspaceId, path) => ipcRenderer.invoke("desktop:git-unstage-path", workspaceId, path),
     commitGitChanges: (workspaceId, message) => ipcRenderer.invoke("desktop:git-commit", workspaceId, message),

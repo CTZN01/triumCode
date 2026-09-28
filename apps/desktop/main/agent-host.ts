@@ -46,13 +46,14 @@ import { pruneIdleRuntimes } from "./runtime-cache.js";
 import { desktopTaskStatus } from "./task-status.js";
 import { connectionFailureMessage } from "./connection-result.js";
 import { RunShutdown } from "./run-shutdown.js";
-import { redactConfiguredKey, redactSessionMessages, type RedactionKeys } from "./secret-redaction.js";
+import { redactConfiguredKey, redactFileEditDiff, redactSessionMessages, type RedactionKeys } from "./secret-redaction.js";
 import { CredentialStore } from "./credential-store.js";
 import {
     commitGitChanges as createGitCommit,
     createGitBranch as createWorkspaceGitBranch,
     readGitCommitDetail,
     readGitDiff,
+    readGitDiffs,
     readGitHistory,
     readGitSnapshot,
     stageGitPath as stageWorkspaceGitPath,
@@ -254,7 +255,7 @@ function safeAgentEvent(event: AgentEvent, workspaceRoot?: string, apiKey: Redac
     if (event.type === "tool.started" || event.type === "tool.completed") {
         const input = safeToolInput(event.name, event.input, workspaceRoot, apiKey);
         if (event.type === "tool.started") return { ...event, input } as AgentEvent;
-        return { ...event, input, output: redact(event.output, apiKey) } as AgentEvent;
+        return { ...event, input, output: redact(event.output, apiKey), fileEdit: redactFileEditDiff(event.fileEdit, apiKey) } as AgentEvent;
     }
     if (event.type === "permission.checked") {
         const source = safePermissionSource(event.source, apiKey);
@@ -303,6 +304,7 @@ function safeSessionActivities(value: unknown, apiKey: RedactionKeys = ""): Sess
             || typeof item.state !== "string" || !allowedStates.includes(item.state as SessionActivity["state"])) continue;
         const timestamp = (candidate: unknown): string | undefined => typeof candidate === "string" && !Number.isNaN(Date.parse(candidate))
             ? candidate : undefined;
+        const fileEdit = redactFileEditDiff(item.fileEdit, apiKey);
         result.push({
             id: limitedText(item.id, 200, apiKey),
             ...(typeof item.runId === "string" ? { runId: limitedText(item.runId, 200, apiKey) } : {}),
@@ -314,6 +316,7 @@ function safeSessionActivities(value: unknown, apiKey: RedactionKeys = ""): Sess
             detail: limitedText(item.detail, MAX_ACTIVITY_DETAIL_CHARS, apiKey),
             state: item.state as SessionActivity["state"],
             ...(typeof item.output === "string" ? { output: limitedText(item.output, MAX_ACTIVITY_OUTPUT_CHARS, apiKey) } : {}),
+            ...(fileEdit ? { fileEdit } : {}),
             ...(typeof item.durationMs === "number" && Number.isFinite(item.durationMs) && item.durationMs >= 0
                 ? { durationMs: Math.min(item.durationMs, 86_400_000) } : {}),
             ...(timestamp(item.startedAt) ? { startedAt: timestamp(item.startedAt) } : {}),
@@ -370,7 +373,7 @@ function activityFromEvent(
         state: SessionActivity["state"],
         extra: Pick<SessionActivity,
             "output" | "durationMs" | "permissionSource" | "permissionDecision" | "permissionOutcome"
-            | "failureCategory" | "retryable" | "safeToRetry"> = {},
+            | "failureCategory" | "retryable" | "safeToRetry" | "fileEdit"> = {},
     ): SessionActivity => ({
         id,
         ...(runId ? { runId } : {}),
@@ -380,6 +383,7 @@ function activityFromEvent(
         detail: limitedText(detail, MAX_ACTIVITY_DETAIL_CHARS),
         state,
         ...("output" in extra && extra.output !== undefined ? { output: limitedText(extra.output, MAX_ACTIVITY_OUTPUT_CHARS) } : {}),
+        ...(extra.fileEdit ? { fileEdit: extra.fileEdit } : {}),
             ...(extra.durationMs === undefined ? {} : { durationMs: Math.max(0, Math.min(extra.durationMs, 86_400_000)) }),
             ...(extra.permissionSource === undefined ? {} : { permissionSource: extra.permissionSource }),
             ...(extra.permissionDecision === undefined ? {} : { permissionDecision: extra.permissionDecision }),
@@ -403,7 +407,7 @@ function activityFromEvent(
             event.name,
             JSON.stringify(event.input, null, 2) ?? "{}",
             state,
-            { output: event.output, durationMs: event.durationMs },
+            { output: event.output, durationMs: event.durationMs, fileEdit: event.fileEdit },
         ));
     }
     if (event.type === "permission.checked") {
@@ -773,6 +777,10 @@ export class AgentHost {
 
     getGitDiff(workspaceId: string, path: string, staged: boolean): Promise<GitFileDiff> {
         return readGitDiff(this.workspaces.getPath(workspaceId), path, staged);
+    }
+
+    getGitDiffs(workspaceId: string, path: string): Promise<GitFileDiff[]> {
+        return readGitDiffs(this.workspaces.getPath(workspaceId), path);
     }
 
     async stageGitPath(workspaceId: string, path: string): Promise<void> {

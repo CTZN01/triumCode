@@ -5,6 +5,19 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getTool, toolResultLimit, type ReadFileState, type TodoItem, type ToolContext } from "./tools.js";
 
+test("edit callbacks capture actual relaxed replacements and only successful writes", async () => {
+    const path = tempFile("captured.txt", "before\r\nnext\r\n");
+    const edits: Array<[string, string, string]> = [];
+    const ctx: ToolContext = { onFileEdit: (file, before, after) => edits.push([file, before, after]) };
+    const result = await getTool("edit_file")!.call({ file_path: path, old_string: "before\nnext", new_string: "after\nnext" }, ctx);
+    assert.doesNotMatch(result, /^Error/);
+    assert.equal(edits.length, 1);
+    assert.equal(edits[0][1], "before\r\nnext\r\n");
+    assert.equal(edits[0][2], readFileSync(path, "utf8"));
+    await getTool("multi_edit")!.call({ file_path: path, edits: [{ old_string: "after", new_string: "new" }, { old_string: "missing", new_string: "x" }] }, ctx);
+    assert.equal(edits.length, 1);
+});
+
 // ─── read_file ─────────────────────────────────────────────
 //
 // The read path carries three jobs at once: page through a file the model

@@ -4,7 +4,7 @@ import http from "node:http";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Agent } from "./agent.js";
+import { Agent, type AgentEvent } from "./agent.js";
 import type { PermissionMode } from "./permissions.js";
 
 // ═══════════════════════════════════════════════════════════════
@@ -96,6 +96,8 @@ async function runChat(
         permissionMode?: PermissionMode;
         askUser?: (question: string, options?: string[]) => Promise<string>;
         onBeforeFileWrite?: (absolutePath: string) => void | Promise<void>;
+        onEvent?: (event: AgentEvent) => void;
+        workspaceRoot?: string;
         failOn?: Set<number>;
         startUsage?: typeof MESSAGE_START.message.usage;
     } = {},
@@ -121,6 +123,8 @@ async function runChat(
         maxTurns: options.maxTurns ?? 5,
         maxTokens: options.maxTokens,
         onBeforeFileWrite: options.onBeforeFileWrite,
+        onEvent: options.onEvent,
+        workspaceRoot: options.workspaceRoot,
     });
     if (options.askUser) agent.setAskUserCallback(options.askUser);
 
@@ -152,6 +156,53 @@ async function runChat(
 
 const assistantTurns = (agent: Agent) => agent.history().filter((m) => m.role === "assistant");
 const stripAnsi = (text: string): string => text.replace(/\x1B\[[0-?]*[ -\/]*[@-~]/g, "");
+
+test("desktop edit patches preserve model requests and cache markers byte for byte", async () => {
+    const root = mkdtempSync(join(tmpdir(), "triumcode-agent-edit-"));
+    const path = join(root, "file.txt");
+    writeFileSync(path, "A\n");
+    const events: AgentEvent[] = [];
+    const call = (write: (event: any) => void, index: number, id: string, name: string, input: unknown): void => {
+        write(start(index, { type: "tool_use", id, name, input: {} }));
+        write(jsonDelta(index, JSON.stringify(input)));
+        write(stop(index));
+    };
+    try {
+        const turns: Turn[] = [
+            (write) => {
+                call(write, 0, "read", "read_file", { file_path: path });
+                write(finish("tool_use"));
+            },
+            (write) => {
+                call(write, 0, "first", "edit_file", { file_path: path, old_string: "A", new_string: "B" });
+                call(write, 1, "second", "edit_file", { file_path: path, old_string: "B", new_string: "C" });
+                write(finish("tool_use"));
+            },
+            (write) => {
+                write(start(0, { type: "text", text: "" }));
+                write(textDelta(0, "done"));
+                write(stop(0));
+                write(finish("end_turn"));
+            },
+        ];
+        const { agent, api, error } = await runChat(turns, {
+            permissionMode: "bypassPermissions", workspaceRoot: root, onEvent: (event) => events.push(event),
+        });
+        assert.equal(error, null);
+        const edits = events.filter((event) => event.type === "tool.completed" && event.fileEdit);
+        assert.equal(edits.length, 2);
+        assert.ok(edits[0].type === "tool.completed" && edits[1].type === "tool.completed");
+        assert.match(edits[0].fileEdit!.diff, /-A\n\+B/);
+        assert.match(edits[1].fileEdit!.diff, /-B\n\+C/);
+        assert.doesNotMatch(JSON.stringify(agent.history()), /fileEdit|--- a\//);
+        writeFileSync(path, "A\n");
+        const baseline = await runChat(turns, { permissionMode: "bypassPermissions", workspaceRoot: root });
+        assert.equal(baseline.error, null);
+        assert.equal(JSON.stringify(api.bodies), JSON.stringify(baseline.api.bodies));
+    } finally {
+        rmSync(root, { recursive: true, force: true });
+    }
+});
 
 test("the main agent captures a file baseline before its write tool runs", async () => {
     let capturedPath = "";

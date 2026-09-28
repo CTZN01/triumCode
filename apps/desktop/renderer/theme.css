@@ -1382,7 +1382,7 @@
 .section-head, .branch-chip, .session-state-label, .local-status,
 .settings-shortcut, .topbar-chip, .permission-chip, .eyebrow,
 .composer-hints, .composer-footer, .activity-title, .activity-time,
-.activity-duration, .activity-state-label, .detail-label, .detail-card small,
+.activity-duration, .activity-edit-stats, .activity-state-label, .detail-label, .detail-card small,
 .field-help, .task-center-task-meta, .task-center-project,
 .worktree-source code, .worktree-review-status, .worktree-review-summary span {
     font-size: 11px !important;
@@ -1557,7 +1557,7 @@
 .detail-card strong, .git-panel-state strong, .git-panel-heading strong { font-size: calc(13px * var(--font-scale, 1.1)) !important; }
 .detail-label, .detail-card code, .git-commit-box label, .git-commit-box textarea { font-size: calc(11px * var(--font-scale, 1.1)) !important; }
 .git-panel-heading small, .git-file-path, .git-diff-path { font-size: calc(12px * var(--font-scale, 1.1)) !important; }
-.review-tabs button, .git-file-filters button, .git-diff-sides button, .git-write-button, .review-restore-button, .git-file-mark, .activity-state-label, .activity-time, .activity-duration, .activity-output-heading > span { font-size: calc(12px * var(--font-scale, 1.1)) !important; }
+.review-tabs button, .git-file-filters button, .git-diff-sides button, .git-write-button, .review-restore-button, .git-file-mark, .activity-state-label, .activity-time, .activity-duration, .activity-edit-stats, .activity-output-heading > span { font-size: calc(12px * var(--font-scale, 1.1)) !important; }
 .git-side-badge, .review-restore-confirm strong, .review-restore-confirm p, .review-restore-success, .git-truncated-notice, .git-mutation-message { font-size: calc(11px * var(--font-scale, 1.1)) !important; }
 .section-head, .local-status, .settings-entry, .new-task-button, .session-state-label, .field-help, .field > span { font-size: calc(12px * var(--font-scale, 1.1)) !important; }
 
@@ -1678,8 +1678,15 @@
 .chat-activity-count { min-width: 0; overflow: hidden; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; }
 .chat-activity-items { max-height: min(300px, 40vh); margin: 2px 0 4px 8px; padding-left: 16px; overflow-y: auto; border-left: 1px solid var(--border); }
 .chat-activity-items .activity-row { border: 0; }
-.chat-activity-items .activity-row summary { min-height: 30px; height: auto; padding: 4px 0; }
+.chat-activity-items .activity-row summary { min-height: 30px; height: auto; padding: 4px 8px 4px 0; }
 .chat-activity-items .activity-title { display: -webkit-box; flex: 1; min-width: 0; overflow: hidden; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; white-space: normal; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.chat-activity-items .activity-edit-stats { flex: 0 0 auto; font-variant-numeric: tabular-nums; }
+.chat-activity-items .activity-edit-added { color: var(--success); }
+.chat-activity-items .activity-edit-removed { color: var(--danger); }
+.activity-edit-diff { max-height: min(360px, 45vh); margin: 0 0 10px; overflow: auto; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); }
+.activity-edit-diff-heading { position: sticky; top: 0; z-index: 1; padding: 7px 9px; border-bottom: 1px solid var(--border); background: var(--surface); color: var(--text); font-size: 11px; }
+.activity-edit-diff .diff-viewer { font-size: 11px; }
+.activity-edit-diff-note { padding: 6px 9px; color: var(--muted); font-size: 10px; }
 .chat-activity-items .activity-state-label, .chat-activity-items .activity-duration { font-size: 11px; }
 .chat-activity-items .activity-state-label.complete, .chat-activity-items .activity-time { display: none; }
 .chat-activity-items .activity-detail > pre, .chat-activity-items .activity-output pre { font-size: 11px; }

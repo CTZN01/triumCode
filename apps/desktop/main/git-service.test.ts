@@ -5,9 +5,36 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { layoutGitGraph } from "../shared/git-graph-layout.js";
-import { commitGitChanges, createGitBranch, readGitCommitDetail, readGitHistory, readGitSnapshot, stageGitPath, switchGitBranch, unstageGitPath } from "./git-service.js";
+import { commitGitChanges, createGitBranch, readGitCommitDetail, readGitDiff, readGitDiffFromHead, readGitDiffs, readGitHistory, readGitSnapshot, stageGitPath, switchGitBranch, unstageGitPath } from "./git-service.js";
 
 const gitAvailable = spawnSync("git", ["--version"], { stdio: "ignore", windowsHide: true }).status === 0;
+
+test("Git diffs honor system line-ending settings instead of showing a whole-file rewrite", { skip: !gitAvailable }, async () => {
+    const repository = await createRepository();
+    const previousSystem = process.env.GIT_CONFIG_SYSTEM;
+    try {
+        const original = Array.from({ length: 40 }, (_, index) => `line ${index}\n`).join("");
+        await seedCommit(repository.root, { "tracked.txt": original });
+        git(repository.root, "config", "--unset", "core.autocrlf");
+        const configPath = join(repository.root, "system.config");
+        await writeFile(configPath, "[core]\n\tautocrlf = true\n", "utf8");
+        process.env.GIT_CONFIG_SYSTEM = configPath;
+        await writeFile(join(repository.root, "tracked.txt"), original.replace("line 20\n", "changed\n").replaceAll("\n", "\r\n"), "utf8");
+        for (const diff of [await readGitDiff(repository.root, "tracked.txt", false), await readGitDiffFromHead(repository.root, "tracked.txt")]) {
+            assert.equal(diff.content.split("\n").filter((line) => line.startsWith("+") && !line.startsWith("+++")).length, 1);
+            assert.equal(diff.content.split("\n").filter((line) => line.startsWith("-") && !line.startsWith("---")).length, 1);
+            assert.doesNotMatch(diff.content, /line 0\r?\n/);
+        }
+        await stageGitPath(repository.root, "tracked.txt");
+        const staged = await readGitDiff(repository.root, "tracked.txt", true);
+        assert.match(staged.content, /\+changed/);
+        assert.equal(staged.content.split("\n").filter((line) => line.startsWith("+") && !line.startsWith("+++")).length, 1);
+    } finally {
+        if (previousSystem === undefined) delete process.env.GIT_CONFIG_SYSTEM;
+        else process.env.GIT_CONFIG_SYSTEM = previousSystem;
+        await repository.dispose();
+    }
+});
 
 function git(cwd: string, ...args: string[]): string {
     return execFileSync("git", args, { cwd, encoding: "utf8", windowsHide: true }).trim();
@@ -189,6 +216,40 @@ test("branch creation keeps local edits while switching existing branches requir
         assert.equal(git(repository.root, "branch", "--show-current"), "main");
         assert.equal(await readFile(join(repository.root, "tracked.txt"), "utf8"), "before\n");
         await assert.rejects(createGitBranch(repository.root, "bad name"), { code: "INVALID_GIT_BRANCH" });
+    } finally {
+        await repository.dispose();
+    }
+});
+
+test("readGitDiffs returns both sides of one path and matches the single-side read", { skip: !gitAvailable }, async () => {
+    const repository = await createRepository();
+    try {
+        await seedCommit(repository.root, { "tracked.txt": "before\n" });
+        await writeFile(join(repository.root, "tracked.txt"), "staged\n", "utf8");
+        git(repository.root, "add", "--", "tracked.txt");
+        await writeFile(join(repository.root, "tracked.txt"), "unstaged\n", "utf8");
+
+        const [unstaged, staged] = await readGitDiffs(repository.root, "tracked.txt");
+        assert.equal(unstaged.staged, false);
+        assert.equal(unstaged.content, (await readGitDiff(repository.root, "tracked.txt", false)).content);
+        assert.equal(staged.staged, true);
+        assert.equal(staged.content, (await readGitDiff(repository.root, "tracked.txt", true)).content);
+        assert.match(staged.content, /\+staged/);
+        assert.match(unstaged.content, /\+unstaged/);
+    } finally {
+        await repository.dispose();
+    }
+});
+
+test("readGitDiffs marks a path with no Git changes stale on both sides", { skip: !gitAvailable }, async () => {
+    const repository = await createRepository();
+    try {
+        await seedCommit(repository.root, { "tracked.txt": "before\n" });
+
+        const diffs = await readGitDiffs(repository.root, "unchanged.txt");
+        assert.deepEqual(diffs.map((diff) => [diff.staged, diff.stale, diff.content]), [
+            [false, true, ""], [true, true, ""],
+        ]);
     } finally {
         await repository.dispose();
     }

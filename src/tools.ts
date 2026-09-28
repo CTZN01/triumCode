@@ -43,6 +43,8 @@ export interface ToolContext {
     todos?: TodoItem[];
     /** Called before a desktop Agent file tool writes inside its workspace. */
     onBeforeFileWrite?: (absolutePath: string) => void | Promise<void>;
+    captureFileEdits?: boolean;
+    onFileEdit?: (absolutePath: string, before: string, after: string) => void;
 }
 
 function isWithin(root: string, target: string): boolean {
@@ -685,7 +687,7 @@ function applyEdit(content: string, oldString: string, newString: string, replac
     };
 }
 
-function editFileImpl(input: { file_path: string; old_string: string; new_string: string; replace_all?: boolean }): string {
+function editFileImpl(input: { file_path: string; old_string: string; new_string: string; replace_all?: boolean }, onEdit?: ToolContext["onFileEdit"]): string {
     let content: string;
     try {
         content = readFileSync(input.file_path, "utf-8");
@@ -698,6 +700,7 @@ function editFileImpl(input: { file_path: string; old_string: string; new_string
 
     const written = writeFileImpl({ file_path: input.file_path, content: applied.content });
     if (written.startsWith("Error")) return written;
+    onEdit?.(input.file_path, content, applied.content);
 
     const removed = input.old_string.split("\n").length * applied.replaced;
     const added = input.new_string.split("\n").length * applied.replaced;
@@ -740,7 +743,7 @@ const editFileTool = register({
             if (blocked !== null) return blocked;
         }
         await ctx.onBeforeFileWrite?.(absPath);
-        const result = editFileImpl({ ...(input as { file_path: string; old_string: string; new_string: string; replace_all?: boolean }), file_path: absPath });
+        const result = editFileImpl({ ...(input as { file_path: string; old_string: string; new_string: string; replace_all?: boolean }), file_path: absPath }, ctx.onFileEdit);
         if (ctx.readFileState && !result.startsWith("Error")) {
             recordRead(absPath, ctx.readFileState);
         }
@@ -763,7 +766,7 @@ const editFileTool = register({
 // every edit before writing anything keeps the batch atomic.
 type MultiEditInput = { old_string: string; new_string: string; replace_all?: boolean };
 
-function multiEditImpl(input: { file_path: string; edits: MultiEditInput[] }): string {
+function multiEditImpl(input: { file_path: string; edits: MultiEditInput[] }, onEdit?: ToolContext["onFileEdit"]): string {
     if (!Array.isArray(input.edits) || input.edits.length === 0) {
         return "Error: edits must be a non-empty array of { old_string, new_string } objects.";
     }
@@ -808,6 +811,7 @@ function multiEditImpl(input: { file_path: string; edits: MultiEditInput[] }): s
 
     const written = writeFileImpl({ file_path: input.file_path, content: current });
     if (written.startsWith("Error")) return written;
+    onEdit?.(input.file_path, content, current);
 
     const lines = current.split("\n");
     const shown = Math.min(regions.length, 3);
@@ -861,7 +865,7 @@ const multiEditTool = register({
             if (blocked !== null) return blocked;
         }
         await ctx.onBeforeFileWrite?.(absPath);
-        const result = multiEditImpl({ ...(input as { file_path: string; edits: MultiEditInput[] }), file_path: absPath });
+        const result = multiEditImpl({ ...(input as { file_path: string; edits: MultiEditInput[] }), file_path: absPath }, ctx.onFileEdit);
         if (ctx.readFileState && !result.startsWith("Error")) {
             recordRead(absPath, ctx.readFileState);
         }

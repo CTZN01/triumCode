@@ -1,6 +1,20 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { redactConfiguredKey, redactSessionMessages } from "./secret-redaction.js";
+import { redactConfiguredKey, redactFileEditDiff, redactSessionMessages } from "./secret-redaction.js";
+import { createFileEditDiff, FILE_DIFF_LIMIT, parseFileEditDiff } from "../../../src/file-diff.js";
+
+test("historical edit patches redact configured keys and remain reloadable after expansion", () => {
+    const key = "abcdefgh";
+    const edit = createFileEditDiff("file.txt", "old\n", `${key}\n`.repeat(6000));
+    const safe = redactFileEditDiff(edit, key)!;
+    assert.doesNotMatch(safe.diff, /abcdefgh/);
+    assert.match(safe.diff, /REDACTED/);
+    assert.ok(Buffer.byteLength(safe.diff) <= FILE_DIFF_LIMIT);
+    assert.equal(safe.truncated, true);
+    assert.deepEqual(parseFileEditDiff(JSON.parse(JSON.stringify(safe))), safe);
+    assert.match(edit.diff, /abcdefgh/);
+    assert.equal(redactFileEditDiff(undefined, key), undefined);
+});
 
 test("an arbitrary configured key is removed from visible text", () => {
     const key = "custom-gateway-credential-123";

@@ -8,6 +8,7 @@ import type {
     DesktopAttachment,
     DesktopModelPreset,
     DesktopSettings,
+    GitFileDiff,
     GitSnapshot,
     GitHistory,
     GitCommitDetail,
@@ -27,11 +28,12 @@ import type { PermissionAction, PermissionSource } from "../../../src/permission
 import type { SessionPermissionGrantSummary } from "../../../src/permissions.js";
 import { DesktopRunEventTracker } from "../../../src/desktop-events.js";
 import { GitChangesPanel } from "./GitChangesPanel.js";
+import { DiffViewer } from "./DiffViewer.js";
 import { NewWorktreeDialog, WorktreeManagementDialog } from "./NewWorktreeDialog.js";
 import { TaskCenterDialog } from "./TaskCenterDialog.js";
 import { TerminalPanel } from "./TerminalPanel.js";
 import { updateQuestionActivity } from "../shared/question-activity.js";
-import { activityLine, groupConversationActivities, type PlacedActivity } from "../shared/conversation-activity.js";
+import { activityLine, activityTarget, editLineStats, groupConversationActivities, type PlacedActivity } from "../shared/conversation-activity.js";
 
 type ActivityRow = PlacedActivity;
 
@@ -399,6 +401,17 @@ function MessageActions({ text, showFeedback }: { text: string; showFeedback: bo
     </div>;
 }
 
+function ActivityEditDiff({ activity }: { activity: SessionActivity }) {
+    const edit = activity.fileEdit;
+    if (!edit) return <div className="activity-edit-diff-note">这条旧记录没有保存本次编辑的历史差异。当前文件的累计改动可在右侧代码审阅中查看。</div>;
+    return <div className="activity-edit-diff">
+        <div className="activity-edit-diff-heading">本次编辑差异{edit.truncated ? "（已截断或超过生成上限）" : ""}</div>
+        {edit.diff ? <DiffViewer diff={edit.diff} /> : <div className="activity-edit-diff-note">{edit.notice ?? "本次调用未产生文本变化。"}</div>}
+        {edit.diff && edit.notice && <div className="activity-edit-diff-note">{edit.notice}</div>}
+        <div className="activity-edit-diff-note">记录本次调用写入前后的变化；后续编辑、暂存或提交不会改变此差异。</div>
+    </div>;
+}
+
 const ActivityGroup = memo(function ActivityGroup({ activities, running, focusId, onFocusHandled }: {
     activities: ActivityRow[];
     running: boolean;
@@ -407,6 +420,7 @@ const ActivityGroup = memo(function ActivityGroup({ activities, running, focusId
 }) {
     const [open, setOpen] = useState(true);
     const [showAll, setShowAll] = useState(false);
+    const [expandedActivityIds, setExpandedActivityIds] = useState<Set<string>>(() => new Set());
     const groupRef = useRef<HTMLElement | null>(null);
     useEffect(() => {
         if (!focusId || !activities.some((activity) => activity.id === focusId)) return;
@@ -430,22 +444,37 @@ const ActivityGroup = memo(function ActivityGroup({ activities, running, focusId
             <span className={`chat-activity-mark ${running ? "running" : failed ? "failed" : "complete"}`} aria-hidden="true">{running ? "" : failed ? "!" : "✓"}</span>
             <span className="chat-activity-count">{activities.length} 项操作</span><Icon name="chevron" size={13} />
         </button>
-        {open && <div className="chat-activity-items">{visibleActivities.map((activity) => <details className={`activity-row ${activity.state}`} key={activity.id} data-activity-id={activity.id}>
+        {open && <div className="chat-activity-items">{visibleActivities.map((activity) => {
+            const stats = editLineStats(activity);
+            const isEdit = activity.title === "edit_file" || activity.title === "multi_edit";
+            return <details className={`activity-row ${activity.state}`} key={activity.id} data-activity-id={activity.id} onToggle={(event) => {
+                const expanded = event.currentTarget.open;
+                setExpandedActivityIds((current) => {
+                    if (expanded) return new Set(current).add(activity.id);
+                    if (!current.has(activity.id)) return current;
+                    const next = new Set(current);
+                    next.delete(activity.id);
+                    return next;
+                });
+            }}>
             <summary>
                 <span className="activity-state-mark">{activity.state === "complete" ? "✓" : activity.state === "denied" || activity.state === "failed" ? "×" : activity.state === "interrupted" ? "!" : activity.state === "running" ? <i /> : "·"}</span>
-                <span className="activity-title" title={activityLine(activity)}>{activityLine(activity)}</span>
+                <span className="activity-title" title={activityLine(activity)}>{activityTarget(activity)}</span>
+                {stats && <span className="activity-edit-stats"><span className="activity-edit-added">+{stats.added}</span>/<span className="activity-edit-removed">-{stats.removed}</span></span>}
                 <span className={`activity-state-label ${activity.state}`}>{activity.state === "complete" ? "已完成" : activity.state === "denied" ? "已拒绝" : activity.state === "failed" ? "失败" : activity.state === "interrupted" ? "已取消" : activity.state === "running" ? "运行中" : "提示"}</span>
                 {activity.updatedAt && <time className="activity-time" dateTime={activity.updatedAt}>{activityTime(activity.updatedAt)}</time>}
                 {activity.durationMs !== undefined && <span className="activity-duration">{activity.durationMs < 1000 ? `${activity.durationMs}ms` : `${(activity.durationMs / 1000).toFixed(1)}s`}</span>}
             </summary>
             <div className="activity-detail">
+                {isEdit && (activity.state === "complete" || activity.fileEdit) && expandedActivityIds.has(activity.id) && <ActivityEditDiff activity={activity} />}
                 <pre>{activity.detail}</pre>
                 {activity.permissionSource && <div className="activity-policy"><span>策略来源</span><strong>{permissionSourceLabel(activity.permissionSource)}</strong>{activity.permissionDecision && <small>{permissionDecisionLabel(activity.permissionDecision)}</small>}</div>}
                 {permissionOutcomeLabel(activity.permissionOutcome) && <div className="activity-policy outcome"><span>审批结果</span><strong>{permissionOutcomeLabel(activity.permissionOutcome)}</strong></div>}
                 {activity.permissionGrantRevoked && <div className="activity-policy outcome"><span>授权状态</span><strong>已撤销，不再放行后续匹配操作</strong></div>}
                 {activity.output && <div className="activity-output"><div className="activity-output-heading"><span>结果</span><CopyButton text={activity.output} title="复制当前结果" className="activity-copy" size={12} /></div><pre>{activity.output}</pre></div>}
             </div>
-        </details>)}{activities.length > 3 && <button type="button" className="chat-activity-more" onClick={() => setShowAll((current) => !current)}>{showAll ? "只看最近 3 项" : `查看其余 ${activities.length - 3} 项`}</button>}</div>}
+        </details>;
+        })}{activities.length > 3 && <button type="button" className="chat-activity-more" onClick={() => setShowAll((current) => !current)}>{showAll ? "只看最近 3 项" : `查看其余 ${activities.length - 3} 项`}</button>}</div>}
     </section>;
 });
 
@@ -1312,6 +1341,7 @@ export function App() {
                     detail: JSON.stringify(agentEvent.input, null, 2),
                     state,
                     output: agentEvent.output,
+                    fileEdit: agentEvent.fileEdit,
                     durationMs: agentEvent.durationMs,
                     startedAt: previous?.startedAt ?? timestamp,
                     updatedAt: timestamp,

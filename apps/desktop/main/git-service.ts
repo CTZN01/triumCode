@@ -35,7 +35,6 @@ function gitEnvironment(): NodeJS.ProcessEnv {
         GIT_OPTIONAL_LOCKS: "0",
         GIT_TERMINAL_PROMPT: "0",
         GIT_PAGER: "cat",
-        GIT_CONFIG_NOSYSTEM: "1",
         GIT_LITERAL_PATHSPECS: "1",
     };
     for (const name of [
@@ -379,7 +378,21 @@ export async function readGitDiff(workspaceRoot: string, path: string, staged: b
     const snapshot = await readGitSnapshot(workspaceRoot);
     if (snapshot.error) throw new DesktopServiceError("GIT_UNAVAILABLE", snapshot.error);
     if (!snapshot.isGit) throw new DesktopServiceError("NOT_A_GIT_REPOSITORY", "This workspace is not a Git repository.");
+    return diffWithSnapshot(workspaceRoot, snapshot, path, staged);
+}
 
+/** Both sides of one path, reading the Git status snapshot once instead of per side. */
+export async function readGitDiffs(workspaceRoot: string, path: string): Promise<GitFileDiff[]> {
+    const snapshot = await readGitSnapshot(workspaceRoot);
+    if (snapshot.error) throw new DesktopServiceError("GIT_UNAVAILABLE", snapshot.error);
+    if (!snapshot.isGit) throw new DesktopServiceError("NOT_A_GIT_REPOSITORY", "This workspace is not a Git repository.");
+    return Promise.all([
+        diffWithSnapshot(workspaceRoot, snapshot, path, false),
+        diffWithSnapshot(workspaceRoot, snapshot, path, true),
+    ]);
+}
+
+async function diffWithSnapshot(workspaceRoot: string, snapshot: GitSnapshot, path: string, staged: boolean): Promise<GitFileDiff> {
     const file = snapshot.files.find((entry) => entry.path === path);
     if (!file || (staged ? !file.staged : !file.unstaged && !file.untracked)) return staleDiff(path, staged);
 
