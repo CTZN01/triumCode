@@ -46,6 +46,7 @@ import { pruneIdleRuntimes } from "./runtime-cache.js";
 import { desktopTaskStatus } from "./task-status.js";
 import { connectionFailureMessage } from "./connection-result.js";
 import { RunShutdown } from "./run-shutdown.js";
+import { RunSubmissions } from "./run-submissions.js";
 import { redactConfiguredKey, redactFileEditDiff, redactSessionMessages, type RedactionKeys } from "./secret-redaction.js";
 import { CredentialStore } from "./credential-store.js";
 import {
@@ -547,6 +548,7 @@ export class AgentHost {
     private readonly questions = new Map<string, PendingQuestion>();
     private readonly requestRuns = new Map<string, string>();
     private readonly runShutdown = new RunShutdown();
+    private readonly submissions = new RunSubmissions<{ runId: string }>();
 
     constructor(
         workspaces: WorkspaceStore,
@@ -1109,19 +1111,45 @@ export class AgentHost {
         return this.attachments.preview(this.attachmentRoot(workspaceId, sessionId), sessionId, id, full);
     }
 
-    async startRun(workspaceId: string, sessionId: string, text: string, requestId: string, attachmentIds: string[] = []): Promise<{ runId: string }> {
+    async startRun(workspaceId: string, sessionId: string, text: string, requestId: string, attachmentIds: string[] = [], interrupt = false): Promise<{ runId: string }> {
         const prompt = text.trim();
         if (!prompt && !attachmentIds.length) throw new DesktopServiceError("EMPTY_MESSAGE", "Write a message before sending it.");
         if (prompt.length > 100_000) throw new DesktopServiceError("MESSAGE_TOO_LARGE", "Messages must be shorter than 100,000 characters.");
         return this.runShutdown.trackStart(
-            () => this.startSessionRun(workspaceId, sessionId, requestId, prompt || "请查看附件。", false, attachmentIds),
+            () => this.submissions.submit(sessionKey(workspaceId, sessionId), requestId, interrupt, async checkCancelled => {
+                const priorRunId = this.requestRuns.get(requestId);
+                if (priorRunId) return { runId: priorRunId };
+                if (interrupt) {
+                    const root = this.attachmentRoot(workspaceId, sessionId);
+                    await this.attachments.forSend(root, sessionId, attachmentIds);
+                    checkCancelled();
+                    const runtime = this.sessions.get(sessionKey(workspaceId, sessionId));
+                    if (this.storeFor(workspaceId).isRunActive(sessionId) && !runtime?.currentRunId) {
+                        throw new DesktopServiceError("SESSION_BUSY", "此会话由另一个进程运行，当前窗口不能中断它。");
+                    }
+                    if (runtime?.currentRunId) {
+                        if (!this.apiKeyForSettings(runtime.desktopSettings)) throw new DesktopServiceError("CREDENTIAL_MISSING", "当前模型没有可用密钥，请先配置再发送。");
+                        this.abortRuntime(runtime);
+                        await runtime.runPromise;
+                    }
+                }
+                checkCancelled();
+                return this.startSessionRun(workspaceId, sessionId, requestId, prompt || "请查看附件。", false, attachmentIds, checkCancelled);
+            }, () => {
+                const runtime = this.sessions.get(sessionKey(workspaceId, sessionId));
+                if (runtime?.currentRunId) this.abortRuntime(runtime);
+            }),
             () => new DesktopServiceError("APP_STOPPING", "Wait for TriumCode to finish stopping its current tasks."),
         );
     }
 
     async retryRun(workspaceId: string, sessionId: string, requestId: string): Promise<{ runId: string }> {
         return this.runShutdown.trackStart(
-            () => this.startSessionRun(workspaceId, sessionId, requestId, "", true),
+            () => this.submissions.submit(sessionKey(workspaceId, sessionId), requestId, false,
+                checkCancelled => this.startSessionRun(workspaceId, sessionId, requestId, "", true, [], checkCancelled), () => {
+                    const runtime = this.sessions.get(sessionKey(workspaceId, sessionId));
+                    if (runtime?.currentRunId) this.abortRuntime(runtime);
+                }),
             () => new DesktopServiceError("APP_STOPPING", "Wait for TriumCode to finish stopping its current tasks."),
         );
     }
@@ -1133,6 +1161,7 @@ export class AgentHost {
         submittedPrompt: string,
         retryFailedRequest: boolean,
         attachmentIds: string[] = [],
+        checkCancelled: () => void = () => {},
     ): Promise<{ runId: string }> {
         const priorRunId = this.requestRuns.get(requestId);
         if (priorRunId) return { runId: priorRunId };
@@ -1170,6 +1199,7 @@ export class AgentHost {
         }
 
         const attachments = retryFailedRequest ? [] : await this.attachments.forSend(runtime.workspaceRoot, sessionId, attachmentIds);
+        checkCancelled();
 
         try {
             runtime.releaseRunLease = runtime.store.acquireRun(sessionId, runtime.revision);
@@ -1186,10 +1216,14 @@ export class AgentHost {
             throw error;
         }
 
-        try { await this.attachments.markSent(runtime.workspaceRoot, sessionId, attachments); }
+        let restoreDraftAttachments: () => Promise<void> = async () => {};
+        try {
+            restoreDraftAttachments = await this.attachments.markSent(runtime.workspaceRoot, sessionId, attachments);
+            checkCancelled();
+        }
         catch (error) {
-            runtime.releaseRunLease?.();
-            runtime.releaseRunLease = null;
+            try { await restoreDraftAttachments(); }
+            finally { runtime.releaseRunLease?.(); runtime.releaseRunLease = null; }
             throw error;
         }
         const runId = randomUUID();
@@ -1211,6 +1245,9 @@ export class AgentHost {
             });
         }
         if (runtime.cancelRequested) {
+            this.requestRuns.delete(requestId);
+            try { await restoreDraftAttachments(); }
+            catch (error) { this.publish(runtime, { type: "notice", level: "warning", text: `无法恢复附件草稿：${errorMessage(error, runtime.redactionKeys)}` }); }
             try { this.reviews.finishRun(workspaceId, runId, "cancelled"); }
             catch { /* A missing review snapshot does not prevent stopping the run. */ }
             runtime.reviewCaptureEnabled = false;
@@ -1220,6 +1257,7 @@ export class AgentHost {
             runtime.releaseRunLease?.();
             runtime.releaseRunLease = null;
             this.publish(runtime, { type: "session.status", status: "cancelled" }, runId);
+            checkCancelled();
             return { runId };
         }
 
@@ -1252,6 +1290,17 @@ export class AgentHost {
     cancelRun(runId: string): void {
         const runtime = [...this.sessions.values()].find((item) => item.currentRunId === runId);
         if (!runtime) return;
+        this.submissions.cancelSession(sessionKey(runtime.workspaceId, runtime.sessionId));
+        this.abortRuntime(runtime);
+    }
+
+    cancelSubmittedRun(requestId: string): void {
+        if (this.submissions.cancel(requestId)) return;
+        const runId = this.requestRuns.get(requestId);
+        if (runId) this.cancelRun(runId);
+    }
+
+    private abortRuntime(runtime: SessionRuntime): void {
         runtime.cancelRequested = true;
         runtime.agent.abort();
         this.dismissPending(runtime);
@@ -1518,6 +1567,7 @@ export class AgentHost {
 
     async stopAll(): Promise<void> {
         return this.runShutdown.stopAll(() => {
+            this.submissions.cancelAll();
             for (const runtime of this.sessions.values()) {
                 if (!runtime.currentRunId) continue;
                 runtime.cancelRequested = true;

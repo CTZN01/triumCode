@@ -306,15 +306,12 @@ export function registerIpcHandlers({ host, terminals, workspaceWatch, getWindow
     });
     handle("desktop:attachment-remove", (workspace, session, id) => host.removeAttachment(workspaceId(workspace), sessionId(session), stringArg(id, "attachmentId", 36)));
     handle("desktop:attachment-preview", (workspace, session, id, full) => host.getAttachmentPreview(workspaceId(workspace), sessionId(session), stringArg(id, "attachmentId", 36), full === true));
-    handle("desktop:start-run", (workspace, session, text, request, ids = []) => {
+    handle("desktop:start-run", (workspace, session, text, request, ids = [], interrupt = false) => {
         if (!Array.isArray(ids) || ids.length > MAX_ATTACHMENTS || !ids.every(id => typeof id === "string" && id.length === 36)) throw new Error("附件 ID 列表无效。");
         if (typeof text !== "string" || text.length > 100_000) throw new Error("消息文本无效或过长。");
+        if (typeof interrupt !== "boolean") throw new Error("中断参数无效。");
         return host.startRun(
-        workspaceId(workspace),
-        sessionId(session),
-        text,
-        requestId(request),
-        ids,
+            workspaceId(workspace), sessionId(session), text, requestId(request), ids, interrupt,
         );
     });
     handle("desktop:retry-run", (workspace, session, request) => host.retryRun(
@@ -323,6 +320,7 @@ export function registerIpcHandlers({ host, terminals, workspaceWatch, getWindow
         requestId(request),
     ));
     handle("desktop:cancel-run", (run) => host.cancelRun(stringArg(run, "runId", 36)));
+    handle("desktop:cancel-submitted-run", (request) => host.cancelSubmittedRun(requestId(request)));
     handle("desktop:permission-response", (request, choice) => {
         const value = stringArg(choice, "choice", 16) as PermissionChoice;
         if (value !== "once" && value !== "session" && value !== "deny") {

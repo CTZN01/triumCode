@@ -10,6 +10,50 @@ import { createHash } from "node:crypto";
 import type { Attachment } from "./attachments.js";
 import { SessionStore, sessionAttachmentDirectory } from "./session.js";
 
+test("interrupting a stream waits for dispatched writes, preserves tool pairs and continues with stable history", { timeout: 10_000 }, async () => {
+    const root = mkdtempSync(join(tmpdir(), "triumcode-steer-agent-"));
+    const path = join(root, "completed.txt");
+    let started!: () => void;
+    let finishWrite!: () => void;
+    const writeStarted = new Promise<void>(done => { started = done; });
+    const writeGate = new Promise<void>(done => { finishWrite = done; });
+    const api = await fakeApi([
+        w => {
+            w(start(0, { type: "text", text: "" })); w(textDelta(0, "partial progress")); w(stop(0));
+            w(start(1, { type: "tool_use", id: "write-before-interrupt", name: "write_file", input: {} }));
+            w(jsonDelta(1, JSON.stringify({ file_path: path, content: "written once" }))); w(stop(1));
+            w(start(2, { type: "text", text: "" })); w(textDelta(2, "later text")); w(stop(2)); w(finish("tool_use"));
+        },
+        w => { w(start(0, { type: "text", text: "" })); w(textDelta(0, "new direction")); w(stop(0)); w(finish("end_turn")); },
+    ]);
+    const events: AgentEvent[] = [];
+    const agent = new Agent({ model: "m", apiKey: "k", apiBase: api.url, workspaceRoot: root, thinking: false,
+        permissionMode: "bypassPermissions", sideQuery: async () => "[]", onEvent: event => events.push(event),
+        onBeforeFileWrite: async () => { started(); await writeGate; } });
+    let finished = false;
+    try {
+        const first = agent.chat("initial task").then(() => { finished = true; });
+        await writeStarted;
+        agent.abort();
+        await new Promise(done => setImmediate(done));
+        assert.equal(finished, false, "the run must retain its lease while an already dispatched write is finishing");
+        finishWrite();
+        await first;
+        assert.equal(readFileSync(path, "utf8"), "written once");
+        assert(events.some(event => event.type === "tool.completed" && event.executionStarted));
+        assert(events.some(event => event.type === "turn.cancelled"));
+        const history = agent.history();
+        const blocks = history.flatMap(message => Array.isArray(message.content) ? message.content : []);
+        assert.equal(blocks.filter(block => block.type === "tool_use").length, 1);
+        assert.equal(blocks.filter(block => block.type === "tool_result").length, 1);
+        assert.match(JSON.stringify(history), /partial progress/);
+        await agent.chat("change the task");
+        assert.equal(api.requests, 2, "the interrupted request must not start another model iteration");
+        assert.deepEqual(api.bodies[1].system, api.bodies[0].system);
+        assert.deepEqual(api.bodies[1].messages.slice(0, history.length).map((message: { content: Array<{ cache_control?: unknown }> }) => ({ ...message, content: message.content.map(({ cache_control: _cache, ...block }) => block) })), history);
+    } finally { finishWrite(); api.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test("image requests survive saved-session reload and safe retry without persisting base64", async () => {
     const root = mkdtempSync(join(tmpdir(), "triumcode-agent-attachment-"));
     const bytes = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aBe0AAAAASUVORK5CYII=", "base64");

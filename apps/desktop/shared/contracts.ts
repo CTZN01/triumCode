@@ -386,7 +386,8 @@ export interface DesktopApi {
     chooseAttachmentFiles(workspaceId: string, sessionId: string): Promise<Attachment[]>;
     removeAttachment(workspaceId: string, sessionId: string, id: string): Promise<void>;
     getAttachmentPreview(workspaceId: string, sessionId: string, id: string, full?: boolean): Promise<string>;
-    startRun(workspaceId: string, sessionId: string, text: string, requestId: string, attachmentIds?: string[]): Promise<{ runId: string }>;
+    startRun(workspaceId: string, sessionId: string, text: string, requestId: string, attachmentIds?: string[], interrupt?: boolean): Promise<{ runId: string }>;
+    cancelSubmittedRun(requestId: string): Promise<void>;
     retryRun(workspaceId: string, sessionId: string, requestId: string): Promise<{ runId: string }>;
     cancelRun(runId: string): Promise<void>;
     respondToPermission(requestId: string, choice: PermissionChoice): Promise<void>;

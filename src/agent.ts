@@ -1373,18 +1373,17 @@ export class Agent {
             const executor = new ToolExecutor(context, this.customToolNames);
             const toolResults = new Map<string, Promise<ToolExecutionResult>>();
             const toolStartTimes = new Map<string, number>();
+            let streamFailure: unknown;
+            let streamInterrupted = false;
 
             try {
                 for await (const event of stream) {
                     // Check abort between events.
                     if (this.abortController?.signal.aborted) {
-                        // Mirror the catch below. Breaking out instead would
-                        // fall through to drain() and push an assistant turn
-                        // plus a tool_result turn for tools the user just
-                        // cancelled — then issue one more doomed API call.
-                        checkpointPartialAssistant(true);
-                        this.endOutput();
-                        return;
+                        // Finish dispatched tools and retain their results before
+                        // releasing this turn; the next request must see what ran.
+                        streamInterrupted = true;
+                        break;
                     }
 
                     switch (event.type) {
@@ -1535,13 +1534,12 @@ export class Agent {
                 }
             } catch (e: any) {
                 if (e.name === "AbortError" || this.abortController?.signal.aborted) {
-                    checkpointPartialAssistant(true);
-                    this.endOutput();
-                    return;
-                }
-                checkpointPartialAssistant(true);
-                throw e;
+                    streamInterrupted = true;
+                } else streamFailure = e;
             }
+
+            streamInterrupted ||= Boolean(this.abortController?.signal.aborted);
+            if ((streamInterrupted || streamFailure) && currentText) assistantContent.push({ type: "text", text: currentText });
 
             this.endOutput();
             checkpointPartialAssistant(false);
@@ -1583,6 +1581,8 @@ export class Agent {
             // request. Endpoints that spend max_tokens on thinking hit this
             // constantly: the model thinks, gets cut off, and says nothing.
             if (filtered.length === 0) {
+                if (streamFailure) throw streamFailure;
+                if (streamInterrupted) return;
                 // Truncated: retrying just buys another call to be cut off the
                 // same way. The budget is the problem, and only the user can
                 // raise it.
@@ -1627,6 +1627,7 @@ export class Agent {
 
             // If no tools were called, the model is done.
             if (toolResults.size === 0) {
+                if (streamFailure) throw streamFailure;
                 if (this.outputBuffer !== null) {
                     const finalText = filtered
                         .filter((block): block is Anthropic.TextBlockParam => block.type === "text")
@@ -1668,6 +1669,8 @@ export class Agent {
             }
             this.messages.push({ role: "user", content: resultBlocks });
             this.checkpoint();
+            if (streamFailure) throw streamFailure;
+            if (streamInterrupted) return;
         }
     }
 }

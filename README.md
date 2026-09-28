@@ -62,6 +62,17 @@ On the left, it offers per-conversation permission choices (confirm operations,
 accept file edits, or full access without approval except explicit deny rules).
 A permission change applies immediately, including while a task is running, and
 takes effect for the operations that follow; it persists after restart.
+While the Agent runs, the composer remains editable and accepts attachments.
+Enter or the send button interrupts the current task and continues in the same
+conversation with the new request; Shift+Enter inserts a newline, and IME
+confirmation does not send. Stop remains a separate action. A handoff waits for
+dispatched tools and session saving to finish, preserves completed changes and
+tool results, and never runs two turns in the workspace together. Stop during
+handoff cancels the pending follow-up and restores its draft. Invalid attachments
+are rejected before interrupting the current task. Conversations running in
+another process cannot be interrupted from this window. Each follow-up is one
+new user message and one normal model request; the static system prompt and
+existing history prefix stay unchanged.
 The composer accepts up to eight attachments per message through image paste (Ctrl+V),
 drag and drop, or the file picker. Ordinary text paste works as usual. Images show
 removable thumbnails; click a draft or sent thumbnail to view the original image.

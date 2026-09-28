@@ -748,6 +748,12 @@ export function App() {
     const activeRef = useRef({ workspaceId: "", sessionId: "" });
     const eventTracker = useMemo(() => new DesktopRunEventTracker(), []);
     const pendingStartStops = useRef(new Set<string>());
+    const pendingSubmissions = useRef(new Map<string, { requestId: string; message: ConversationMessage; interrupt: boolean; shown: boolean; stopped: boolean }>());
+    const [sendingSessions, setSendingSessions] = useState<string[]>([]);
+    const submitting = sendingSessions.includes(`${activeWorkspace?.id}:${activeSession?.id}`);
+    const visibleSubmission = pendingSubmissions.current.get(`${activeWorkspace?.id}:${activeSession?.id}`);
+    const workingStatus = submitting ? visibleSubmission?.stopped ? "正在停止..."
+        : visibleSubmission?.interrupt ? "正在中断并继续..." : "正在启动任务" : statusLabel;
     const gitRequestSequence = useRef(0);
     const reviewRequestSequence = useRef(0);
     const taskRequestSequence = useRef(0);
@@ -1092,7 +1098,7 @@ export function App() {
     }, []);
 
     const changeSessionRoute = async (modelPreset: string | null, effort: string) => {
-        if (!activeWorkspace || !activeSession || !sessionRoute || busy || externalRun || quickSettingsSaving) return;
+        if (!activeWorkspace || !activeSession || !sessionRoute || busy || submitting || externalRun || quickSettingsSaving) return;
         setQuickSettingsSaving(true);
         try {
             await window.desktop.updateSessionRoute(activeWorkspace.id, activeSession.id, modelPreset, effort);
@@ -1313,6 +1319,11 @@ export function App() {
         } else if (agentEvent.type === "usage.updated") {
             setTokenUsage(agentEvent.usage);
         } else if (agentEvent.type === "turn.started") {
+            const submission = pendingSubmissions.current.get(key);
+            if (submission && !submission.shown) {
+                submission.shown = true;
+                setMessages(current => [...current, { ...submission.message, runIds: event.runId ? [event.runId] : undefined }]);
+            }
             setBusy(true);
             setStatusLabel("thinking");
             if (event.runId) assistantSegment.current = { runId: event.runId, index: 0 };
@@ -1795,7 +1806,7 @@ export function App() {
     const handleSend = async (event?: FormEvent) => {
         event?.preventDefault();
         const text = draft.trim() || (attachments.length ? "请查看附件。" : "");
-        if (!text || busy || attachmentPending || !activeWorkspace || !activeSession) return;
+        if (!text || attachmentPending || !activeWorkspace || !activeSession) return;
         if (externalRun) {
             setError("这个会话正在另一个 CLI 或桌面进程中运行。请刷新会话状态，任务结束后再继续发送。");
             return;
@@ -1808,21 +1819,32 @@ export function App() {
         const workspaceId = activeWorkspace.id;
         const sessionId = activeSession.id;
         const sessionKey = `${workspaceId}:${sessionId}`;
+        if (pendingSubmissions.current.has(sessionKey)) return;
+        const interrupt = busy;
+        const requestId = crypto.randomUUID();
         setRetryNotice("");
         pendingStartStops.current.delete(sessionKey);
         invalidateMessageRequests();
         const optimistic: ConversationMessage = { id: `user-${crypto.randomUUID()}`, role: "user", text, ...(attachments.length ? { attachments } : {}) };
-        setMessages((current) => [...current, optimistic]);
+        const submission = { requestId, message: optimistic, interrupt, shown: !interrupt, stopped: false };
+        pendingSubmissions.current.set(sessionKey, submission);
+        setSendingSessions(current => [...current, sessionKey]);
+        flushAssistantDelta();
+        if (!interrupt) setMessages((current) => [...current, optimistic]);
         setDraft("");
         clearAttachments(false);
         setBusy(true);
         setExternalRun(false);
-        setStatusLabel("正在启动任务");
+        setStatusLabel(interrupt ? "正在中断并继续..." : "正在启动任务");
         setError("");
         try {
-            const response = await window.desktop.startRun(workspaceId, sessionId, text, crypto.randomUUID(), attachments.map(file => file.id));
-            setMessages((current) => current.map((message) => message.id === optimistic.id
-                ? { ...message, runIds: [response.runId] } : message));
+            const response = await window.desktop.startRun(workspaceId, sessionId, text, requestId, attachments.map(file => file.id), interrupt);
+            if (activeRef.current.workspaceId === workspaceId && activeRef.current.sessionId === sessionId) {
+                const show = !submission.shown;
+                submission.shown = true;
+                setMessages(current => (show ? [...current, optimistic] : current).map(message => message.id === optimistic.id
+                    ? { ...message, runIds: [response.runId] } : message));
+            }
             const runStarted = eventTracker.begin(sessionKey, response.runId);
             if (pendingStartStops.current.delete(sessionKey)) {
                 await window.desktop.cancelRun(response.runId);
@@ -1834,25 +1856,37 @@ export function App() {
             pendingStartStops.current.delete(sessionKey);
             if (activeRef.current.workspaceId === workspaceId && activeRef.current.sessionId === sessionId) {
                 setMessages((current) => current.filter((message) => message.id !== optimistic.id));
-                setDraft((current) => current || draft);
-                setAttachments((current) => current.length ? current : attachments);
-                setBusy(false);
+                setDraft(current => draft && current ? `${draft}\n${current}` : draft || current);
+                setAttachments(current => [...attachments, ...current]);
+                const stillRunning = Boolean(runId && !eventTracker.isFinished(sessionKey, runId));
+                setBusy(stillRunning);
                 const message = displayError(failure);
-                setStatusLabel(/concurrency|同时运行上限|并发/i.test(message) ? "并发任务已满"
-                    : /another process|另一个进程/i.test(message) ? "任务正在另一个进程中运行" : "就绪");
-                setError(message);
+                setStatusLabel(submission.stopped ? "已停止" : /concurrency|同时运行上限|并发/i.test(message) ? "并发任务已满"
+                    : /another process|另一个进程/i.test(message) ? "任务正在另一个进程中运行" : stillRunning ? "继续当前任务" : "就绪");
+                setError(submission.stopped ? "" : message);
             }
+        } finally {
+            pendingSubmissions.current.delete(sessionKey);
+            setSendingSessions(current => current.filter(key => key !== sessionKey));
         }
     };
 
     const handleComposerKey = (event: KeyboardEvent<HTMLTextAreaElement>) => {
-        if (event.key === "Enter" && !event.shiftKey) {
+        if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing && event.keyCode !== 229) {
             event.preventDefault();
             void handleSend();
         }
     };
 
     const handleStop = async () => {
+        const submission = pendingSubmissions.current.get(`${activeRef.current.workspaceId}:${activeRef.current.sessionId}`);
+        if (submission) {
+            submission.stopped = true;
+            setStatusLabel("正在停止...");
+            try { await window.desktop.cancelSubmittedRun(submission.requestId); }
+            catch (failure) { setError(displayError(failure)); }
+            return;
+        }
         if (!runId) {
             if (activeRef.current.workspaceId && activeRef.current.sessionId) {
                 pendingStartStops.current.add(`${activeRef.current.workspaceId}:${activeRef.current.sessionId}`);
@@ -2098,7 +2132,7 @@ export function App() {
                         </article>}
                             {activitiesAfterMessage.has(message.id) && <ActivityGroup key={`${message.id}-activity`} activities={activitiesAfterMessage.get(message.id)!} running={busy && activitiesAfterMessage.get(message.id)!.some((activity) => activity.runId === runId && activity.state === "running")} focusId={activityFocusId} onFocusHandled={clearActivityFocus} />}
                         </Fragment>)}
-                        {busy && <div className="agent-working" role="status"><span className="working-glint">{statusLabel}<span className="working-glint-highlight" aria-hidden="true">{statusLabel}</span></span></div>}
+                        {(busy || submitting) && <div className="agent-working" role="status"><span className="working-glint">{workingStatus}<span className="working-glint-highlight" aria-hidden="true">{workingStatus}</span></span></div>}
                     </div>}
                 </div>
 
@@ -2118,15 +2152,15 @@ export function App() {
                 </div>}
 
                 {activeSession && <form className="composer-wrap" onSubmit={(event) => void handleSend(event)}>
-                    <div className={`composer ${busy ? "is-busy" : ""}${attachmentDragOver ? " attachment-drag-over" : ""}`}
-                        onDragOver={event => { if (event.dataTransfer.types.includes("Files")) { event.preventDefault(); event.dataTransfer.dropEffect = busy || externalRun ? "none" : "copy"; if (!busy && !externalRun) setAttachmentDragOver(true); } }}
+                    <div className={`composer ${busy || submitting ? "is-busy" : ""}${attachmentDragOver ? " attachment-drag-over" : ""}`}
+                        onDragOver={event => { if (event.dataTransfer.types.includes("Files")) { event.preventDefault(); event.dataTransfer.dropEffect = externalRun ? "none" : "copy"; if (!externalRun) setAttachmentDragOver(true); } }}
                         onDragLeave={event => { if (!(event.relatedTarget instanceof Node) || !event.currentTarget.contains(event.relatedTarget)) setAttachmentDragOver(false); }}
-                        onDrop={event => { if (event.dataTransfer.types.includes("Files")) { event.preventDefault(); setAttachmentDragOver(false); if (!busy && !externalRun) addAttachmentFiles([...event.dataTransfer.files]); } }}>
-                        <AttachmentList attachments={attachments} workspaceId={activeWorkspace.id} sessionId={activeSession.id} onRemove={removeAttachment} disabled={busy || externalRun} />
+                        onDrop={event => { if (event.dataTransfer.types.includes("Files")) { event.preventDefault(); setAttachmentDragOver(false); if (!externalRun) addAttachmentFiles([...event.dataTransfer.files]); } }}>
+                        <AttachmentList attachments={attachments} workspaceId={activeWorkspace.id} sessionId={activeSession.id} onRemove={removeAttachment} disabled={externalRun} />
                         {attachmentPending && <div className="attachment-loading" role="status">正在准备附件...</div>}
-                        <textarea ref={composerInput} value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={handleComposerKey} onPaste={pasteAttachments} disabled={busy || externalRun || questions.length > 0} placeholder={externalRun ? "其他进程正在运行此任务..." : questions.length ? "先回答 Agent 的问题..." : busy ? "Agent 正在工作..." : "描述任务，或粘贴图片、拖入文件"} rows={Math.min(4, Math.max(1, draft.split("\n").length))} />
+                        <textarea ref={composerInput} value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={handleComposerKey} onPaste={pasteAttachments} disabled={externalRun} placeholder={externalRun ? "其他进程正在运行此任务..." : busy ? "补充要求，Enter 中断当前任务并继续" : "描述任务，或粘贴图片、拖入文件"} rows={Math.min(4, Math.max(1, draft.split("\n").length))} />
                         <div className="composer-bottom">
-                            <div className="composer-left"><button type="button" className="composer-attach" title="添加图片或文件" aria-label="添加文件" disabled={busy || externalRun} onClick={chooseAttachments}><Icon name="plus" size={17} /></button>
+                            <div className="composer-left"><button type="button" className="composer-attach" title="添加图片或文件" aria-label="添加文件" disabled={externalRun} onClick={chooseAttachments}><Icon name="plus" size={17} /></button>
                                 <div className="permission-picker"><button type="button" className={`picker-trigger ${permissionMode === "bypassPermissions" ? "warning" : ""}`} aria-label="当前会话权限" aria-expanded={permissionPickerOpen} disabled={externalRun || quickSettingsSaving || permissionMode === "plan"} onClick={() => { setPermissionPickerOpen((current) => !current); setModelPickerOpen(false); }}>{permissionMode === "bypassPermissions" && <Icon name="alert" size={14} />}{permissionMode === "plan" ? "计划模式" : permissionMode === "bypassPermissions" ? "完全访问" : permissionMode === "desktopAcceptEdits" ? "自动接受编辑" : "默认 - 逐项确认"}<span className="picker-chevron"><Icon name="chevron" size={12} /></span></button>
                                     {permissionPickerOpen && <div className="composer-popover permission-popover" role="menu" aria-label="选择会话权限">{([{"mode": "desktopDefault", "label": "默认 - 逐项确认", "hint": "文件写入和命令执行前询问"}, {"mode": "desktopAcceptEdits", "label": "自动接受编辑", "hint": "文件编辑自动允许，命令仍需确认"}, {"mode": "bypassPermissions", "label": "完全访问", "hint": "自动运行工具，仍遵守明确拒绝规则"}] as const).map((choice) => <button type="button" role="menuitemradio" aria-checked={permissionMode === choice.mode} key={choice.mode} onClick={() => { setPermissionPickerOpen(false); void changePermissionMode(choice.mode); }}><span><strong>{choice.label}</strong><small>{choice.hint}</small></span>{permissionMode === choice.mode && <span className="picker-check">✓</span>}</button>)}</div>}
                                 </div>
@@ -2149,14 +2183,15 @@ export function App() {
                             </div>
                                 <div className="model-picker"><button type="button" className="picker-trigger" aria-label="调整模型和思考强度" aria-expanded={modelPickerOpen} onClick={() => { setModelPickerOpen((current) => !current); setPermissionPickerOpen(false); }}>{sessionRoute?.modelPreset ?? sessionRoute?.model ?? "模型"} <span>{({ low: "低", medium: "中", high: "高", xhigh: "极高", max: "最大" } as Record<string, string>)[sessionRoute?.effort ?? "high"]}</span><span className="picker-chevron"><Icon name="chevron" size={12} /></span></button>
                                 {modelPickerOpen && <div className="composer-popover model-popover" role="menu" aria-label="选择模型">
-                                    {bootstrap?.modelPresets.length ? <div className="model-menu-list">{bootstrap.modelPresets.map((preset) => <button type="button" role="menuitemradio" aria-checked={sessionRoute?.modelPreset === preset.name} key={preset.name} disabled={!sessionRoute || busy || externalRun || quickSettingsSaving} onClick={() => { setModelPickerOpen(false); if (sessionRoute?.modelPreset !== preset.name) void changeSessionRoute(preset.name, effortChoice); }}><span>{preset.name}</span>{sessionRoute?.modelPreset === preset.name && <span className="picker-check">✓</span>}</button>)}</div>
+                                    {bootstrap?.modelPresets.length ? <div className="model-menu-list">{bootstrap.modelPresets.map((preset) => <button type="button" role="menuitemradio" aria-checked={sessionRoute?.modelPreset === preset.name} key={preset.name} disabled={!sessionRoute || busy || submitting || externalRun || quickSettingsSaving} onClick={() => { setModelPickerOpen(false); if (sessionRoute?.modelPreset !== preset.name) void changeSessionRoute(preset.name, effortChoice); }}><span>{preset.name}</span>{sessionRoute?.modelPreset === preset.name && <span className="picker-check">✓</span>}</button>)}</div>
                                     : <div className="model-menu-empty">还没有可用的模型预设，先到设置里配置一个模型。</div>}
                                     <div className="model-menu-divider" />
                                     <div className="effort-heading"><span>思考强度</span><strong>{({ low: "低", medium: "中", high: "高", xhigh: "极高", max: "最大" } as Record<string, string>)[effortChoice]}</strong></div>
-                                    <input type="range" aria-label="当前会话思考强度" min={0} max={4} step={1} disabled={!sessionRoute || busy || externalRun || quickSettingsSaving} value={["low", "medium", "high", "xhigh", "max"].indexOf(effortChoice)} onChange={(event) => setEffortChoice(["low", "medium", "high", "xhigh", "max"][Number(event.target.value)])} onPointerUp={() => { if (effortChoice !== sessionRoute?.effort) void changeSessionRoute(sessionRoute?.modelPreset ?? null, effortChoice); }} onKeyUp={() => { if (effortChoice !== sessionRoute?.effort) void changeSessionRoute(sessionRoute?.modelPreset ?? null, effortChoice); }} />
+                                    <input type="range" aria-label="当前会话思考强度" min={0} max={4} step={1} disabled={!sessionRoute || busy || submitting || externalRun || quickSettingsSaving} value={["low", "medium", "high", "xhigh", "max"].indexOf(effortChoice)} onChange={(event) => setEffortChoice(["low", "medium", "high", "xhigh", "max"][Number(event.target.value)])} onPointerUp={() => { if (effortChoice !== sessionRoute?.effort) void changeSessionRoute(sessionRoute?.modelPreset ?? null, effortChoice); }} onKeyUp={() => { if (effortChoice !== sessionRoute?.effort) void changeSessionRoute(sessionRoute?.modelPreset ?? null, effortChoice); }} />
                                     <div className="effort-scale"><span>低</span><span>高</span></div>
                                 </div>}</div>
-                                {busy ? <button type="button" className="stop-button" onClick={() => void handleStop()}><span className="stop-square" />停止</button> : <button type="submit" className="send-button" disabled={(!draft.trim() && attachments.length === 0) || externalRun || attachmentPending} title={externalRun ? "任务由另一个进程运行" : "发送消息"}><Icon name="arrow" size={17} /></button>}
+                                {(busy || submitting) && <button type="button" className="stop-button" onClick={() => void handleStop()}><span className="stop-square" />停止</button>}
+                                <button type="submit" className="send-button" disabled={(!draft.trim() && attachments.length === 0) || externalRun || attachmentPending || submitting} aria-label={busy ? "中断并继续" : "发送消息"} title={externalRun ? "任务由另一个进程运行" : busy ? "中断当前任务，按补充要求继续" : "发送消息"}><Icon name="arrow" size={17} /></button>
                             </div>
                         </div>
                     </div>

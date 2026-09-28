@@ -57,7 +57,11 @@ test("image snapshots survive original deletion and sent attachments cannot be r
         assert.match(await manager.preview(directory, sessionId, image.id), /^data:image\/png;base64,/);
         assert.deepEqual(await readFile(image.path), png);
         const draft = await manager.addImage(directory, sessionId, png);
+        const restoreDraft = await manager.markSent(directory, sessionId, [draft, image]);
+        await restoreDraft();
         await manager.removeDraft(directory, sessionId, draft.id);
+        await manager.removeDraft(directory, sessionId, image.id);
+        assert.deepEqual(await manager.forSend(directory, sessionId, [image.id]), [image], "rollback restores prior sent/draft ownership");
         await assert.rejects(manager.forSend(directory, sessionId, [draft.id]), /附件不存在/);
         await assert.rejects(manager.addImage(directory, sessionId, Buffer.from("broken")), /图片格式不支持/);
         await assert.rejects(manager.addImage(directory, sessionId, Buffer.alloc(20 * 1024 * 1024 + 1)), /20 MiB/);

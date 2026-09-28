@@ -53,7 +53,7 @@ export class AnthropicProvider implements ModelProvider {
 
         // The SDK returns once the response headers are in, so a rejected turn
         // still surfaces here rather than mid-iteration.
-        try { return await this.client.messages.create({ ...body, signal } as any) as any; }
+        try { return await this.client.messages.create(body as any, { signal }) as any; }
         catch (error) { return describeImageFailure(error, body.messages); }
     }
 
@@ -63,8 +63,7 @@ export class AnthropicProvider implements ModelProvider {
             max_tokens: req.maxTokens,
             system: req.system,
             messages: [{ role: "user", content: req.user }],
-            signal,
-        } as any);
+        } as any, { signal });
         const blocks: any[] = response?.content ?? [];
         return blocks.filter((b) => b.type === "text").map((b) => b.text).join("");
     }

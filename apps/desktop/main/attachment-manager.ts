@@ -131,8 +131,14 @@ export class AttachmentManager {
         return attachments;
     }
 
-    async markSent(root: string, sessionId: string, attachments: Attachment[]): Promise<void> {
-        for (const attachment of attachments) await this.save(root, sessionId, attachment, true);
+    async markSent(root: string, sessionId: string, attachments: Attachment[]): Promise<() => Promise<void>> {
+        const previous = await Promise.all(attachments.map(attachment => this.load(root, sessionId, attachment.id)));
+        const restore = async () => {
+            for (const saved of previous) await writeFile(join(this.directory(root, sessionId, saved.attachment.id), "attachment.json"), JSON.stringify(saved));
+        };
+        try { for (const attachment of attachments) await this.save(root, sessionId, attachment, true); }
+        catch (error) { await restore(); throw error; }
+        return restore;
     }
 
     async removeDraft(root: string, sessionId: string, id: string): Promise<void> {
