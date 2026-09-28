@@ -1,8 +1,9 @@
 import type { AgentContextUsage, AgentEvent, AgentUsage } from "../../../src/agent.js";
 import type { DesktopSessionSettings, SessionActivity } from "../../../src/session.js";
 import type { PermissionOutcome, PermissionSource, SessionPermissionGrantSummary } from "../../../src/permissions.js";
+import type { Attachment } from "../../../src/attachments.js";
 
-export type { SessionActivity };
+export type { SessionActivity, Attachment };
 
 export type Protocol = "anthropic" | "openai-chat" | "openai-responses";
 export type AuthScheme = "api-key" | "bearer";
@@ -211,6 +212,7 @@ export interface ConversationMessage {
     role: "user" | "assistant";
     text: string;
     runIds?: string[];
+    attachments?: Attachment[];
 }
 
 export interface ConversationPage {
@@ -218,10 +220,7 @@ export interface ConversationPage {
     nextCursor: number | null;
 }
 
-export interface DesktopAttachment {
-    path: string;
-    content: string;
-}
+export type DesktopAttachment = Attachment;
 
 export interface DesktopSettings {
     model: string;
@@ -382,7 +381,12 @@ export interface DesktopApi {
     writeTerminal(terminalId: string, data: string): Promise<void>;
     resizeTerminal(terminalId: string, cols: number, rows: number): Promise<void>;
     closeTerminal(terminalId: string): Promise<void>;
-    startRun(workspaceId: string, sessionId: string, text: string, requestId: string): Promise<{ runId: string }>;
+    addAttachmentFile(workspaceId: string, sessionId: string, file: File): Promise<Attachment>;
+    addClipboardImage(workspaceId: string, sessionId: string): Promise<Attachment>;
+    chooseAttachmentFiles(workspaceId: string, sessionId: string): Promise<Attachment[]>;
+    removeAttachment(workspaceId: string, sessionId: string, id: string): Promise<void>;
+    getAttachmentPreview(workspaceId: string, sessionId: string, id: string, full?: boolean): Promise<string>;
+    startRun(workspaceId: string, sessionId: string, text: string, requestId: string, attachmentIds?: string[]): Promise<{ runId: string }>;
     retryRun(workspaceId: string, sessionId: string, requestId: string): Promise<{ runId: string }>;
     cancelRun(runId: string): Promise<void>;
     respondToPermission(requestId: string, choice: PermissionChoice): Promise<void>;

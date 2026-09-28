@@ -2,8 +2,24 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
     compressHistory, prepareToolResult, truncateResult,
-    withCacheBreakpoints,
+    withCacheBreakpoints, estimateTokens, compactHistory,
 } from "./context-compression.js";
+
+test("image references reserve visual tokens and retain local references through caching and compaction", () => {
+    const attachments = [{ id: "ad4200a2-8a16-4468-9005-c720fc4478cc", type: "image", path: "D:/images/source.png", name: "source.png", mimeType: "image/png", size: 1_000_000,
+        width: 1920, height: 1080, modelPath: "D:/images/model.png", modelMimeType: "image/png", modelSize: 100_000, modelWidth: 1456, modelHeight: 819, modelHash: "a".repeat(64) }];
+    const message = { role: "user" as const, content: "look", attachments };
+    assert(estimateTokens([message]) - estimateTokens([{ role: "user", content: "look" }]) >= 4096);
+    const cached = withCacheBreakpoints([message], [{ type: "text", text: "stable" }]);
+    assert.deepEqual(cached.messages[0], message);
+    const compacted = compactHistory([{ role: "user", content: "older" }, { role: "assistant", content: "reply" }, { role: "user", content: "next" }, { role: "assistant", content: "reply" }, message]);
+    assert.deepEqual(compacted.at(-1), message);
+    const retried = compactHistory([...compacted, { role: "assistant", content: "partial" },
+        { role: "user", content: [{ type: "text", text: "<system-reminder>retry the previous request</system-reminder>" }] },
+        { role: "assistant", content: "partial" }]);
+    assert.deepEqual(retried.at(-1), message, "a hidden retry reminder must not replace the visible image request");
+    assert(!JSON.stringify(compacted).includes("base64"));
+});
 
 const tool = (id: string, name: string, input: Record<string, unknown>) => ({
     role: "assistant" as const,

@@ -1,4 +1,5 @@
 import type { ConversationMessage, ConversationPage } from "../shared/contracts.js";
+import { messageAttachments, type AttachmentMessage } from "../../../src/attachments.js";
 
 export const CONVERSATION_PAGE_SIZE = 40;
 const NO_RUN_IDS = new Map<number, string[]>();
@@ -17,7 +18,9 @@ function visibleMessage(value: unknown, index: number, redact: (text: string) =>
             : [];
     let text = blocks.join("");
     if (message.role === "user") text = text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, " ").trim();
-    return text.trim() ? { id: `history-${index}`, role: message.role, text: redact(text), ...(runIds.has(index) ? { runIds: runIds.get(index) } : {}) } : null;
+    const attachments = messageAttachments(value as AttachmentMessage);
+    return text.trim() || attachments.length ? { id: `history-${index}`, role: message.role, text: redact(text),
+        ...(attachments.length ? { attachments } : {}), ...(runIds.has(index) ? { runIds: runIds.get(index) } : {}) } : null;
 }
 
 export function pageConversationMessages(

@@ -71,6 +71,9 @@ import {
 } from "./worktree-service.js";
 import { WorktreeStore } from "./worktree-store.js";
 import { DesktopServiceError, WorkspaceStore } from "./workspace-store.js";
+import { AttachmentManager } from "./attachment-manager.js";
+import { processAttachmentImage } from "./image-processor.js";
+import type { Attachment } from "../../../src/attachments.js";
 
 interface PendingPermission {
     workspaceId: string;
@@ -528,6 +531,7 @@ function safeDesktopSettingsSnapshot(value: unknown): DesktopSessionSettings | n
 }
 
 export class AgentHost {
+    private readonly attachments = new AttachmentManager(processAttachmentImage);
     private readonly workspaces: WorkspaceStore;
     private readonly settings: SettingsStore;
     private readonly credentials: CredentialStore;
@@ -892,6 +896,7 @@ export class AgentHost {
         store.recoverInterrupted();
         const item = store.load(sessionId);
         if (!item) throw new DesktopServiceError("SESSION_NOT_FOUND", "This conversation could not be found.");
+        void this.attachments.discardOldDrafts(this.workspaces.getPath(workspaceId), sessionId).catch(() => {});
         const key = sessionKey(workspaceId, sessionId);
         this.viewedSessionKey = key;
         const prior = this.sessions.get(key);
@@ -1083,12 +1088,33 @@ export class AgentHost {
         }
     }
 
-    async startRun(workspaceId: string, sessionId: string, text: string, requestId: string): Promise<{ runId: string }> {
+    private attachmentRoot(workspaceId: string, sessionId: string): string {
+        if (!this.storeFor(workspaceId).load(sessionId)) throw new DesktopServiceError("SESSION_NOT_FOUND", "会话不存在，无法添加附件。");
+        return this.workspaces.getPath(workspaceId);
+    }
+
+    addAttachmentPath(workspaceId: string, sessionId: string, path: string): Promise<Attachment> {
+        return this.attachments.addPath(this.attachmentRoot(workspaceId, sessionId), sessionId, path);
+    }
+
+    addAttachmentImage(workspaceId: string, sessionId: string, bytes: Buffer, name?: string): Promise<Attachment> {
+        return this.attachments.addImage(this.attachmentRoot(workspaceId, sessionId), sessionId, bytes, name);
+    }
+
+    removeAttachment(workspaceId: string, sessionId: string, id: string): Promise<void> {
+        return this.attachments.removeDraft(this.attachmentRoot(workspaceId, sessionId), sessionId, id);
+    }
+
+    getAttachmentPreview(workspaceId: string, sessionId: string, id: string, full: boolean): Promise<string> {
+        return this.attachments.preview(this.attachmentRoot(workspaceId, sessionId), sessionId, id, full);
+    }
+
+    async startRun(workspaceId: string, sessionId: string, text: string, requestId: string, attachmentIds: string[] = []): Promise<{ runId: string }> {
         const prompt = text.trim();
-        if (!prompt) throw new DesktopServiceError("EMPTY_MESSAGE", "Write a message before sending it.");
+        if (!prompt && !attachmentIds.length) throw new DesktopServiceError("EMPTY_MESSAGE", "Write a message before sending it.");
         if (prompt.length > 100_000) throw new DesktopServiceError("MESSAGE_TOO_LARGE", "Messages must be shorter than 100,000 characters.");
         return this.runShutdown.trackStart(
-            () => this.startSessionRun(workspaceId, sessionId, requestId, prompt, false),
+            () => this.startSessionRun(workspaceId, sessionId, requestId, prompt || "请查看附件。", false, attachmentIds),
             () => new DesktopServiceError("APP_STOPPING", "Wait for TriumCode to finish stopping its current tasks."),
         );
     }
@@ -1106,6 +1132,7 @@ export class AgentHost {
         requestId: string,
         submittedPrompt: string,
         retryFailedRequest: boolean,
+        attachmentIds: string[] = [],
     ): Promise<{ runId: string }> {
         const priorRunId = this.requestRuns.get(requestId);
         if (priorRunId) return { runId: priorRunId };
@@ -1142,6 +1169,8 @@ export class AgentHost {
             throw new DesktopServiceError("CONCURRENCY_LIMIT", `已达到同时运行上限（${maxParallelRuns} 个任务）。等待一个任务结束后即可重试。`);
         }
 
+        const attachments = retryFailedRequest ? [] : await this.attachments.forSend(runtime.workspaceRoot, sessionId, attachmentIds);
+
         try {
             runtime.releaseRunLease = runtime.store.acquireRun(sessionId, runtime.revision);
         } catch (error) {
@@ -1157,6 +1186,12 @@ export class AgentHost {
             throw error;
         }
 
+        try { await this.attachments.markSent(runtime.workspaceRoot, sessionId, attachments); }
+        catch (error) {
+            runtime.releaseRunLease?.();
+            runtime.releaseRunLease = null;
+            throw error;
+        }
         const runId = randomUUID();
         runtime.currentRunId = runId;
         const messageIndex = findRunMessageIndex(runtime.agent.history(), retryFailedRequest);
@@ -1189,7 +1224,7 @@ export class AgentHost {
         }
 
         runtime.activities = runtime.activities.map((activity) => activity.safeToRetry ? { ...activity, safeToRetry: false } : activity);
-        const task = retryFailedRequest ? runtime.agent.retryFailedTurn(prompt) : runtime.agent.chat(prompt);
+        const task = retryFailedRequest ? runtime.agent.retryFailedTurn(prompt) : runtime.agent.chat(prompt, attachments);
         let finalStatus: NonNullable<SessionData["status"]> = "idle";
         runtime.runPromise = task.then(() => {
             finalStatus = runtime.sessionRevisionConflict ? "failed" : runtime.cancelRequested ? "cancelled" : "idle";

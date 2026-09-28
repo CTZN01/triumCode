@@ -6,6 +6,40 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Agent, type AgentEvent } from "./agent.js";
 import type { PermissionMode } from "./permissions.js";
+import { createHash } from "node:crypto";
+import type { Attachment } from "./attachments.js";
+import { SessionStore, sessionAttachmentDirectory } from "./session.js";
+
+test("image requests survive saved-session reload and safe retry without persisting base64", async () => {
+    const root = mkdtempSync(join(tmpdir(), "triumcode-agent-attachment-"));
+    const bytes = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aBe0AAAAASUVORK5CYII=", "base64");
+    const store = new SessionStore(root);
+    const session = store.create("image-model");
+    const managed = sessionAttachmentDirectory(session.id, root);
+    mkdirSync(managed, { recursive: true });
+    const path = join(managed, "model.png");
+    writeFileSync(path, bytes);
+    const image: Attachment = { id: "ad4200a2-8a16-4468-9005-c720fc4478cc", type: "image", path, modelPath: path, name: "capture.png", mimeType: "image/png", size: bytes.length,
+        width: 1, height: 1, modelWidth: 1, modelHeight: 1, modelMimeType: "image/png", modelSize: bytes.length, modelHash: createHash("sha256").update(bytes).digest("hex") };
+    const api = await fakeApi([(w) => { w(start(0, { type: "text", text: "" })); w(textDelta(0, "image seen")); w(stop(0)); w(finish("end_turn")); }], new Set([0]));
+    const options = { model: "image-model", apiKey: "k", apiBase: api.url, workspaceRoot: root, thinking: false, onEvent: () => {}, sideQuery: async () => "[]" };
+    try {
+        const agent = new Agent(options);
+        await assert.rejects(agent.chat("inspect the image", [image]), /scripted failure/);
+        store.save(session.id, agent.history(), "image-model", session.revision ?? 0);
+        const saved = store.load(session.id)!;
+        assert(!JSON.stringify(saved.messages).includes(bytes.toString("base64")));
+        const resumed = new Agent(options);
+        resumed.loadHistory(saved.messages as ReturnType<Agent["history"]>);
+        await resumed.retryFailedTurn("inspect the image");
+        assert.equal(api.bodies.length, 2);
+        assert.deepEqual(api.bodies[0].messages[0].content[0], api.bodies[1].messages[0].content[0]);
+        assert.equal(api.bodies[1].messages.flatMap((message: { content: Array<{ type: string }> }) => message.content).filter((block: { type: string }) => block.type === "image").length, 1);
+        assert.equal(api.bodies[0].messages[0].content[0].source.data, bytes.toString("base64"));
+        store.delete(session.id);
+        assert(!existsSync(managed), "session deletion cleans up its owned images");
+    } finally { api.close(); store.delete(session.id); rmSync(root, { recursive: true, force: true }); }
+});
 
 // ═══════════════════════════════════════════════════════════════
 // Agent loop behaviour, driven by a scripted SSE endpoint

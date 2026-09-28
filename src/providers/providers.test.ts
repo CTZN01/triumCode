@@ -1,6 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createHash } from "node:crypto";
+import type { Attachment } from "../attachments.js";
 import { Agent } from "../agent.js";
 import { apiRoot, endpoint, PROTOCOLS, parseProtocol, defaultAuthFor, readSse } from "./types.js";
 import {
@@ -454,6 +459,26 @@ test("openai-responses drives the same loop through its typed event log", async 
     assert.match(outputItem.output, /agent\.ts/);
     assert.equal(api.bodies[0].tools[0].parameters.type, "object", "tools stay flat for this API");
 });
+
+for (const protocol of ["openai-chat", "openai-responses"] as const) {
+    test(`${protocol} sends local image bytes through the real Agent HTTP chain`, async () => {
+        const root = mkdtempSync(join(tmpdir(), "triumcode-vision-gateway-"));
+        const bytes = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aBe0AAAAASUVORK5CYII=", "base64");
+        const path = join(root, "model.png");
+        writeFileSync(path, bytes);
+        const image: Attachment = { id: "ad4200a2-8a16-4468-9005-c720fc4478cc", type: "image", path, modelPath: path, name: "capture.png", mimeType: "image/png", size: bytes.length,
+            width: 1, height: 1, modelWidth: 1, modelHeight: 1, modelMimeType: "image/png", modelSize: bytes.length, modelHash: createHash("sha256").update(bytes).digest("hex") };
+        const api = await gateway(protocol, [protocol === "openai-chat" ? chatFinalTurn : responsesFinalTurn]);
+        try {
+            const agent = new Agent({ model: "vision-model", apiKey: "k", apiBase: api.url, protocol, workspaceRoot: root, onEvent: () => {}, sideQuery: async () => "[]" });
+            await agent.chat("see this image", [image]);
+            const content = protocol === "openai-chat" ? api.bodies[0].messages.find((message: { role: string }) => message.role === "user").content : api.bodies[0].input[0].content;
+            const part = content.find((block: { type: string }) => block.type === (protocol === "openai-chat" ? "image_url" : "input_image"));
+            assert.equal(protocol === "openai-chat" ? part.image_url.url : part.image_url, `data:image/png;base64,${bytes.toString("base64")}`);
+            assert(!JSON.stringify(agent.history()).includes(bytes.toString("base64")));
+        } finally { api.close(); rmSync(root, { recursive: true, force: true }); }
+    });
+}
 
 test("a gateway that rejects the reasoning param degrades instead of failing", async () => {
     const { api, output, error } = await runOn(

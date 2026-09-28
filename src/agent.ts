@@ -1,6 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { randomUUID } from "node:crypto";
 import type { FileEditDiff } from "./file-diff.js";
+import { messageAttachments, type Attachment, type AttachmentMessage } from "./attachments.js";
 import { readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import * as os from "node:os";
@@ -1096,8 +1097,8 @@ export class Agent {
             : "Plan approved. Proceed with implementation.";
     }
 
-    async chat(userText: string): Promise<void> {
-        return this.runTurn(userText, true);
+    async chat(userText: string, attachments: Attachment[] = []): Promise<void> {
+        return this.runTurn(userText, true, attachments);
     }
 
     async retryFailedTurn(userText: string): Promise<void> {
@@ -1116,7 +1117,7 @@ export class Agent {
         return this.runTurn(userText, false);
     }
 
-    private async runTurn(userText: string, appendUserMessage: boolean): Promise<void> {
+    private async runTurn(userText: string, appendUserMessage: boolean, attachments: Attachment[] = []): Promise<void> {
         this.turnToolUseSeen = false;
         // Normal requests carry volatile context — git state, the date and
         // deferred-tool availability — in the new user message. A safe retry
@@ -1124,10 +1125,12 @@ export class Agent {
         // hidden system reminder instead.
         if (appendUserMessage) {
             const reminder = buildTurnContextReminder(this.workspaceRoot);
-            this.messages.push({
+            const message: AttachmentMessage = {
                 role: "user",
                 content: [{ type: "text", text: `${reminder}\n\n${userText}` }],
-            });
+                ...(attachments.length ? { attachments } : {}),
+            };
+            this.messages.push(message);
             this.checkpoint();
         }
         this.emit({ type: "turn.started", userText });
@@ -1333,6 +1336,8 @@ export class Agent {
             const context: ToolContext = {
                 readFileState: this.readFileState,
                 workspaceRoot: this.workspaceRoot,
+                attachmentReadPaths: new Set(this.messages.flatMap(message => messageAttachments(message))
+                    .filter(attachment => attachment.type !== "image").map(attachment => attachment.path)),
                 signal: this.abortController?.signal,
                 askUser: this.onAskUser,
                 permissionPolicy: this.permissionPolicy,

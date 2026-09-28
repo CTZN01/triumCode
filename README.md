@@ -61,13 +61,32 @@ The composer groups model selection with a five-step reasoning slider on the rig
 On the left, it offers per-conversation permission choices (confirm operations,
 accept file edits, or full access without approval except explicit deny rules).
 A permission change applies immediately, including while a task is running, and
-takes effect for the operations that follow; it persists after restart. The composer also has
-a file picker for up to
-four UTF-8 text files (50 KB each, 70 KB total). Selected file contents are
-included in the next message; binary files and images are not yet supported.
+takes effect for the operations that follow; it persists after restart.
+The composer accepts up to eight attachments per message through image paste (Ctrl+V),
+drag and drop, or the file picker. Ordinary text paste works as usual. Images show
+removable thumbnails; click a draft or sent thumbnail to view the original image.
+PNG, JPG/JPEG and WebP are supported. Original images are limited to 20 MiB;
+a separate model copy is scaled to at most 1568 pixels per edge and about 1.2 megapixels,
+and limited to 4 MiB. The original is preserved. All three protocols send actual visual
+inputs, so the selected model/gateway must support images.
+Code, text, logs, JSON and Markdown remain local file references; project files are
+neither copied nor inserted into the message. The Agent searches and reads relevant
+line ranges on demand.
+Read/search access to explicitly attached external text files is limited to those
+exact files; adding an attachment does not grant write access outside the workspace.
+PDF and Office attachments currently send references with an explicit notice;
+there is no built-in document parser or provider file upload.
+Sessions store attachment metadata, never image base64. Image snapshots and their
+model copies stay fixed across retries and reopening a conversation, keeping history
+prefixes stable. Image inputs still consume visual tokens; thumbnails never enter
+model context, and attachments do not change the static system prompt. Removing a
+draft cleans up its managed copies, abandoned drafts expire after 24 hours when the
+conversation is opened, and deleting a conversation removes its owned attachments
+without deleting referenced source files. Missing files, invalid images and rejected
+vision requests report errors.
 For tasks that need tools, the Agent first sends a brief progress message before calling them.
 The active Agent status and concise progress updates appear in the conversation while a task runs, with
-`thinking` shown during model reasoning. Recent tool calls appear between progress messages with their original tool names and file, pattern, or command arguments in muted text. Completed edits show green additions and red deletions; expand edit_file or multi_edit to view the fixed diff captured from that call's actual before/after contents, including its net line counts and colored code. Each multi_edit shows the whole batch's net changes. Expanded edits use compact file cards with syntax highlighting, one line-number gutter, red/green change rows, and a copy button; raw arguments, output, and permission details are folded under Call details. Records without a historical patch can show the tool's saved, highlighted post-edit snippet, clearly labeled as a snippet. Later edits, staging, and commits do not alter this history; old records without a captured patch say so explicitly. Patches stay with the latest 200 saved activity records, are limited to 64 KiB each, and do not enter model context. The right panel separately shows cumulative run and current Git changes, respecting Git's configured line-ending handling. Expand the list for older calls and each call for approval details. The
+`thinking` shown during model reasoning. The same status indicator stays mounted from startup through streaming and tool execution, with a continuous left-to-right highlight that respects reduced-motion preferences. Recent tool calls appear between progress messages with their original tool names and file, pattern, or command arguments in muted text. Completed edits show green additions and red deletions; expand edit_file or multi_edit to view the fixed diff captured from that call's actual before/after contents, including its net line counts and colored code. Each multi_edit shows the whole batch's net changes. Expanded edits use compact file cards with syntax highlighting, one line-number gutter, red/green change rows, and a copy button; raw arguments, output, and permission details are folded under Call details. Records without a historical patch can show the tool's saved, highlighted post-edit snippet, clearly labeled as a snippet. Later edits, staging, and commits do not alter this history; old records without a captured patch say so explicitly. Patches stay with the latest 200 saved activity records, are limited to 64 KiB each, and do not enter model context. The right panel separately shows cumulative run and current Git changes, respecting Git's configured line-ending handling. Expand the list for older calls and each call for approval details. The
 conversation menu provides Rename and Delete actions. Settings has Appearance,
 current-conversation Usage, and Model sections; Appearance includes a saved
 interface text-size choice. Usage is based on tokens reported by the model
@@ -606,7 +625,7 @@ returns to the prompt. **Ctrl+C** twice while idle exits.
 
 | Tool | Description |
 |------|-------------|
-| `read_file` | Read a text file with line numbers. 2000 lines by default; use `offset`/`limit` to page (maximum 5000). Rejects binary files and files larger than 20 MB |
+| `read_file` | Read a text file with line numbers. 2000 lines by default; use `offset`/`limit` to page (maximum 5000). Rejects binary files; files over 20 MiB are streamed in bounded chunks, with oversized lines/output truncated |
 | `write_file` | Write a file atomically (temporary file, then rename) |
 | `edit_file` | Replace an exact, unique string in a file (requires a prior read). Returns the edited region with line numbers, or `replace_all: true` to change every occurrence |
 | `multi_edit` | Apply several edits to one file in a single call; validated together and written once, so a failing edit discards the whole batch |

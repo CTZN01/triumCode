@@ -3,6 +3,7 @@ import { join } from "node:path";
 import * as os from "node:os";
 import { createHash } from "node:crypto";
 import type Anthropic from "@anthropic-ai/sdk";
+import { messageAttachments, attachmentReferenceText } from "./attachments.js";
 import { READ_DEFAULT_LINES } from "./tools.js";
 
 export const TOOL_RESULT_TRUNCATE_THRESHOLD = 50_000;
@@ -132,7 +133,14 @@ function toolResultBlocks(messages: Message[]): Block[] {
 }
 
 export function estimateTokens(value: unknown): number {
-    return Math.ceil(JSON.stringify(value).length / 4);
+    let imageTokens = 0;
+    const json = JSON.stringify(value, (key, item: unknown) => {
+        if (key === "attachments" && Array.isArray(item)) {
+            for (const attachment of item) if (attachment?.type === "image") imageTokens += 4096;
+        }
+        return item;
+    });
+    return Math.ceil(json.length / 4) + imageTokens;
 }
 
 function snippet(message: Message, label: string, text: string): string {
@@ -150,7 +158,7 @@ function toolResultChars(messages: Message[]): number {
  * tool results absorb the whole difference.
  */
 function toolResultBudgetChars(messages: Message[], targetTokens: number): number {
-    const fixedChars = JSON.stringify(messages).length - toolResultChars(messages);
+    const fixedChars = estimateTokens(messages) * 4 - toolResultChars(messages);
     return Math.max(0, targetTokens * 4 - fixedChars);
 }
 
@@ -302,8 +310,13 @@ export function withCacheBreakpoints(messages: Message[], system: Anthropic.Text
 
 export function compactHistory(messages: Message[]): Message[] {
     if (messages.length <= 4) return messages.map((message) => ({ ...message }));
-    const latestUser = [...messages].reverse().find((message) => message.role === "user");
-    const source = messages.slice(0, -1).map((message) => `${message.role}: ${JSON.stringify(message.content)}`).join("\n");
+    const latestUser = [...messages].reverse().find((message) => {
+        if (message.role !== "user") return false;
+        const text = typeof message.content === "string" ? message.content
+            : message.content.filter(block => block.type === "text").map(block => block.text).join("\n");
+        return messageAttachments(message).length > 0 || Boolean(text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, "").trim());
+    });
+    const source = messages.slice(0, -1).map((message) => `${message.role}: ${JSON.stringify(message.content)}${attachmentReferenceText(messageAttachments(message))}`).join("\n");
     const summary = `Conversation summary (local compact):\n${truncateResult(source, 12_000)}`;
     return [{ role: "user", content: summary }, ...(latestUser ? [latestUser] : [])];
 }

@@ -1,6 +1,6 @@
 import {
     readFileSync, writeFileSync, existsSync, readdirSync,
-    unlinkSync, mkdirSync, statSync, renameSync, copyFileSync, openSync, closeSync,
+    unlinkSync, mkdirSync, statSync, renameSync, copyFileSync, openSync, closeSync, rmSync,
 } from "node:fs";
 import { join, resolve, dirname, basename } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
@@ -69,6 +69,11 @@ function projectHash(workspaceRoot?: string): string {
 
 function sessionsDir(workspaceRoot?: string): string {
     return join(SESSIONS_ROOT, projectHash(workspaceRoot));
+}
+
+export function sessionAttachmentDirectory(id: string, workspaceRoot?: string): string {
+    sessionPath(id, workspaceRoot);
+    return join(sessionsDir(workspaceRoot), `${id}.attachments`);
 }
 
 function latestFile(workspaceRoot?: string): string {
@@ -498,7 +503,10 @@ function pruneOldest(workspaceRoot?: string): void {
             const path = join(sessionsDir(workspaceRoot), old.file);
             try {
                 withSessionRunLock(id, path, () => withSessionLock(id, path, () => {
-                    if (readLatest(workspaceRoot) !== id && existsSync(path)) unlinkSync(path);
+                    if (readLatest(workspaceRoot) !== id && existsSync(path)) {
+                        unlinkSync(path);
+                        rmSync(sessionAttachmentDirectory(id, workspaceRoot), { recursive: true, force: true });
+                    }
                 }));
             } catch { /* a busy or damaged old session is kept */ }
         }
@@ -623,6 +631,7 @@ export function deleteSession(id: string, workspaceRoot?: string): boolean {
         return withSessionRunLock(id, p, () => withSessionLock(id, p, () => {
             if (!existsSync(p)) return false;
             unlinkSync(p);
+            rmSync(sessionAttachmentDirectory(id, workspaceRoot), { recursive: true, force: true });
             // The pointer must not be left dangling, or the next save would target
             // a file that no longer exists and silently resurrect it.
             if (readLatest(workspaceRoot) === id) startNewSession(workspaceRoot);

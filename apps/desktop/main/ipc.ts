@@ -6,6 +6,7 @@ import type { WorkspaceWatchService } from "./workspace-watch-service.js";
 import { DesktopServiceError } from "./workspace-store.js";
 import { parseSettings } from "./settings-input.js";
 import type { EffortLevel } from "../../../src/thinking.js";
+import { MAX_ATTACHMENTS, MAX_IMAGE_SOURCE_BYTES } from "../../../src/attachments.js";
 
 interface IpcDependencies {
     host: AgentHost;
@@ -268,12 +269,54 @@ export function registerIpcHandlers({ host, terminals, workspaceWatch, getWindow
         terminalSize(rows, "rows", 200),
     ));
     handle("desktop:terminal-close", (id) => terminals.close(terminalId(id)));
-    handle("desktop:start-run", (workspace, session, text, request) => host.startRun(
+    handle("desktop:attachment-path", (workspace, session, path) => host.addAttachmentPath(
+        workspaceId(workspace), sessionId(session), stringArg(path, "filePath", 4096),
+    ));
+    handle("desktop:attachment-image", (workspace, session, bytes, name) => {
+        if (!(bytes instanceof Uint8Array) || bytes.byteLength > MAX_IMAGE_SOURCE_BYTES) throw new Error("图片不能为空或超过 20 MiB。");
+        return host.addAttachmentImage(workspaceId(workspace), sessionId(session), Buffer.from(bytes), stringArg(name, "fileName", 255));
+    });
+    handle("desktop:attachment-clipboard", async (workspace, session) => {
+        const items = await clipboard.read();
+        for (const item of items) {
+            const mime = item.types.find(type => ["image/png", "image/jpeg", "image/webp"].includes(type));
+            if (!mime) continue;
+            const blob = await item.getType(mime);
+            if (!(blob instanceof Blob) || blob.size > MAX_IMAGE_SOURCE_BYTES) throw new Error("图片不能超过 20 MiB。");
+            return host.addAttachmentImage(workspaceId(workspace), sessionId(session), Buffer.from(await blob.arrayBuffer()), `pasted-image.${mime.split("/")[1]}`);
+        }
+        throw new Error("剪贴板中没有可读取的图片。");
+    });
+    handle("desktop:attachment-choose", async (workspace, session) => {
+        const workspaceValue = workspaceId(workspace);
+        const sessionValue = sessionId(session);
+        const window = getWindow();
+        if (!window) throw new Error("窗口不可用。");
+        const selected = await dialog.showOpenDialog(window, { title: "添加图片或文件", properties: ["openFile", "multiSelections"] });
+        if (selected.canceled) return [];
+        if (selected.filePaths.length > MAX_ATTACHMENTS) throw new Error(`每条消息最多添加 ${MAX_ATTACHMENTS} 个附件。`);
+        const added = [];
+        try {
+            for (const path of selected.filePaths) added.push(await host.addAttachmentPath(workspaceValue, sessionValue, path));
+            return added;
+        } catch (error) {
+            await Promise.all(added.map(attachment => host.removeAttachment(workspaceValue, sessionValue, attachment.id)));
+            throw error;
+        }
+    });
+    handle("desktop:attachment-remove", (workspace, session, id) => host.removeAttachment(workspaceId(workspace), sessionId(session), stringArg(id, "attachmentId", 36)));
+    handle("desktop:attachment-preview", (workspace, session, id, full) => host.getAttachmentPreview(workspaceId(workspace), sessionId(session), stringArg(id, "attachmentId", 36), full === true));
+    handle("desktop:start-run", (workspace, session, text, request, ids = []) => {
+        if (!Array.isArray(ids) || ids.length > MAX_ATTACHMENTS || !ids.every(id => typeof id === "string" && id.length === 36)) throw new Error("附件 ID 列表无效。");
+        if (typeof text !== "string" || text.length > 100_000) throw new Error("消息文本无效或过长。");
+        return host.startRun(
         workspaceId(workspace),
         sessionId(session),
-        stringArg(text, "message", 100_000),
+        text,
         requestId(request),
-    ));
+        ids,
+        );
+    });
     handle("desktop:retry-run", (workspace, session, request) => host.retryRun(
         workspaceId(workspace),
         sessionId(session),

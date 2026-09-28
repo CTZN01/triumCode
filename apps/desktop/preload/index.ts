@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from "electron";
+import { contextBridge, ipcRenderer, webUtils } from "electron";
 import type { DesktopApi, DesktopDialogRequest, DesktopEvent, TerminalEvent, WorkspaceChangedEvent } from "../shared/contracts.js";
 
 const api: DesktopApi = {
@@ -45,7 +45,18 @@ const api: DesktopApi = {
     writeTerminal: (terminalId, data) => ipcRenderer.invoke("desktop:terminal-write", terminalId, data),
     resizeTerminal: (terminalId, cols, rows) => ipcRenderer.invoke("desktop:terminal-resize", terminalId, cols, rows),
     closeTerminal: (terminalId) => ipcRenderer.invoke("desktop:terminal-close", terminalId),
-    startRun: (workspaceId, sessionId, text, requestId) => ipcRenderer.invoke("desktop:start-run", workspaceId, sessionId, text, requestId),
+    addAttachmentFile: async (workspaceId, sessionId, file) => {
+        const path = webUtils.getPathForFile(file);
+        if (path) return ipcRenderer.invoke("desktop:attachment-path", workspaceId, sessionId, path);
+        if (!file.type.startsWith("image/")) throw new Error("无法定位本地文件，请通过附件按钮重新选择。");
+        if (file.size > 20 * 1024 * 1024) throw new Error("图片不能超过 20 MiB。");
+        return ipcRenderer.invoke("desktop:attachment-image", workspaceId, sessionId, new Uint8Array(await file.arrayBuffer()), file.name);
+    },
+    addClipboardImage: (workspaceId, sessionId) => ipcRenderer.invoke("desktop:attachment-clipboard", workspaceId, sessionId),
+    chooseAttachmentFiles: (workspaceId, sessionId) => ipcRenderer.invoke("desktop:attachment-choose", workspaceId, sessionId),
+    removeAttachment: (workspaceId, sessionId, id) => ipcRenderer.invoke("desktop:attachment-remove", workspaceId, sessionId, id),
+    getAttachmentPreview: (workspaceId, sessionId, id, full) => ipcRenderer.invoke("desktop:attachment-preview", workspaceId, sessionId, id, full),
+    startRun: (workspaceId, sessionId, text, requestId, ids) => ipcRenderer.invoke("desktop:start-run", workspaceId, sessionId, text, requestId, ids),
     retryRun: (workspaceId, sessionId, requestId) => ipcRenderer.invoke("desktop:retry-run", workspaceId, sessionId, requestId),
     cancelRun: (runId) => ipcRenderer.invoke("desktop:cancel-run", runId),
     respondToPermission: (requestId, choice) => ipcRenderer.invoke("desktop:permission-response", requestId, choice),

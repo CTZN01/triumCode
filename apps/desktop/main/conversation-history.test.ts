@@ -2,6 +2,14 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { findRunMessageIndex, pageConversationMessages } from "./conversation-history.js";
 
+test("restored attachment-only messages keep references and never expose image data", () => {
+    const attachment = { id: "ad4200a2-8a16-4468-9005-c720fc4478cc", type: "workspace_file", path: "D:/project/code.ts", name: "code.ts", mimeType: "text/plain", size: 900_000 };
+    const page = pageConversationMessages([{ role: "user", content: [{ type: "text", text: "<system-reminder>hidden</system-reminder>" }], attachments: [attachment] }], 1, text => text);
+    assert.equal(page.messages.length, 1);
+    assert.equal(page.messages[0].text, "");
+    assert.deepEqual(page.messages[0].attachments, [attachment]);
+});
+
 test("conversation pages keep stable history ids across hidden tool messages", () => {
     const history = [
         { role: "user", content: "first" },

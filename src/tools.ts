@@ -28,6 +28,7 @@ export interface TodoItem {
 export interface ToolContext {
     readFileState?: ReadFileState;
     workspaceRoot?: string;
+    attachmentReadPaths?: ReadonlySet<string>;
     signal?: AbortSignal;
     askUser?: (question: string, options?: string[]) => Promise<string>;
     permissionPolicy?: import("./permissions.js").PermissionPolicy;
@@ -53,7 +54,7 @@ function isWithin(root: string, target: string): boolean {
 }
 
 /** Resolve an agent-supplied path against the selected desktop workspace. */
-function resolveToolPath(path: string, context: ToolContext): string {
+function resolveToolPath(path: string, context: ToolContext, readAttachment = false): string {
     if (!context.workspaceRoot) return resolve(path);
 
     const root = realpathSync.native(context.workspaceRoot);
@@ -68,7 +69,7 @@ function resolveToolPath(path: string, context: ToolContext): string {
     }
 
     const resolved = resolve(realpathSync.native(probe), ...suffix);
-    if (!isWithin(root, resolved)) {
+    if (!isWithin(root, resolved) && !(readAttachment && context.attachmentReadPaths?.has(resolved))) {
         throw new Error(`Path is outside the selected workspace: ${path}`);
     }
     return resolved;
@@ -255,11 +256,11 @@ export function toolResultLimit(name: string): number {
 // see — so the cap belongs here, where the model can page past it.
 export const READ_DEFAULT_LINES = 2_000;
 const READ_MAX_LINES = 5_000;
-// Past this the file is not something to read into a conversation at all.
+// Larger files are streamed through a bounded window instead of loaded whole.
 const READ_MAX_BYTES = 20 * 1024 * 1024;
 
 type ReadResult =
-    | { ok: true; text: string; start: number; end: number; totalLines: number }
+    | { ok: true; text: string; start: number; end: number; totalLines: number; truncated?: boolean }
     | { ok: false; message: string };
 
 // A binary file decoded as utf-8 is a wall of replacement characters: real
@@ -276,9 +277,58 @@ function wholeNumber(value: unknown, fallback: number): number {
     return Number.isFinite(n) ? n : fallback;
 }
 
+function readLargeTextFile(input: { file_path: string; offset?: number; limit?: number }): ReadResult {
+    const start = Math.max(1, wholeNumber(input.offset, 1));
+    const count = Math.min(Math.max(1, wholeNumber(input.limit, READ_DEFAULT_LINES)), READ_MAX_LINES);
+    const buffer = Buffer.alloc(64 * 1024);
+    const decoder = new StringDecoder("utf8");
+    const selected: string[] = [];
+    let lineNumber = 1;
+    let current = "";
+    let keptChars = 0;
+    let truncated = false;
+    let more = false;
+    let file: number | undefined;
+    try {
+        file = openSync(input.file_path, "r");
+        while (!more) {
+            const bytes = readSync(file, buffer, 0, buffer.length, null);
+            if (lineNumber === 1 && bytes && looksBinary(buffer.subarray(0, bytes))) return { ok: false, message: `Error: ${input.file_path} is a binary file. read_file returns text only.` };
+            const chunk = bytes ? decoder.write(buffer.subarray(0, bytes)) : decoder.end();
+            let position = 0;
+            do {
+                const newline = chunk.indexOf("\n", position);
+                const end = newline < 0 ? chunk.length : newline;
+                if (lineNumber >= start) {
+                    const room = Math.max(0, Math.min(50_000 - current.length, 90_000 - keptChars));
+                    const piece = chunk.slice(position, end);
+                    current += piece.slice(0, room);
+                    keptChars += Math.min(room, piece.length);
+                    if (piece.length > room) truncated = true;
+                }
+                if (newline < 0) break;
+                if (lineNumber >= start) { selected.push(current); current = ""; }
+                lineNumber++;
+                position = newline + 1;
+                if (selected.length >= count) { more = true; break; }
+            } while (position < chunk.length);
+            if (!bytes) { if (lineNumber >= start) selected.push(current); break; }
+        }
+        if (!selected.length) return { ok: false, message: `Error: offset ${start} is past the end of ${input.file_path}, which has ${lineNumber} lines.` };
+        const end = start + selected.length - 1;
+        const width = String(end).length;
+        let text = selected.map((line, index) => `${String(start + index).padStart(width)} | ${line}`).join("\n");
+        if (more) text += `\n\n[lines ${start}-${end}; remaining file not scanned. Continue with offset=${end + 1}.]`;
+        if (truncated) text += "\n[Long lines or the requested range exceeded the text budget. Use grep_search or run_command to narrow the content.]";
+        return { ok: true, text, start, end, totalLines: more ? 0 : lineNumber, truncated };
+    } catch (error) { return { ok: false, message: `Error reading file: ${error instanceof Error ? error.message : String(error)}` }; }
+    finally { if (file !== undefined) closeSync(file); }
+}
+
 function readFileImpl(input: { file_path: string; offset?: number; limit?: number }): ReadResult {
     let buffer: Buffer;
     try {
+        if (statSync(input.file_path).size > READ_MAX_BYTES) return readLargeTextFile(input);
         buffer = readFileSync(input.file_path);
     } catch (e: any) {
         return { ok: false, message: `Error reading file: ${e.message}` };
@@ -286,9 +336,6 @@ function readFileImpl(input: { file_path: string; offset?: number; limit?: numbe
 
     if (looksBinary(buffer)) {
         return { ok: false, message: `Error: ${input.file_path} is a binary file. read_file returns text only — use grep_search to find what you need in it.` };
-    }
-    if (buffer.byteLength > READ_MAX_BYTES) {
-        return { ok: false, message: `Error: ${input.file_path} is ${Math.round(buffer.byteLength / 1_048_576)} MB, too large to read. Use grep_search to find what you need, or read it with offset/limit through run_command.` };
     }
 
     const lines = buffer.toString("utf-8").split("\n");
@@ -335,18 +382,18 @@ const readFileTool = register({
     maxResultSizeChars: 100_000,
 
     async call(input, ctx) {
-        const filePath = resolveToolPath(String(input.file_path ?? ""), ctx);
+        const filePath = resolveToolPath(String(input.file_path ?? ""), ctx, true);
         const result = readFileImpl({ ...(input as { file_path: string; offset?: number; limit?: number }), file_path: filePath });
         if (!result.ok) return result.message;
 
         const absPath = filePath;
         const range: [number, number] = [result.start, result.end];
 
-        if (ctx.readFileState && alreadyShown(absPath, ctx.readFileState, range, result.totalLines)) {
+        if (!result.truncated && ctx.readFileState && alreadyShown(absPath, ctx.readFileState, range, result.totalLines)) {
             return `${input.file_path} is unchanged since you read lines ${result.start}-${result.end} of it, and that content is already above in this conversation. Pass a different offset or limit if you need another part of the file.`;
         }
         if (ctx.readFileState) {
-            recordRead(absPath, ctx.readFileState, range, result.totalLines);
+            recordRead(absPath, ctx.readFileState, result.truncated ? undefined : range, result.totalLines);
         }
         return result.text;
     },
@@ -1205,7 +1252,7 @@ const grepSearchTool = register({
     maxResultSizeChars: 30_000,
 
     async call(input, ctx) {
-        const path = resolveToolPath(String(input.path ?? ""), ctx);
+        const path = resolveToolPath(String(input.path ?? ""), ctx, true);
         return grepSearchImpl({ ...(input as { pattern: string; path: string }), path });
     },
 

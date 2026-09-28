@@ -5,6 +5,19 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getTool, toolResultLimit, type ReadFileState, type TodoItem, type ToolContext } from "./tools.js";
 
+test("explicit external attachments allow exact-file reads and searches while writes and directory access stay confined", async () => {
+    const root = mkdtempSync(join(tmpdir(), "triumcode-attached-read-"));
+    const path = tempFile("external-log.txt", "first\nattachment needle\nthird\n");
+    const ctx: ToolContext = { workspaceRoot: root, attachmentReadPaths: new Set([path]) };
+    assert.match(await getTool("read_file")!.call({ file_path: path, offset: 2, limit: 1 }, ctx), /attachment needle/);
+    assert.match(await getTool("grep_search")!.call({ path, pattern: "needle" }, ctx), /external-log.txt:2:\s*attachment needle/);
+    await assert.rejects(getTool("write_file")!.call({ file_path: path, content: "overwritten" }, ctx), /outside the selected workspace/);
+    await assert.rejects(getTool("grep_search")!.call({ path: tmpdir(), pattern: "needle" }, ctx), /outside the selected workspace/);
+    const other = tempFile("unattached.txt", "private");
+    await assert.rejects(getTool("read_file")!.call({ file_path: other }, ctx), /outside the selected workspace/);
+    assert.match(readFileSync(path, "utf8"), /attachment needle/);
+});
+
 test("edit callbacks capture actual relaxed replacements and only successful writes", async () => {
     const path = tempFile("captured.txt", "before\r\nnext\r\n");
     const edits: Array<[string, string, string]> = [];
@@ -87,6 +100,22 @@ test("read_file refuses a binary file rather than flooding the context", async (
     const path = tempFile("blob.bin", Buffer.from([0x00, 0x01, 0x02, 0x00, 0xff, 0xfe]));
     const result = await tool.call({ file_path: path }, {});
     assert.match(result, /is a binary file/);
+});
+
+test("read_file streams ranges of files over 20 MiB and bounds long lines", async () => {
+    const tool = getTool("read_file")!;
+    const path = tempFile("large-log.txt", "x".repeat(21 * 1024 * 1024) + "\nα\nsecond\nthird\n");
+    const state: ReadFileState = new Map();
+    const range = await tool.call({ file_path: path, offset: 2, limit: 2 }, { readFileState: state });
+    assert.match(range, /2 \| α\n3 \| second/);
+    assert.match(range, /Continue with offset=4/);
+    assert(range.length < 200);
+    assert.match(await tool.call({ file_path: path, offset: 2, limit: 2 }, { readFileState: state }), /unchanged/);
+    const long = await tool.call({ file_path: path, offset: 1, limit: 1 }, { readFileState: state });
+    assert(long.length < 100_000);
+    assert.match(long, /exceeded the text budget/);
+    assert.equal(state.get(path)?.ranges.length, 0, "truncated content must not claim the whole line was shown");
+    assert.match(await tool.call({ file_path: path, offset: 99 }, {}), /^Error: offset 99/);
 });
 
 test("re-reading an unchanged range returns a notice, not the content again", async () => {
