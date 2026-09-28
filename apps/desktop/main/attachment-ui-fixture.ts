@@ -81,6 +81,7 @@ async function run(): Promise<void> {
     dialog.showOpenDialog = (async () => ({ canceled: false, filePaths: [imagePath, textPath] })) as typeof dialog.showOpenDialog;
     await js("document.querySelector('.composer-attach').click()");
     await until("document.querySelectorAll('.composer .attachment-card').length===2 && !document.querySelector('.attachment-loading')");
+    assert(await js<boolean>("document.querySelector('.composer .attachment-list').getBoundingClientRect().bottom <= document.querySelector('.composer textarea').getBoundingClientRect().top"), "attachments render above the composer input");
     const ids = await js<string[]>("Array.from(document.querySelectorAll('.composer .attachment-card')).map(card=>card.dataset.attachmentId)");
     const added = await Promise.all(ids.map(id => host.getAttachmentPreview(workspace.id, session.id, id, false).catch(() => "")));
     assert(added[0].startsWith("data:image/png;base64,"));
@@ -89,15 +90,31 @@ async function run(): Promise<void> {
     assert.equal(textMetadata.type, "workspace_file");
     assert.equal(textMetadata.path, textPath);
     await js("document.querySelector('.composer .attachment-thumbnail').click()");
-    await until("Boolean(document.querySelector('.attachment-preview[open] img'))");
+    await until("Boolean(document.querySelector('.attachment-preview[open] img')) && Boolean(document.querySelector('.attachment-preview-toolbar'))");
+    assert(await js<boolean>("document.querySelector('.attachment-preview').matches(':modal')"), "the preview must open as a modal dialog");
+    assert(await js<boolean>("getComputedStyle(document.querySelector('.attachment-preview'), '::backdrop').backgroundColor!=='rgba(0, 0, 0, 0)'"), "the preview must dim the app behind a backdrop");
+    assert(await js<boolean>("(()=>{const rect=document.querySelector('.attachment-preview-close').getBoundingClientRect();const image=document.querySelector('.attachment-preview img').getBoundingClientRect();return rect.top>40&&document.elementFromPoint(rect.left+rect.width/2,rect.top+rect.height/2)===document.querySelector('.attachment-preview-close')&&image.width>0&&document.elementFromPoint(image.left+image.width/2,image.top+image.height/2).tagName==='IMG'})()"), "the close button clears the native titlebar strip and the image is on top at the centre");
     assert.equal(await js<number>("document.querySelector('.attachment-preview img').naturalWidth"), 640);
+    assert.match(await js<string>("document.querySelector('.attachment-zoom-value').textContent"), /^\d+%$/);
+    await js("document.querySelector('.attachment-actual-size').click()");
+    assert.equal(await js<string>("document.querySelector('.attachment-zoom-value').textContent"), "100%");
+    assert.equal(await js<number>("document.querySelector('.attachment-preview img').getBoundingClientRect().width"), 640, "actual size renders the image at 1:1");
+    await js("document.querySelector('[aria-label=\"放大\"]').click()");
+    assert.equal(await js<string>("document.querySelector('.attachment-zoom-value').textContent"), "110%");
+    await js("document.querySelector('[aria-label=\"缩小\"]').click()");
+    await js("document.querySelector('[aria-label=\"缩小\"]').click()");
+    assert.equal(await js<string>("document.querySelector('.attachment-zoom-value').textContent"), "90%");
+    assert(await js<boolean>("getComputedStyle(document.querySelector('.attachment-preview img')).webkitUserDrag==='none'"), "the preview image is not draggable");
+    assert(await js<boolean>("(()=>{const style=getComputedStyle(document.querySelector('.attachment-preview-close'));return style.opacity==='1'&&parseFloat(style.width)>=32})()"), "the close button stays visible");
     await js("document.querySelector('[aria-label=\"关闭图片预览\"]').click()");
     if (scenario === "cards") {
         for (const theme of ["light", "dark"]) {
             await js(`document.documentElement.dataset.theme=${JSON.stringify(theme)}`);
             await js("new Promise(done=>requestAnimationFrame(()=>requestAnimationFrame(done)))");
             assert.equal(await js<string>("getComputedStyle(document.documentElement).getPropertyValue('--canvas').trim()"), theme === "dark" ? "#181818" : "#ffffff");
-            assert(await js<boolean>("Array.from(document.querySelectorAll('.attachment-card')).every(card=>card.getBoundingClientRect().height>=60 && card.querySelector('strong').getBoundingClientRect().width>40)"));
+            assert(await js<boolean>("Array.from(document.querySelectorAll('.attachment-card')).every(card=>card.getBoundingClientRect().height>=60)"));
+            assert(await js<boolean>("Boolean(document.querySelector('.attachment-card.image .attachment-thumbnail')) && !document.querySelector('.attachment-card.image .attachment-file-name')"), "image cards show only the thumbnail");
+            assert(await js<boolean>("getComputedStyle(document.querySelector('.attachment-card .attachment-remove')).opacity==='0'"), "the remove button is hidden until hover");
             const screenshotDirectory = process.env.TRIUMCODE_ATTACHMENT_SCREENSHOT_DIR ?? directory;
             await mkdir(screenshotDirectory, { recursive: true });
             await writeFile(join(screenshotDirectory, `attachments-${theme}.png`), (await window.webContents.capturePage()).toPNG());
