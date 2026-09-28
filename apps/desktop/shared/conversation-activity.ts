@@ -8,6 +8,19 @@ export function activityLine(activity: SessionActivity): string {
     return `${activityTarget(activity)}${stats ? ` +${stats.added}/-${stats.removed}` : ""}`;
 }
 
+export function editFileName(activity: SessionActivity): string {
+    const path = activity.fileEdit?.path ?? activityInput(activity).file_path;
+    return typeof path === "string" ? path.replaceAll("\\", "/").split("/").at(-1)! : activity.title;
+}
+
+export function editResultSnippet(activity: SessionActivity): Array<{ number: number; text: string }> {
+    if ((activity.title !== "edit_file" && activity.title !== "multi_edit") || !activity.output?.startsWith("Edited ")) return [];
+    return activity.output.split("\n").flatMap((line) => {
+        const match = /^\s*(\d+)\s+\| ?(.*)$/.exec(line);
+        return match ? [{ number: Number(match[1]), text: match[2] }] : [];
+    });
+}
+
 // New records use the captured net change; legacy records retain their tool-reported counts.
 export function editLineStats(activity: SessionActivity): { added: number; removed: number } | null {
     if (activity.title !== "edit_file" && activity.title !== "multi_edit") return null;

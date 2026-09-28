@@ -33,7 +33,8 @@ import { NewWorktreeDialog, WorktreeManagementDialog } from "./NewWorktreeDialog
 import { TaskCenterDialog } from "./TaskCenterDialog.js";
 import { TerminalPanel } from "./TerminalPanel.js";
 import { updateQuestionActivity } from "../shared/question-activity.js";
-import { activityLine, activityTarget, editLineStats, groupConversationActivities, type PlacedActivity } from "../shared/conversation-activity.js";
+import { activityLine, activityTarget, editFileName, editLineStats, editResultSnippet, groupConversationActivities, type PlacedActivity } from "../shared/conversation-activity.js";
+import { codeLanguage, highlightCodeLines } from "../shared/code-highlight.js";
 
 type ActivityRow = PlacedActivity;
 
@@ -403,13 +404,39 @@ function MessageActions({ text, showFeedback }: { text: string; showFeedback: bo
 
 function ActivityEditDiff({ activity }: { activity: SessionActivity }) {
     const edit = activity.fileEdit;
-    if (!edit) return <div className="activity-edit-diff-note">这条旧记录没有保存本次编辑的历史差异。当前文件的累计改动可在右侧代码审阅中查看。</div>;
+    const fileName = editFileName(activity);
+    const stats = editLineStats(activity);
+    const snippet = useMemo(() => edit ? [] : editResultSnippet(activity), [activity, edit]);
+    const code = snippet.map((line) => line.text).join("\n");
+    const highlighted = useMemo(() => highlightCodeLines(code, codeLanguage(fileName)), [code, fileName]);
+    const copyText = edit?.diff || code;
     return <div className="activity-edit-diff">
-        <div className="activity-edit-diff-heading">本次编辑差异{edit.truncated ? "（已截断或超过生成上限）" : ""}</div>
-        {edit.diff ? <DiffViewer diff={edit.diff} /> : <div className="activity-edit-diff-note">{edit.notice ?? "本次调用未产生文本变化。"}</div>}
-        {edit.diff && edit.notice && <div className="activity-edit-diff-note">{edit.notice}</div>}
-        <div className="activity-edit-diff-note">记录本次调用写入前后的变化；后续编辑、暂存或提交不会改变此差异。</div>
+        <div className="activity-edit-diff-heading">
+            <span className="activity-edit-file" title={activityTarget(activity)}>{fileName}</span>
+            {stats && <span className="activity-edit-stats"><span className="activity-edit-added">+{stats.added}</span> <span className="activity-edit-removed">-{stats.removed}</span></span>}
+            {edit?.truncated && <span className="activity-edit-kind">已截断</span>}
+            {copyText && <CopyButton text={copyText} title={edit ? "复制本次差异" : "复制代码片段"} className="activity-copy activity-edit-copy" size={14} />}
+        </div>
+        <div className="activity-edit-code">
+            {edit?.diff ? <DiffViewer diff={edit.diff} compact filePath={edit.path} /> : snippet.length ? <div className="diff-viewer compact-diff" role="group" aria-label="编辑后的代码片段">
+                {snippet.map((line, index) => <div className="diff-line context" key={index}>
+                    <span className="diff-line-number">{line.number}</span>
+                    <span className="diff-line-text"><span className="diff-code" dangerouslySetInnerHTML={{ __html: highlighted[index] }} /></span>
+                </div>)}
+            </div> : <div className="activity-edit-diff-note">{edit?.notice ?? (edit ? "本次调用未产生文本变化。" : "此记录未保存历史差异或代码片段。")}</div>}
+        </div>
+        {edit?.notice && edit.diff && <div className="activity-edit-diff-note">{edit.notice}</div>}
     </div>;
+}
+
+function ActivityOperationDetails({ activity }: { activity: SessionActivity }) {
+    return <>
+        <pre>{activity.detail}</pre>
+        {activity.permissionSource && <div className="activity-policy"><span>策略来源</span><strong>{permissionSourceLabel(activity.permissionSource)}</strong>{activity.permissionDecision && <small>{permissionDecisionLabel(activity.permissionDecision)}</small>}</div>}
+        {permissionOutcomeLabel(activity.permissionOutcome) && <div className="activity-policy outcome"><span>审批结果</span><strong>{permissionOutcomeLabel(activity.permissionOutcome)}</strong></div>}
+        {activity.permissionGrantRevoked && <div className="activity-policy outcome"><span>授权状态</span><strong>已撤销，不再放行后续匹配操作</strong></div>}
+        {activity.output && <div className="activity-output"><div className="activity-output-heading"><span>结果</span><CopyButton text={activity.output} title="复制当前结果" className="activity-copy" size={12} /></div><pre>{activity.output}</pre></div>}
+    </>;
 }
 
 const ActivityGroup = memo(function ActivityGroup({ activities, running, focusId, onFocusHandled }: {
@@ -459,19 +486,15 @@ const ActivityGroup = memo(function ActivityGroup({ activities, running, focusId
             }}>
             <summary>
                 <span className="activity-state-mark">{activity.state === "complete" ? "✓" : activity.state === "denied" || activity.state === "failed" ? "×" : activity.state === "interrupted" ? "!" : activity.state === "running" ? <i /> : "·"}</span>
-                <span className="activity-title" title={activityLine(activity)}>{activityTarget(activity)}</span>
-                {stats && <span className="activity-edit-stats"><span className="activity-edit-added">+{stats.added}</span>/<span className="activity-edit-removed">-{stats.removed}</span></span>}
+                <span className="activity-title" title={activityLine(activity)}>{isEdit ? `${activity.state === "complete" ? "已编辑" : "编辑"} ${editFileName(activity)}` : activityTarget(activity)}</span>
+                {stats && !expandedActivityIds.has(activity.id) && <span className="activity-edit-stats"><span className="activity-edit-added">+{stats.added}</span>/<span className="activity-edit-removed">-{stats.removed}</span></span>}
                 <span className={`activity-state-label ${activity.state}`}>{activity.state === "complete" ? "已完成" : activity.state === "denied" ? "已拒绝" : activity.state === "failed" ? "失败" : activity.state === "interrupted" ? "已取消" : activity.state === "running" ? "运行中" : "提示"}</span>
                 {activity.updatedAt && <time className="activity-time" dateTime={activity.updatedAt}>{activityTime(activity.updatedAt)}</time>}
                 {activity.durationMs !== undefined && <span className="activity-duration">{activity.durationMs < 1000 ? `${activity.durationMs}ms` : `${(activity.durationMs / 1000).toFixed(1)}s`}</span>}
             </summary>
             <div className="activity-detail">
                 {isEdit && (activity.state === "complete" || activity.fileEdit) && expandedActivityIds.has(activity.id) && <ActivityEditDiff activity={activity} />}
-                <pre>{activity.detail}</pre>
-                {activity.permissionSource && <div className="activity-policy"><span>策略来源</span><strong>{permissionSourceLabel(activity.permissionSource)}</strong>{activity.permissionDecision && <small>{permissionDecisionLabel(activity.permissionDecision)}</small>}</div>}
-                {permissionOutcomeLabel(activity.permissionOutcome) && <div className="activity-policy outcome"><span>审批结果</span><strong>{permissionOutcomeLabel(activity.permissionOutcome)}</strong></div>}
-                {activity.permissionGrantRevoked && <div className="activity-policy outcome"><span>授权状态</span><strong>已撤销，不再放行后续匹配操作</strong></div>}
-                {activity.output && <div className="activity-output"><div className="activity-output-heading"><span>结果</span><CopyButton text={activity.output} title="复制当前结果" className="activity-copy" size={12} /></div><pre>{activity.output}</pre></div>}
+                {isEdit ? <details className="activity-technical-details"><summary>调用详情</summary><ActivityOperationDetails activity={activity} /></details> : <ActivityOperationDetails activity={activity} />}
             </div>
         </details>;
         })}{activities.length > 3 && <button type="button" className="chat-activity-more" onClick={() => setShowAll((current) => !current)}>{showAll ? "只看最近 3 项" : `查看其余 ${activities.length - 3} 项`}</button>}</div>}
@@ -2045,7 +2068,7 @@ export function App() {
             </div>
             <div className="sidebar-bottom">
                 <div className="local-status"><span className="online-indicator" /><span>本地 Agent</span><span className="status-dot-separator">·</span><span>{bootstrap ? credentialLabel(bootstrap.credentialState) : ""}</span></div>
-                <button className={`settings-entry ${settingsOpen ? "active" : ""}`} onClick={() => setSettingsOpen(true)} aria-keyshortcuts={commandModifier === "⌘" ? "Meta+," : "Control+,"}><Icon name="settings" size={16} /><span>设置</span><span className="settings-shortcut">{commandModifier} ,</span></button>
+                <button className={`settings-entry ${settingsOpen ? "active" : ""}`} onClick={() => setSettingsOpen(true)} aria-keyshortcuts={commandModifier === "⌘" ? "Meta+," : "Control+,"}><Icon name="settings" size={16} /><span>设置</span></button>
             </div>
         </aside>
 

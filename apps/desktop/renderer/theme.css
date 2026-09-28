@@ -1683,9 +1683,35 @@
 .chat-activity-items .activity-edit-stats { flex: 0 0 auto; font-variant-numeric: tabular-nums; }
 .chat-activity-items .activity-edit-added { color: var(--success); }
 .chat-activity-items .activity-edit-removed { color: var(--danger); }
-.activity-edit-diff { max-height: min(360px, 45vh); margin: 0 0 10px; overflow: auto; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); }
-.activity-edit-diff-heading { position: sticky; top: 0; z-index: 1; padding: 7px 9px; border-bottom: 1px solid var(--border); background: var(--surface); color: var(--text); font-size: 11px; }
-.activity-edit-diff .diff-viewer { font-size: 11px; }
+.activity-edit-diff { margin: 0 0 5px; overflow: hidden; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
+.activity-edit-diff-heading { display: flex; align-items: center; gap: 10px; min-height: 35px; padding: 5px 12px; border-bottom: 1px solid var(--border); background: var(--surface-raised, var(--surface)); color: var(--muted); font-size: calc(12px * var(--font-scale, 1.1)); }
+.activity-edit-file { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.activity-edit-diff-heading .activity-edit-stats { white-space: nowrap; }
+.activity-edit-kind { margin-left: auto; color: var(--muted); font-size: 10px; white-space: nowrap; }
+.activity-edit-copy { margin-left: auto; }
+.activity-edit-kind + .activity-edit-copy { margin-left: 0; }
+.activity-edit-code { max-height: min(340px, 45vh); overflow: auto; }
+.activity-edit-code .diff-viewer { padding: 5px 0; font-size: calc(12px * var(--font-scale, 1.1)); line-height: 1.75; }
+.compact-diff .diff-line { grid-template-columns: 5.5ch minmax(max-content, 1fr); border-left: 3px solid transparent; }
+.compact-diff .diff-line-number { position: sticky; left: 0; z-index: 1; padding: 0 10px 0 5px; border-right: 0 !important; background: var(--surface); }
+.compact-diff .diff-line-text { min-width: 0; padding: 0 12px; }
+.compact-diff .diff-line.addition { border-left-color: var(--success); background: var(--success-bg); }
+.compact-diff .diff-line.deletion { border-left-color: var(--danger); background: var(--danger-bg); }
+.compact-diff .diff-line.addition .diff-line-number { color: var(--success); background: var(--success-bg); }
+.compact-diff .diff-line.deletion .diff-line-number { color: var(--danger); background: var(--danger-bg); }
+.compact-diff .diff-hunk { border-top: 0; }
+.compact-diff .diff-hunk:first-of-type > .diff-hunk-heading { display: none; }
+.compact-diff .diff-hunk:not(:first-of-type) > .diff-hunk-heading { min-height: 20px; padding: 2px 12px; font-size: 10px; }
+.compact-diff .diff-code .hljs-keyword, .compact-diff .diff-code .hljs-type { color: light-dark(#8250df, #c586c0); }
+.compact-diff .diff-code .hljs-string, .compact-diff .diff-code .hljs-regexp { color: light-dark(#116329, #a8d577); }
+.compact-diff .diff-code .hljs-number, .compact-diff .diff-code .hljs-literal { color: light-dark(#0550ae, #b5cea8); }
+.compact-diff .diff-code .hljs-built_in, .compact-diff .diff-code .hljs-title.class_ { color: light-dark(#0969da, #4ec9b0); }
+.compact-diff .diff-code .hljs-title.function_ { color: light-dark(#8250df, #dcdcaa); }
+.compact-diff .diff-code .hljs-attr, .compact-diff .diff-code .hljs-property { color: light-dark(#0550ae, #9cdcfe); }
+.activity-technical-details { margin-top: 3px; }
+.chat-activity-items .activity-technical-details > summary { min-height: 23px; padding: 1px 0; color: var(--muted); font-size: 10px; cursor: pointer; }
+.activity-technical-details > pre { margin: 8px 0; max-height: 130px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--muted); font: 11px/1.6 "Cascadia Code", Consolas, monospace; }
+.chat-activity-items:has(.activity-edit-diff) { max-height: min(540px, 60vh); }
 .activity-edit-diff-note { padding: 6px 9px; color: var(--muted); font-size: 10px; }
 .chat-activity-items .activity-state-label, .chat-activity-items .activity-duration { font-size: 11px; }
 .chat-activity-items .activity-state-label.complete, .chat-activity-items .activity-time { display: none; }

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { activityFilePath, activityLine, editLineStats, groupConversationActivities, type PlacedActivity } from "./conversation-activity.js";
+import { activityFilePath, activityLine, editFileName, editLineStats, editResultSnippet, groupConversationActivities, type PlacedActivity } from "./conversation-activity.js";
 import { createFileEditDiff } from "../../../src/file-diff.js";
 
 test("edit line counts use captured net changes rather than multi_edit intermediate steps", () => {
@@ -15,6 +15,18 @@ test("edit line counts use captured net changes rather than multi_edit intermedi
 
 const activity = (id: string, extra: Partial<PlacedActivity> = {}): PlacedActivity => ({
     id, title: "read_file", detail: "{}", state: "complete", ...extra,
+});
+
+test("legacy edits expose real result snippets without inventing historical deletions", () => {
+    const row = activity("legacy", {
+        title: "edit_file", detail: JSON.stringify({ file_path: "D:\\project\\App.tsx" }),
+        output: 'Edited App.tsx at line 42 (+1/-1 lines)\n\n   41 |   <div>\n   42 |     <span className="label" />\n   43 |   </div>',
+    });
+    assert.equal(editFileName(row), "App.tsx");
+    assert.deepEqual(editResultSnippet(row), [
+        { number: 41, text: "  <div>" }, { number: 42, text: '    <span className="label" />' }, { number: 43, text: "  </div>" },
+    ]);
+    assert.deepEqual(editResultSnippet({ ...row, output: "Error: old_string not found\n   41 | diagnostic" }), []);
 });
 
 test("live activity follows the assistant progress message that preceded it", () => {
